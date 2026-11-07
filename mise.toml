@@ -1,0 +1,56 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+
+min_version = "2026.11.3"
+
+[tools]
+bun = "1.4.4"
+node = "26.13.0"
+hk = "2.11.1"
+"npm:oxlint" = "1.91.0"
+oxfmt = "0.75.0"
+jactionlint = "2.4.0"
+shellcheck = "0.11.0"
+ghalint = "1.6.0"
+pinact = "5.0.2"
+zizmor = "1.32.0"
+tombi = "1.10.0"
+yamlfmt = "0.21.0"
+uv = "0.13.7"
+yamllint = "1.38.0"
+typos = "1.52.0"
+betterleaks = "1.10.0"
+
+[settings]
+lockfile = true
+lockfile_mode = "generate"
+lockfile_platforms = ["linux-x64", "windows-x64"]
+
+[settings.npm]
+package_manager = "bun"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.install]
+description = "Install the exact locked dependencies."
+run = "bun install --frozen-lockfile"
+
+[tasks.typecheck]
+description = "Check TypeScript without emitting files."
+run = "tsc --noEmit"
+
+[tasks.check]
+description = "Run all linters, security checks, and type checking."
+run = "hk check --all --no-progress --no-fail-fast"
+
+[tasks.ci]
+description = "Run the same checks as GitHub Actions."
+depends = ["check"]
+
+[tasks.fix]
+description = "Apply formatter and linter fixes."
+run = "hk fix --all --no-progress --no-fail-fast"
+
+[tasks."hooks:install"]
+description = "Install the local pre-commit hook."
+run = "hk install --mise"

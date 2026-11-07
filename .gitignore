@@ -1,0 +1,17 @@
+node_modules/
+.mise/
+.wrangler/
+.cf/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.eml
+*.mbox
+*.har
+*.log
+data/
+work/

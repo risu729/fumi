@@ -1,0 +1,10 @@
+{
+  "name": "fumi",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@risu729/tsconfigs": "3.0.1",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "bun@1.4.4"
+}

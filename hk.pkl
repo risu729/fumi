@@ -1,0 +1,29 @@
+amends "https://raw.githubusercontent.com/risu729/hk-config/v3.1.0/presets.pkl"
+
+import "https://raw.githubusercontent.com/risu729/hk-config/v3.1.0/helpers.pkl"
+
+steps = (helpers.pick(new Listing {
+  "oxlint"
+  "oxfmt"
+  "github-actions"
+  "tombi"
+  "yaml"
+  "typos"
+  "hygiene"
+  "betterleaks"
+})) {
+  ["typos"] = new Step {
+    check = "typos --force-exclude {{ files }}"
+    fix = "typos --force-exclude --write-changes {{ files }}"
+  }
+}
+
+hooks {
+  ["check"] {
+    steps {
+      ["typecheck"] = new Step {
+        check = "mise run typecheck"
+      }
+    }
+  }
+}
