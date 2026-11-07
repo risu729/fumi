@@ -28,7 +28,8 @@ production acceptance is separate. Unchecked items remain future work.
 - [x] Establish payload-free application logs, observability and manual recovery.
 - [ ] Configure alert delivery and an explicit retention/deletion policy beyond
       the initial keep-all behavior.
-- [ ] Complete and record staged production acceptance before broader cutover.
+- [x] Complete and record staged production acceptance for selected routes.
+- [ ] Extend capture to remaining routes after checking specialist compatibility.
 
 See the [ingress implementation and runbook](ingress.md). Private route inventory,
 rollback snapshots and real-message acceptance evidence stay outside this public repo.

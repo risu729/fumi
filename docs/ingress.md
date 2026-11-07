@@ -49,6 +49,9 @@ include email-event envelope metadata; restrict access to the Cloudflare account
    stored bytes privately, compare the stored size and SHA-256, and verify decoded
    attachment bytes against the test payload. Inspect the forwarding receipt and
    the destination independently. Do not publish real messages as fixtures.
+   Route activation can lag API readback: require the received message's fresh
+   `X-Fumi-Ingest-ID` to match the stored receipt. Record the propagation window
+   for later gap reconciliation; an earlier message may use the old route.
 5. Move one selected ordinary route only after acceptance. Re-read the route and
    test it again. Keep the other domain and specialist routes unchanged until
    they have their own acceptance evidence.
@@ -87,6 +90,27 @@ Actions secret, not source or logs.
 The manual production deployment workflow builds and checks the selected main
 commit before deployment. Deploying code does not certify that Email Routing,
 Gmail delivery or archival succeeded; record their acceptance separately.
+
+## Staged production acceptance: 2026-11-07
+
+The initial runtime in [PR #7](https://github.com/risu729/fumi/pull/7) was deployed,
+then [deployed through GitHub Actions](https://github.com/risu729/fumi/actions/runs/42345219531)
+using the account-owned token scoped to this Worker. The deployed version was
+read back at 100 percent traffic. The R2 bucket's public access and the Worker's
+`workers.dev` and preview URLs were confirmed disabled.
+
+A dedicated test route and one domain's catch-all route were each verified with
+controlled Gmail messages containing Japanese text and a binary attachment.
+Separate received Inbox messages contained fresh ingestion IDs matching their
+private R2 receipts. Downloaded originals matched the recorded size and SHA-256;
+decoded binary attachment bytes matched the test input. Other-domain routes,
+including specialist Workers, were read back unchanged. Private route snapshots,
+rollback data, raw messages and detailed acceptance evidence are retained outside
+the repository.
+
+This proves the tested live path. It does not establish automatic archive-gap
+reconciliation, alert delivery, concurrent maximum-size memory behavior, or
+coverage of routes that were not migrated. Those remain explicit follow-up work.
 
 ## Primary references
 
