@@ -1,0 +1,55 @@
+name: Deploy
+on:
+  workflow_dispatch:
+permissions: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  deploy:
+    name: Deploy Worker
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install locked tools
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.3
+          install_args: --locked
+          cache: "false"
+      - name: Install dependencies
+        run: mise run install
+      - name: Check repository
+        run: mise run ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Deploy the checked Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ -z "${CLOUDFLARE_API_TOKEN}" || -z "${CLOUDFLARE_ACCOUNT_ID}" ]]; then
+            echo '::error::Configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID before deploying.'
+            exit 1
+          fi
+          mise run deploy
+      - name: Record the deployed commit
+        run: |-
+          {
+            printf '### Worker deployment\n\n'
+            printf 'Commit: %s\n\n' "${GITHUB_SHA}"
+            printf 'Run: %s/%s/actions/runs/%s\n\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf 'The deploy command succeeded. Email routes and message delivery require separate verification.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"

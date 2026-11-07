@@ -1,7 +1,8 @@
 # Roadmap
 
-Status: proposed implementation plan, 2026-11-07. Only phase 0 is implemented.
-Items below are future tasks, not a deployment commitment or completed behavior.
+Status: development foundation and initial phase-1 runtime implemented,
+2026-11-07. Checked items describe completed implementation or preparation;
+production acceptance is separate. Unchecked items remain future work.
 
 ## Phase 0: development foundation
 
@@ -12,18 +13,25 @@ Items below are future tasks, not a deployment commitment or completed behavior.
 
 ## Phase 1: preserve delivery and capture new mail
 
-- [ ] Inventory existing Email Routing routes, verified Gmail destinations, loops,
+- [x] Inventory existing Email Routing routes, verified Gmail destinations, loops,
       and specialist Workers; design a staged cutover and rollback.
-- [ ] Add the cf configuration and generated runtime types; locally test the email
+- [x] Add the cf configuration and generated runtime types; locally test the email
       handler before enabling any route. No placeholder production resources.
-- [ ] Preserve Gmail forwarding while storing original MIME bytes in private R2.
-- [ ] Record envelope metadata, content hash, original size, ingestion source,
+- [x] Implement Gmail forwarding and original MIME capture in private R2.
+- [x] Record envelope metadata, content hash, original size, ingress provenance,
       durable ingest status and forwarding outcome independently.
-- [ ] Specify duplicate handling and recovery for partial R2/D1/Queue/forwarding
-      failures. Monitor archive gaps and reconcile them from Gmail.
-- [ ] Bound memory and MIME sizes; test streaming length, timeouts, oversized mail,
+- [x] Specify duplicate handling and partial R2/receipt/forwarding failure recovery.
+      D1 and Queue failure handling belongs to their later implementation.
+- [ ] Automate archive-gap monitoring and reconciliation from Gmail.
+- [x] Bound memory and MIME sizes; test actual length, capture timeouts, oversized mail,
       malformed MIME, duplicate deliveries, and forwarding loops.
-- [ ] Establish payload-free logs/traces, alerting, retention and recovery procedures.
+- [x] Establish payload-free application logs, observability and manual recovery.
+- [ ] Configure alert delivery and an explicit retention/deletion policy beyond
+      the initial keep-all behavior.
+- [ ] Complete and record staged production acceptance before broader cutover.
+
+See the [ingress implementation and runbook](ingress.md). Private route inventory,
+rollback snapshots and real-message acceptance evidence stay outside this public repo.
 
 Done when: controlled messages arrive in Gmail and have byte-verified R2 originals;
 failure tests demonstrate an observable recovery path. Local tests alone do not
@@ -51,6 +59,9 @@ establish production delivery.
 
 ## Phase 2B: routing and selective model use (parallel with 2A)
 
+- [ ] Revisit the selected CEL language before implementation: choose and pin a
+      Workers-compatible evaluator, test the supported subset and resource limits,
+      and confirm the owner-maintained plugin contract.
 - [ ] Port private inbox policy as private configuration; retain rule precedence,
       thread deduplication, acknowledgements/case-state checks and urgent escalation.
 - [ ] Define a plugin manifest and adoption contract. Integration owners publish

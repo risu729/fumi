@@ -1,8 +1,11 @@
 # Architecture proposal
 
-Status: implementation proposal with selected decisions, 2026-11-07.
-Cloudflare Email Sending and Valibot are selected; no application runtime has
-been implemented.
+Status: initial R2 capture and Gmail forwarding implemented, 2026-11-07; the
+remaining flow is an implementation proposal. The first slice uses R2 originals
+and private receipt sidecars. D1, Queues, reconciliation and downstream processing
+remain future work. See the [ingress runbook](ingress.md).
+Cloudflare Email Sending, Valibot and CEL are selected for later stages; revisit
+the CEL evaluator and limits before implementing routing.
 
 ## Data flow
 
@@ -37,6 +40,8 @@ single long synchronous workflow.
 ## Capture and recovery
 
 Keep the email handler small: archive bytes, record receipt, preserve forwarding.
+The initial implementation records receipts in R2; the D1/outbox design below is
+for the later processing stages.
 Do not run model inference, extraction or decryption on the SMTP path. Forwarding
 and R2/D1/Queue writes are separate operations, not one transaction. The initial
 policy prioritizes existing Gmail delivery when archival fails, with alerts and

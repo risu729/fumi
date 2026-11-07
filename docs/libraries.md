@@ -1,8 +1,9 @@
 # Library and service evaluation
 
 Status: selected decisions and proposals checked against primary sources on
-2026-11-07. Valibot and Cloudflare Email Sending are selected. Only the development
-toolchain is installed; no runtime dependencies or adapters are implemented yet.
+2026-11-07. Valibot, Cloudflare Email Sending and CEL are selected for later
+stages. The initial R2/Gmail handler uses native platform APIs with no third-party
+application dependencies; the cf build and Workers runtime tests are installed.
 
 ## Installed foundation
 
@@ -19,8 +20,8 @@ installer and monorepo-specific checks are not copied.
 
 | Area                      | First candidate                   | Why / adoption gate                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workers toolchain         | `cf` and native configuration     | Matches Pateat's new configuration; pin a tested release when adding the first handler. See [cf agents guide](https://developers.cloudflare.com/cf/agents/).                                                                                                                                                                                                    |
-| Runtime tests             | Vitest + Cloudflare Vitest plugin | Exercise Email/R2/Queue behavior in the Workers runtime; add when behavior exists. [Testing guide](https://developers.cloudflare.com/workers/testing/vitest-integration/).                                                                                                                                                                                      |
+| Workers toolchain         | `cf` and native configuration     | Installed: cf 1.0.0-beta.28 with native TypeScript configuration, following Pateat. See [cf agents guide](https://developers.cloudflare.com/cf/agents/).                                                                                                                                                                                                        |
+| Runtime tests             | Vitest + Cloudflare Vitest plugin | Installed: Vitest 5.1.0 and Cloudflare Vitest plugin 1.6.0 exercise the handler and R2 in the Workers runtime. SMTP forwarding acceptance is verified separately. [Testing guide](https://developers.cloudflare.com/workers/testing/vitest-integration/).                                                                                                       |
 | MIME                      | `postal-mime`                     | Workers-oriented MIME/attachment parser; set nesting/header/input limits and run asynchronously. [Upstream](https://github.com/postalsys/postal-mime).                                                                                                                                                                                                          |
 | HTTP API                  | Hono + @hono/standard-validator   | Follow the current Pateat pattern with a schema-neutral wrapper. Keep native email/queue handlers separate. [Integration policy](schema-boundaries.md).                                                                                                                                                                                                         |
 | Runtime schemas           | Valibot + Standard Schema         | Selected: Valibot authoring, Standard Schema validation boundaries, and explicit Standard JSON Schema conversion for MCP/model APIs. [Integration policy](schema-boundaries.md).                                                                                                                                                                                |
@@ -39,7 +40,10 @@ Buf's ECMAScript package below is an independent implementation, not Google's
 TypeScript SDK. [Google announcement](https://opensource.googleblog.com/2026/06/cel-finds-a-new-home-at-githubcomcel-expr.html),
 [official implementations](https://cel.dev/reference/api-reference).
 
-**Recommend evaluating CEL first.** It expresses typed predicates with familiar
+**CEL is selected, subject to a review before routing implementation.** The
+language choice is provisional until the evaluator, supported subset, resource
+limits and owner-plugin contract pass the gates below. No CEL runtime is installed
+in the initial R2 sink. It expresses typed predicates with familiar
 operators and separates matching from privileged actions. A manifest can carry
 an upstream-owned expression such as this synthetic candidate selector:
 

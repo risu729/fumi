@@ -1,10 +1,11 @@
 # Agent instructions
 
 - Use English in repository prose, code, commits, and pull requests.
-- This repository currently contains development tooling and proposals only.
-  Do not describe planned features as implemented or tested.
-- Keep the scope of a task explicit. Creating this scaffold does not authorize
+- The initial runtime captures raw MIME in private R2 and preserves Gmail
+  forwarding. Keep future features distinct from implemented and tested behavior.
+- Keep the scope of a task explicit. Code changes alone do not authorize
   deploying Workers, changing email routes, backfilling real mail, or sending mail.
+  Honor explicit authorization already given in the active task.
 - Run `mise run fix` and `mise run ci` before pushing changes. Use the locked tools.
 - Keep tasks in mise rather than package.json scripts. Keep CI actions SHA-pinned.
 - Use synthetic fixtures. Never commit messages, attachments, passwords, recipient
@@ -14,5 +15,6 @@
 - Keep implementation status and proposed decisions separate in docs.
 - Obtain an independent agent review before merging a pull request. Do not bypass
   failing checks or weaken them to pass.
-- When interacting with Cloudflare, use the cf CLI unless the project has a
-  Wrangler configuration file. No Cloudflare resources are configured yet.
+- Use the locked cf CLI and native cloudflare.config.ts configuration.
+- Keep production route snapshots and acceptance evidence private. A passing
+  test or deployment does not prove Gmail receipt or R2 production capture.

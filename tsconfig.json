@@ -3,7 +3,13 @@
   "compilerOptions": {
     "incremental": false,
     "lib": ["ESNext"],
-    "types": []
+    "types": ["@cloudflare/vitest-plugin/types"]
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "*.config.ts",
+    "worker-runtime.ts",
+    ".cloudflare/types"
+  ]
 }
