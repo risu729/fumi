@@ -23,6 +23,9 @@ production acceptance is separate. Unchecked items remain future work.
 - [x] Specify duplicate handling and partial R2/receipt/forwarding failure recovery.
       D1 and Queue failure handling belongs to their later implementation.
 - [ ] Automate archive-gap monitoring and reconciliation from Gmail.
+- [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler;
+      production database migration and Cron activation remain pending. This repairs the
+      catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
 - [x] Bound memory and MIME sizes; test actual length, capture timeouts, oversized mail,
       malformed MIME, duplicate deliveries, and forwarding loops.
 - [x] Establish payload-free application logs, observability and manual recovery.

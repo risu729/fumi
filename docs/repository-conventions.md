@@ -53,12 +53,14 @@ Production remains manually dispatched during staged mail migration. Automatic
 push deployment is a separate operational choice. PRs only validate locally:
 there is no preview mailbox or production-data binding exposed to a preview.
 
-There is no database migration, Container rollout, multi-Worker release ledger,
-extension packaging, browser suite, package release or release attestation in
-this single-Worker slice. Those checks belong to the corresponding products in
-Pateat, Kogane or Kuebiko. No cross-job artifact transfer is needed for the deploy
-job because its checks, build, native email test, validation and publication use
-the same checkout and build output.
+The archive catalog migration is exercised against local D1 in CI; applying it to
+production is a separate step in the [catalog runbook](archive-catalog.md). There is no
+automatic remote database migration, Container rollout, multi-Worker release ledger,
+extension packaging, browser suite, package release or release attestation in this
+single-Worker slice. Those checks belong to the corresponding products in Pateat, Kogane
+or Kuebiko. No cross-job artifact transfer is needed for the deploy job because its
+checks, build, native email test, validation and publication use the same checkout and
+build output.
 
 Branch protection is separate GitHub repository configuration, not a workflow file. The
 aligned default-branch ruleset requires pull requests, the GitHub Actions `CI Check`,

@@ -1,29 +1,12 @@
 // This is an archive-and-forward ingress only. Message content cannot choose actions.
 import { MAX_RAW_BYTES, CAPTURE_TIMEOUT_MS } from "./limits.ts";
+import { reconcileArchive } from "./reconcile.ts";
+import type { ArchiveReceipt } from "./receipt-schema.ts";
 
-type ArchiveFailure =
-  | "invalid_size"
-  | "oversize"
-  | "size_mismatch"
-  | "read_failed"
-  | "capture_timeout"
-  | "raw_write_failed";
-type ArchiveOutcome =
-  | { status: "stored"; key: string; size: number; sha256: string }
-  | { status: "failed"; code: ArchiveFailure };
-type ForwardOutcome =
-  | { status: "forwarded" }
-  | { status: "failed"; code: "invalid_target" | "forward_failed" };
-
-export interface Receipt {
-  schemaVersion: 1;
-  ingestId: string;
-  receivedAt: string;
-  envelope: { from: string; to: string };
-  reportedRawSize: number | null;
-  archive: ArchiveOutcome;
-  forward: ForwardOutcome;
-}
+export type Receipt = ArchiveReceipt;
+type ArchiveOutcome = Receipt["archive"];
+type ArchiveFailure = Extract<ArchiveOutcome, { status: "failed" }>["code"];
+type ForwardOutcome = Receipt["forward"];
 
 class CaptureError extends Error {
   readonly code: ArchiveFailure;
@@ -119,6 +102,16 @@ async function forward(
 }
 
 export default {
+  async scheduled(_controller, env): Promise<void> {
+    try {
+      const result = await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+      console.log(JSON.stringify({ event: "archive_reconcile", ...result }));
+    } catch {
+      // Storage errors can include private keys or SQL parameters. Log only a fixed code.
+      console.error(JSON.stringify({ event: "archive_reconcile", status: "failed" }));
+      throw new Error("Archive reconciliation did not complete");
+    }
+  },
   async email(message, env): Promise<void> {
     const ingestId = crypto.randomUUID();
     const receivedAt = new Date().toISOString();

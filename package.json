@@ -2,6 +2,9 @@
   "name": "fumi",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "valibot": "1.5.0"
+  },
   "devDependencies": {
     "@cloudflare/vite-plugin": "2.0.0-beta.v.12",
     "@cloudflare/vitest-plugin": "1.6.0",

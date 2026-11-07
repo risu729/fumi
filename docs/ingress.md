@@ -27,7 +27,9 @@ The original and receipt are separate R2 writes. A stored original with a missin
 receipt is an orphan to reconcile, not proof that forwarding failed. A receipt
 with a missing original is an archive gap. R2 outage and invocation termination
 can prevent both records; payload-free logs and Gmail are the recovery sources.
-There is no automatic reconciler or alert destination in this slice.
+The separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from
+remaining R2 evidence; its production activation is pending. It cannot restore
+missing originals from Gmail, and no alert destination is configured.
 
 Use a private R2 bucket: no r2.dev public access, no public custom domain, and no
 HTTP endpoint serving messages. Keep envelope addresses and forwarding settings

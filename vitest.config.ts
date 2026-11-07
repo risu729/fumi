@@ -1,4 +1,4 @@
-import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -6,7 +6,12 @@ export default defineConfig({
     cloudflareTest({
       config: "./cloudflare.config.ts",
       remoteBindings: false,
-      miniflare: { bindings: { FORWARD_TO: "synthetic-forward@gmail.com" } },
+      miniflare: {
+        bindings: {
+          FORWARD_TO: "synthetic-forward@gmail.com",
+          TEST_MIGRATIONS: await readD1Migrations("migrations"),
+        },
+      },
     }),
   ],
   test: { include: ["test/**/*.test.ts"] },

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { Miniflare } from "miniflare";
+import { readD1Migrations } from "@cloudflare/vitest-plugin";
 
-// Execute the built production bundle with native workerd email events and local R2.
+// Execute the built production bundle with native workerd Email/Cron events and local R2/D1.
 // Miniflare simulates forwarding; this never sends SMTP or uses provisioned storage.
 const output = ".cloudflare/output/v0/workers/default";
 const config = JSON.parse(await readFile(`${output}/worker.config.json`, "utf8"));
@@ -65,7 +66,22 @@ try {
     from: "envelope@example.invalid",
     to: "bcc@example.invalid",
   });
-  console.log("Native email event and built artifact: passed");
+  // Email delivery above succeeds even before the catalog schema exists.
+  const catalog = await runtime.getD1Database("MAIL_CATALOG");
+  const migrations = await readD1Migrations("migrations");
+  for (const migration of migrations) {
+    // oxlint-disable-next-line no-await-in-loop -- Migrations must run in order.
+    await catalog.batch(migration.queries.map((query) => catalog.prepare(query)));
+  }
+  const scan = await runtime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/scheduled?cron=*/5%20*%20*%20*%20*&format=json",
+  );
+  const scanResult = await scan.json();
+  assert.equal(scan.status, 200, JSON.stringify(scanResult));
+  assert.equal(scanResult.outcome, "ok");
+  const rows = await catalog.prepare("SELECT COUNT(*) AS count FROM archive_sources").first();
+  assert.equal(rows.count, 1);
+  console.log("Native Email/Cron events, R2/D1 and built artifact: passed");
 } finally {
   await runtime.dispose();
 }
