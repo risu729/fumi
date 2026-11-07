@@ -37,7 +37,34 @@ run = "bun install --frozen-lockfile"
 
 [tasks.typecheck]
 description = "Check TypeScript without emitting files."
+depends = ["types"]
 run = "tsc --noEmit"
+
+[tasks.types]
+description = "Generate binding and runtime types from native Cloudflare configuration."
+run = "cf workers types"
+
+[tasks.build]
+description = "Build the Worker using the pinned Cloudflare toolchain."
+run = "cf build --mode production"
+
+[tasks.test]
+description = "Run synthetic Email/R2 tests inside the local Workers runtime."
+run = "vitest run"
+
+[tasks."check:output"]
+description = "Validate production Build Output without contacting deployed resources."
+depends = ["build"]
+run = "cf deploy --prebuilt --mode production --dry-run"
+
+[tasks."test:artifact"]
+description = "Run a native synthetic Email event against the built bundle and local R2."
+depends = ["build"]
+run = "node test/artifact.mjs"
+
+[tasks.deploy]
+description = "Deploy the built Worker without modifying Email Routing rules."
+run = "cf deploy --prebuilt --mode production --no-provision"
 
 [tasks.check]
 description = "Run all linters, security checks, and type checking."
@@ -45,7 +72,7 @@ run = "hk check --all --no-progress --no-fail-fast"
 
 [tasks.ci]
 description = "Run the same checks as GitHub Actions."
-depends = ["check"]
+depends = ["check", "test", "test:artifact", "check:output"]
 
 [tasks.fix]
 description = "Apply formatter and linter fixes."

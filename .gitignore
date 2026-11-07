@@ -4,6 +4,7 @@ node_modules/
 !.mise/locks/**
 .wrangler/
 .cf/
+.cloudflare/
 dist/
 coverage/
 *.tsbuildinfo

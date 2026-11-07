@@ -1,12 +1,14 @@
 # fumi
 
-A planned Cloudflare Workers email archive and routing service. The name comes
+A Cloudflare Workers email archive and routing service. The name comes
 from _fumi_ (a letter or written message).
 
-**Status: development foundation only.** There is no email handler, deployed
-Worker, storage binding, backfill job, search service, or webhook delivery yet.
-The TypeScript entry point is intentionally empty. No production route changes
-are part of this repository bootstrap.
+**Status: initial email capture implemented.** The Email Worker preserves Gmail
+forwarding, archives original MIME bytes and private receipts in R2, and records
+archive and forwarding outcomes independently. Runtime tests use synthetic mail.
+Backfill, search, plugin routing, model classification, webhooks and outbound MCP
+are planned. See the [ingress runbook](docs/ingress.md) for deployment, acceptance
+and recovery; a deployed Worker alone does not establish production delivery.
 
 ## Direction
 
@@ -21,10 +23,11 @@ and [library evaluation](docs/libraries.md). See also the
 [existing Cloudflare mail projects](docs/existing-projects.md) and
 [outbound MCP proposal](docs/outbound-mcp.md).
 
-Selected decisions: Cloudflare Email Sending for outbound mail and Valibot with
-Standard Schema integration boundaries for runtime validation. Backfill includes historical Gmail SENT messages; ongoing
-Gmail Sent synchronization is out of scope. These decisions are recorded, not
-implemented yet. Other runtime choices remain proposals.
+Selected decisions: Cloudflare Email Sending for outbound mail, Valibot with
+Standard Schema integration boundaries, and CEL for rules. Revisit the CEL
+evaluator and safety limits before implementing routing. These future adapters
+are not installed in the R2 sink. Backfill includes historical Gmail SENT messages;
+ongoing Gmail Sent synchronization is out of scope.
 
 Further evidence: [schema integration and existing repository conventions](docs/schema-boundaries.md),
 [maintained webmail and frontend components](docs/web-client-options.md), and
@@ -46,9 +49,12 @@ mise run ci
 The foundation includes TypeScript, Oxlint, Oxfmt, hk, YAML/TOML and workflow
 validation, spelling/hygiene checks, secret scanning, and Renovate configuration.
 `package.json` is private to prevent accidental npm publication; the GitHub
-repository is public. There is no deployment workflow or configured secret.
+repository is public. Production deployment is manual through GitHub Actions,
+using a Worker-scoped account token in an Actions secret and an account-ID variable.
+No private addresses, credentials, mail or production route inventory belong here.
 
 The toolchain follows [pateat](https://github.com/risu729/pateat) and
 [kogane](https://github.com/risu729/kogane), scaled down to a single package.
-There are no runtime dependencies or application tests yet; meaningful Worker
-tests will accompany the first behavior rather than assert an empty scaffold.
+The native cf toolchain builds the Worker. Vitest with Cloudflare's plugin tests
+the handler in the Workers runtime. See mise tasks for checking, building and
+deploying; the initial handler needs no third-party application dependencies.
