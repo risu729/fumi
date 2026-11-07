@@ -29,9 +29,10 @@ not a complete representation of every chart or scan.
 | Unlisted format, audio/video, oversized or failed file | Report coverage state; add a format-specific adapter only when needed                                                                             | Original plus explicit unsupported/pending/error status                 |
 
 AI Search documents automatic conversion for formats including PDF, DOCX and
-Excel-family files; a custom `.txt` object is not required first. OCR is an
-explicit setting, disabled by default. Its reviewed format list does not promise
-PPTX, legacy DOC, audio or video support. [Supported sources and OCR](https://developers.cloudflare.com/ai-search/configuration/data-source/),
+Excel-family files; a custom `.txt` object is not required first. OCR is an explicit
+setting, disabled by default. Its reviewed format list does not promise PPTX, legacy
+DOC, audio or video support.
+[Supported sources and OCR](https://developers.cloudflare.com/ai-search/configuration/data-source/),
 [conversion formats](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/supported-formats/).
 
 `env.AI.toMarkdown()` is also available to a fumi normalizer. Standard image
@@ -49,9 +50,9 @@ limit for some formats. Expose incomplete coverage rather than hiding failures.
 ## Multimodal retrieval and answer generation are different
 
 AI Search offers image-capable embedding choices, including a Cloudflare-hosted
-multimodal model. Choosing a vision-capable answer model alone does not make a
-text-only retrieval index visual. Configure and evaluate the embedding path
-separately. [Model roles](https://developers.cloudflare.com/ai-search/configuration/models/),
+multimodal model. Choosing a vision-capable answer model alone does not make a text-only
+retrieval index visual. Configure and evaluate the embedding path separately.
+[Model roles](https://developers.cloudflare.com/ai-search/configuration/models/),
 [supported models](https://developers.cloudflare.com/ai-search/configuration/models/supported-models/).
 
 Direct PDF embeddings also exist: Google's Gemini embedding documentation accepts

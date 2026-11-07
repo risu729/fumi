@@ -9,12 +9,15 @@ application dependencies; the cf build and Workers runtime tests are installed.
 
 Bun 1.4.4, Node 26.13.0, mise tasks/lockfile, hk 2.11.1 with
 [hk-config v3.1.0](https://github.com/risu729/hk-config/tree/v3.1.0), TypeScript 7.0.2,
-[@risu729/tsconfigs 3.0.1](https://github.com/risu729/tsconfigs), Oxlint 1.91.0,
-Oxfmt 0.75.0, shared [Renovate configuration](https://github.com/risu729/renovate-config/tree/3.23.0).
-The task graph and pinned actions follow [pateat](https://github.com/risu729/pateat/blob/b5da8bc93903323478b04cb94c12b12ad28dbc65/mise.toml)
-and [kogane](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/mise.toml).
-Bun installs are selected for this small package, as in Kogane; Pateat's aube
-installer and monorepo-specific checks are not copied.
+[@risu729/tsconfigs 3.0.1](https://github.com/risu729/tsconfigs), Oxlint 1.91.0, Oxfmt
+0.75.0, shared
+[Renovate configuration](https://github.com/risu729/renovate-config/tree/3.23.0). The
+task graph and pinned actions follow
+[pateat](https://github.com/risu729/pateat/blob/b5da8bc93903323478b04cb94c12b12ad28dbc65/mise.toml)
+and
+[kogane](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/mise.toml).
+Bun installs are selected for this small package, as in Kogane; Pateat's aube installer
+and monorepo-specific checks are not copied.
 
 ## Runtime stack
 
@@ -35,9 +38,9 @@ installer and monorepo-specific checks are not copied.
 
 **CEL is the Google-origin library/language family.** Google moved the official
 repositories to `cel-expr` in June 2026. Its listed official implementations are
-Go/C++/C/Java/Python; this review did not establish an official Google TS runtime.
-Buf's ECMAScript package below is an independent implementation, not Google's
-TypeScript SDK. [Google announcement](https://opensource.googleblog.com/2026/06/cel-finds-a-new-home-at-githubcomcel-expr.html),
+Go/C++/C/Java/Python; this review did not establish an official Google TS runtime. Buf's
+ECMAScript package below is an independent implementation, not Google's TypeScript SDK.
+[Google announcement](https://opensource.googleblog.com/2026/06/cel-finds-a-new-home-at-githubcomcel-expr.html),
 [official implementations](https://cel.dev/reference/api-reference).
 
 **CEL is selected, subject to a review before routing implementation.** The
@@ -72,17 +75,18 @@ predicates. WASM would be a separate evaluated option, not a presumed drop-in.
 
 ## Outbound and mailbox reuse
 
-Cloudflare Email Sending's native binding is selected; see [outbound MCP](outbound-mcp.md).
-Historical Gmail SENT backfill is included, ongoing Gmail Sent sync is excluded.
-For mailbox and UI reuse rather than individual backend libraries, see
-[existing projects](existing-projects.md) and [maintained UI options](web-client-options.md).
+Cloudflare Email Sending's native binding is selected; see
+[outbound MCP](outbound-mcp.md). Historical Gmail SENT backfill is included, ongoing
+Gmail Sent sync is excluded. For mailbox and UI reuse rather than individual backend
+libraries, see [existing projects](existing-projects.md) and
+[maintained UI options](web-client-options.md).
 
 ## Schema boundaries and attachment representations
 
-Use Valibot internally and Standard Schema at reusable validation boundaries.
-Hono's standard validator accepts Valibot directly; MCP and model APIs also need
-JSON Schema conversion. This keeps integrations replaceable without pretending
-all library semantics are identical. [Schema policy and repository evidence](schema-boundaries.md).
+Use Valibot internally and Standard Schema at reusable validation boundaries. Hono's
+standard validator accepts Valibot directly; MCP and model APIs also need JSON Schema
+conversion. This keeps integrations replaceable without pretending all library semantics
+are identical. [Schema policy and repository evidence](schema-boundaries.md).
 
 Attachment RAG does not require fumi to turn every file into `.txt`. Supported
 objects can use managed conversion/OCR, and visual retrieval can use image

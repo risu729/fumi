@@ -87,17 +87,53 @@ that token. Route changes and direct object inspection remain separate operation
 with their own authorized access. Store the deployment token in the repository's
 Actions secret, not source or logs.
 
-The manual production deployment workflow builds and checks the selected main
-commit before deployment. Deploying code does not certify that Email Routing,
-Gmail delivery or archival succeeded; record their acceptance separately.
+The manual production deployment workflow runs CodeQL, builds and checks the
+selected main commit, and refuses a stale dispatch if main has advanced before
+publication. The SHA-pinned shared deploy action validates that exact build,
+uploads a version, activates it, and verifies the returned deployment and active
+version at 100 percent traffic. It preserves existing secrets and leaves trigger
+synchronization disabled. See [repository conventions](repository-conventions.md)
+for the comparison with other repositories.
+
+`mise run deploy:bootstrap` retains the full `cf deploy --no-provision` path for
+explicit initial setup or maintenance. Routine production publishing uses the
+workflow's versions strategy and its deployment readback. Deploying code does
+not certify that Email Routing, Gmail delivery or archival succeeded; record
+their acceptance separately.
+
+## Migrating the remaining routes
+
+An ordinary forwarding rule or catch-all can use the existing handler without a
+code change. Refresh its private snapshot, verify the destination and deployed
+bindings, select **Send to a Worker** with `fumi`, then read the rule back. Where
+Email Routing already handles the domain, this changes the routing action rather
+than the domain's MX records. Repeat the controlled attachment test and require
+both received Gmail provenance and matching R2 bytes before accepting cutover.
+Record activation delay and reconcile any messages that took the old route.
+
+Explicit specialist Worker rules take precedence over the catch-all; switching
+the catch-all does not archive their messages through fumi. Keep them in place
+until the [plugin contract](plugins.md) is implemented in both fumi and the
+specialist Worker. That requires adopting the specialist's versioned rules,
+an authenticated service integration, request correlation and an idempotent
+claim/result protocol. Preserve archival and Gmail as independent delivery lanes;
+designate exactly one Gmail-forwarding owner when replacing the specialist's
+current email handler. Archive before handing off; distinguish `handled`,
+`not_applicable` and `uncertain` outcomes. Only an explicit non-match proceeds
+through normal action routing; timeouts must not silently duplicate actions or lose
+mail. Revisit the CEL evaluator before implementing this routing layer. Test
+pending-request matches, non-matches, retries and ambiguous outcomes before
+migrating a specialist route. The current handler always forwards to Gmail and
+does not yet implement this protocol or the future webhook pipeline.
 
 ## Staged production acceptance: 2026-11-07
 
 The initial runtime in [PR #7](https://github.com/risu729/fumi/pull/7) was deployed,
-then [deployed through GitHub Actions](https://github.com/risu729/fumi/actions/runs/42345219531)
-using the account-owned token scoped to this Worker. The deployed version was
-read back at 100 percent traffic. The R2 bucket's public access and the Worker's
-`workers.dev` and preview URLs were confirmed disabled.
+then
+[deployed through GitHub Actions](https://github.com/risu729/fumi/actions/runs/42345219531)
+using the account-owned token scoped to this Worker. The deployed version was read back
+at 100 percent traffic. The R2 bucket's public access and the Worker's `workers.dev` and
+preview URLs were confirmed disabled.
 
 A dedicated test route and one domain's catch-all route were each verified with
 controlled Gmail messages containing Japanese text and a binary attachment.

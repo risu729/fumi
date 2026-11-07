@@ -29,7 +29,8 @@ evaluator and safety limits before implementing routing. These future adapters
 are not installed in the R2 sink. Backfill includes historical Gmail SENT messages;
 ongoing Gmail Sent synchronization is out of scope.
 
-Further evidence: [schema integration and existing repository conventions](docs/schema-boundaries.md),
+Further evidence:
+[schema integration and existing repository conventions](docs/schema-boundaries.md),
 [maintained webmail and frontend components](docs/web-client-options.md), and
 [attachment retrieval representations](docs/attachment-retrieval.md).
 
@@ -51,6 +52,9 @@ validation, spelling/hygiene checks, secret scanning, and Renovate configuration
 `package.json` is private to prevent accidental npm publication; the GitHub
 repository is public. Production deployment is manual through GitHub Actions,
 using a Worker-scoped account token in an Actions secret and an account-ID variable.
+The shared deploy action verifies the active version; CodeQL checks TypeScript
+and workflows. See [repository conventions](docs/repository-conventions.md) for
+the comparison and intentional differences from the larger repositories.
 No private addresses, credentials, mail or production route inventory belong here.
 
 The toolchain follows [pateat](https://github.com/risu729/pateat) and

@@ -54,10 +54,10 @@ specified retention. Plugins must not use a separate check-then-act call as a
 claim: an OTP can expire or be consumed between those calls.
 
 Distinguish exclusive consumers (such as OTP handling) from explicitly permitted
-observers. Use deterministic priority; do not broadcast authentication codes to every plugin.
-Limit the number of offers, hop count, evaluation cost and overall time. fumi
-retains ownership of normal fallback; plugins do not recursively forward mail
-back to fumi. Revoking an adoption immediately blocks further data disclosure.
+observers. Use deterministic priority; do not broadcast authentication codes to every
+plugin. Limit the number of offers, hop count, evaluation cost and overall time. fumi
+retains ownership of normal fallback; plugins do not recursively forward mail back to
+fumi. Revoking an adoption immediately blocks further data disclosure.
 
 Gmail forwarding and archival are independent delivery lanes. A plugin's
 `handled` result suppresses the ordinary action webhook for that lane; it does
@@ -65,7 +65,8 @@ not suppress Gmail forwarding or raw archival during the initial phase.
 
 ## Kogane integration gap
 
-The inspected [Kogane email handler](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/worker.ts)
+The inspected
+[Kogane email handler](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/worker.ts)
 uses a Cloudflare email event and forwards mail itself. Its
 [session object](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/session.ts)
 exposes a pending-challenge check and code completion, not the generic offer

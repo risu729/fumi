@@ -7,6 +7,10 @@ node_modules/
 .cloudflare/
 dist/
 coverage/
+.rumdl_cache/
+hk.local.pkl
+mise.local.toml
+mise.local.lock
 *.tsbuildinfo
 .env
 .env.*

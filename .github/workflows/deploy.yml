@@ -1,22 +1,29 @@
 name: Deploy
 on:
   workflow_dispatch:
+concurrency:
+  group: production-deploy-caller
+  cancel-in-progress: false
 permissions: {}
 defaults:
   run:
     shell: bash
 jobs:
+  security:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+      security-events: write # Allow the called CodeQL workflow to publish results.
+    uses: $/.github/workflows/codeql.yml
   deploy:
     name: Deploy Worker
     if: ${{ github.ref == 'refs/heads/main' }}
+    needs: [security]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
     environment: production
-    concurrency:
-      group: production-deploy
-      cancel-in-progress: false
     steps:
       - name: Checkout the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,21 +42,37 @@ jobs:
         run: mise run ci
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - name: Deploy the checked Worker
+      - name: Validate the checked Worker with the shared deploy action
+        uses: risu729/wrangler-deploy-action@c85532bf934238e9811676cbf10a4d08ff88ae12 # v3.0.0
+        with:
+          mode: dry-run
+          worker: fumi
+          build-mode: production
+          production-strategy: versions
+      - name: Refuse an outdated dispatch
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ -z "${CLOUDFLARE_API_TOKEN}" || -z "${CLOUDFLARE_ACCOUNT_ID}" ]]; then
-            echo '::error::Configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID before deploying.'
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "${current_sha}" != "${GITHUB_SHA}" ]]; then
+            echo '::error::Main changed after this deployment was dispatched. Dispatch a new run from current main.'
             exit 1
           fi
-          mise run deploy
+      - name: Deploy the checked Worker
+        uses: risu729/wrangler-deploy-action@c85532bf934238e9811676cbf10a4d08ff88ae12 # v3.0.0
+        with:
+          mode: production
+          worker: fumi
+          build-mode: production
+          production-strategy: versions
+          deploy-triggers: "false"
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare-account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       - name: Record the deployed commit
         run: |-
           {
             printf '### Worker deployment\n\n'
             printf 'Commit: %s\n\n' "${GITHUB_SHA}"
             printf 'Run: %s/%s/actions/runs/%s\n\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
-            printf 'The deploy command succeeded. Email routes and message delivery require separate verification.\n'
+            printf 'The shared action verified the uploaded Worker version at 100%% traffic. Email routes and message delivery require separate verification.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
