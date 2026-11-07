@@ -23,6 +23,9 @@ flowchart TD
   Owner -->|not_applicable| Classify[Normal rules and bounded Claude/GPT classifier]
   Owner -->|handled| Receipt
   Classify --> Dispatch[Active-destination webhook outbox]
+  SendMCP[Authenticated send MCP] --> SendOutbox[Durable outbound outbox]
+  SendOutbox --> Provider[Selected sending provider]
+  Provider --> Sent[Sent inputs and delivery receipts]
 ```
 
 Import events may be normalized and indexed but never produce historical action
@@ -116,6 +119,14 @@ Only trust authentication results at the verified inbound boundary; an address
 allowlist or sender-authored header alone is insufficient. Email text and retrieved
 attachments are untrusted data, including when asking a model for classification.
 Record closed outcome codes and IDs in logs, not bodies, codes, passwords or tokens.
+
+## Outbound MCP
+
+MCP also gains a separate [outbound send capability](outbound-mcp.md), with
+optional drafts/previews, explicit sender authorization and a durable outbox.
+It is independent of incoming classification and specialist plugin ownership.
+Submission inputs and delivery receipts join the archive with their own
+provenance; receiving mail never implicitly authorizes sending a reply.
 
 ## Password-protected attachments
 

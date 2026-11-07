@@ -56,6 +56,13 @@ addons, bounded AST/input/comprehension/regex evaluation, prototype escape
 resistance, startup/bundle size and Workers CPU. Pin the evaluator version with
 the adopted manifest. Do not run arbitrary plugin JS in fumi.
 
+## Outbound and mailbox reuse
+
+For outbound mail, compare Cloudflare Email Sending's native binding with a
+Resend HTTPS adapter. Personal-correspondence suitability and safe retries must
+be resolved before adoption; see [outbound MCP](outbound-mcp.md). For complete
+mailbox reuse rather than individual libraries, see [existing projects](existing-projects.md).
+
 ## Encrypted attachments
 
 | Format                 | Candidate                                                                 | Gate                                                                                                                                |

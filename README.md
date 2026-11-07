@@ -12,11 +12,14 @@ are part of this repository bootstrap.
 
 1. Preserve existing Gmail forwarding and archive incoming raw MIME in R2.
 2. In parallel, backfill historical Gmail and build attachment-aware search/MCP;
-   build deterministic routing, bounded model classification, and webhook delivery.
+   build deterministic routing, bounded model classification, and webhook delivery;
+   add authenticated MCP email sending and replies.
 3. Add password-protected attachment processing, then a low-priority web client.
 
 See [the roadmap](docs/roadmap.md), [architecture proposal](docs/architecture.md),
-and [library evaluation](docs/libraries.md). Runtime choices remain proposals.
+and [library evaluation](docs/libraries.md). See also the
+[existing Cloudflare mail projects](docs/existing-projects.md) and
+[outbound MCP proposal](docs/outbound-mcp.md). Runtime choices remain proposals.
 
 ## Development
 

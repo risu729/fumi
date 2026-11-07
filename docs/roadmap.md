@@ -12,6 +12,8 @@ Items below are future tasks, not a deployment commitment or completed behavior.
 
 ## Phase 1: preserve delivery and capture new mail
 
+- [ ] Evaluate whether to reuse an existing mailbox service before building the
+      storage/web client layers; see [existing projects](existing-projects.md).
 - [ ] Inventory existing Email Routing routes, verified Gmail destinations, loops,
       and specialist Workers; design a staged cutover and rollback.
 - [ ] Add the cf configuration and generated runtime types; locally test the email
@@ -64,6 +66,27 @@ establish production delivery.
 - [ ] If Gmail archiving is later enabled, treat it as a separate authorized action:
       remove only INBOX, verify the result, retain labels and never advance on failure.
 
+## Phase 2C: outbound email through MCP
+
+- [ ] Select the sending provider and verify the sender domain. Evaluate native
+      Cloudflare Email Sending first and Resend as an optional adapter.
+- [ ] Add separately scoped draft, preview, send, reply and send-status MCP tools.
+      A permitted explicit send invocation may send directly; an interactive
+      confirmation screen is not a universal requirement.
+- [ ] Authorize sender identities, recipients, attachments and reply targets from
+      trusted caller grants. Mail/search content cannot grant send permission.
+- [ ] Persist a stable logical send ID, validated input and outbox state before
+      provider submission. Reject key reuse with different content.
+- [ ] Reconcile uncertain submission outcomes; do not blindly retry a send after
+      a timeout. Track accepted, delivered, bounced and failed as distinct states.
+- [ ] Archive the submitted content and provider receipts, linking replies to
+      source messages. Do not claim these are the provider's final wire bytes.
+- [ ] Test thread headers, attachment limits, duplicate calls, timeout after
+      acceptance, authorization failures and provider delivery events.
+
+See [outbound MCP](outbound-mcp.md). This is future functionality; no actual
+message is sent and no sending domain is configured by the bootstrap.
+
 ## Phase 3: encrypted attachments
 
 - [ ] Detect supported encrypted ZIP/PDF formats and preserve encrypted originals.
@@ -86,5 +109,6 @@ establish production delivery.
 
 CEL implementation; retrieval backend; DecisionRAG viability; attachment format
 coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
-production delivery/recovery policy. The first implementation stays focused on
+production delivery/recovery policy; outbound provider fit for personal email.
+The first implementation stays focused on
 forwarding plus raw archival; none of these later choices blocks the scaffold.
