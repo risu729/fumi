@@ -62,8 +62,8 @@ the same checkout and build output.
 
 Branch protection is separate GitHub repository configuration, not a workflow
 file. The aligned default-branch ruleset requires pull requests, the GitHub Actions
-`CI Check`, signed commits, linear history, and CodeQL analysis with every alert
-blocked, whatever its severity or level. A push dismisses earlier approvals. It
+`CI Check`, signed commits, linear history, and CodeQL analysis that blocks every
+new alert a pull request introduces, whatever its severity or level. A push dismisses earlier approvals. It
 prevents deletion and force-pushes, with the same repository-administrator bypass
 as Pateat and Kogane, which works only through a pull request.
 As in the reference repositories, it does not require an approval count or strict
