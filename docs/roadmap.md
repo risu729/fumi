@@ -12,8 +12,6 @@ Items below are future tasks, not a deployment commitment or completed behavior.
 
 ## Phase 1: preserve delivery and capture new mail
 
-- [ ] Evaluate whether to reuse an existing mailbox service before building the
-      storage/web client layers; see [existing projects](existing-projects.md).
 - [ ] Inventory existing Email Routing routes, verified Gmail destinations, loops,
       and specialist Workers; design a staged cutover and rollback.
 - [ ] Add the cf configuration and generated runtime types; locally test the email
@@ -33,11 +31,15 @@ establish production delivery.
 
 ## Phase 2A: historical import and attachment-aware retrieval
 
-- [ ] Read-only Gmail OAuth and resumable backfill, including sent mail, labels,
+- [ ] Read-only Gmail OAuth and resumable backfill, explicitly including historical
+      SENT messages, labels,
       thread linkage, dates and attachment provenance. Never mutate Gmail in import.
 - [ ] Rate limits, bounded concurrency, checkpoints only after durable commits,
       reconciliation counts and duplicate handling across live/backfill sources.
 - [ ] Extract MIME parts into versioned derivatives; preserve original bytes.
+- [ ] Use managed conversion/OCR for supported attachments where suitable; compare
+      optional visual retrieval without requiring a custom `.txt` for every file.
+      See [attachment representations](attachment-retrieval.md).
 - [ ] Build keyword/hybrid retrieval baseline and read-only authenticated MCP tools
       for search, thread/message retrieval and attachment access with citations.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
@@ -68,8 +70,8 @@ establish production delivery.
 
 ## Phase 2C: outbound email through MCP
 
-- [ ] Select the sending provider and verify the sender domain. Evaluate native
-      Cloudflare Email Sending first and Resend as an optional adapter.
+- [x] Select native Cloudflare Email Sending on the Workers Paid deployment baseline.
+- [ ] Verify the sender domain and binding configuration before implementing sending.
 - [ ] Add separately scoped draft, preview, send, reply and send-status MCP tools.
       A permitted explicit send invocation may send directly; an interactive
       confirmation screen is not a universal requirement.
@@ -86,6 +88,8 @@ establish production delivery.
 
 See [outbound MCP](outbound-mcp.md). This is future functionality; no actual
 message is sent and no sending domain is configured by the bootstrap.
+Ongoing Gmail Sent synchronization is out of scope; phase 2A still imports
+historical SENT messages. Future fumi sends stay in fumi's own sent archive.
 
 ## Phase 3: encrypted attachments
 
@@ -101,6 +105,10 @@ message is sent and no sending domain is configured by the bootstrap.
 
 ## Phase 4: optional web client (low priority)
 
+- [ ] Evaluate mailbox-only UI reuse using [maintained project evidence](web-client-options.md).
+      Compare Cloud Mail as an application with independent components and a fumi
+      API adapter. Calendar, booking and drive features are out of scope; this
+      decision does not block initial ingestion/archive work.
 - [ ] Authenticated search, thread view, safe attachment preview and download.
 - [ ] Explain routing decisions, adoption versions, retry states and pending items.
 - [ ] Sanitize message HTML, block remote trackers, and isolate attachment previews.
@@ -109,6 +117,8 @@ message is sent and no sending domain is configured by the bootstrap.
 
 CEL implementation; retrieval backend; DecisionRAG viability; attachment format
 coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
-production delivery/recovery policy; outbound provider fit for personal email.
+production delivery/recovery policy. Cloudflare Email Sending and Valibot are
+selected, with Standard Schema integration boundaries; their runtime integration
+has not been implemented.
 The first implementation stays focused on
 forwarding plus raw archival; none of these later choices blocks the scaffold.

@@ -2,6 +2,15 @@
 
 Research snapshot: **2026-11-07**. This is a source review, not a deployment, security audit, deliverability test, or benchmark. Capabilities below are supported by upstream documentation or inspected code. "Not established" means the reviewed sources did not establish that capability; it is not proof that no implementation exists elsewhere. No upstream code has been incorporated into Fumi.
 
+## Current mailbox-only recommendation
+
+For popularity, recent development and frontend reuse, see the focused
+[maintained-project comparison](web-client-options.md). The strongest additional
+complete-mailbox candidate is **maillab/cloud-mail**, a different repository from
+Yuyuyang/cloudmail below. For fumi's own frontend, prefer independent UI/editor
+components around an API adapter; a complete Mailflare workspace is not selected.
+Calendars, booking and drive features are outside the current product scope.
+
 ## Which project was "Mailflare"?
 
 The closest match is **[hieunc229/mailflare](https://github.com/hieunc229/mailflare)**, whose [official site](https://mailflare.co/) describes a self-hosted workspace with email, calendar, booking, drive, and AI integrations. Two similarly named projects are different:
@@ -15,7 +24,7 @@ Cloudflare currently distinguishes **Email Routing** for inbound processing/forw
 
 The current official limit is **25 MiB total outgoing message size including attachments**, and **25 MiB inbound**. Some reviewed project documents still refer to a 5 MiB sending limit, and cf-mail's README describes inbound attachments as unlimited via R2. Those statements do not override Cloudflare's current transport limit; an application may also enforce its own smaller limit.
 
-## Shortlist
+## Broader project map
 
 | Project / owner                  | Primary purpose                                         | Cloudflare components established in source                                                       | External runtime dependencies / alternatives                                                                                                                                    |
 | -------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -56,17 +65,17 @@ Zero's reviewed [MCP source header](https://github.com/Mail-0/Zero/blob/36132735
 
 ## Implications for Fumi
 
-**Evaluate Mailflare first if the goal expands to replacing the whole mailbox.** It already covers a much broader application than ingestion and classification: personal/shared mailboxes, routing rules, import from IMAP/Gmail Takeout/EML/MBOX, and permission-scoped MCP. That may avoid building a composer, mailbox UI, and import tooling. Its breadth also brings more schema, administration, and upgrade work. Its FTS5 search is useful but does not establish semantic RAG, and its published documentation does not establish Fumi-specific active-consumer routing or classification policy.
+**For the current mail-only scope, evaluate Cloud Mail for a complete application and independent components for fumi's own UI.** The [focused comparison](web-client-options.md) records exact stars, substantive development and frontend coupling. Mailflare remains a useful React reference, but its extra workspace features and application contracts make a whole-app adoption a separate choice. Its FTS5 search does not establish semantic RAG or fumi-specific active-consumer routing. Reusing only frontend files still requires checking their license and replacing backend/auth contracts.
 
 **Use Agentic Inbox as the closest Cloudflare-native architecture reference.** It demonstrates mailbox Durable Objects, R2 attachments, an email agent, and MCP together. Its documented production trust boundary is a shared Cloudflare Access policy: every admitted user or MCP client can access all mailboxes. Per-mailbox storage isolation must not be mistaken for per-mailbox authorization. It requires adaptation if Fumi needs separate consumer permissions. The older default-branch commit also warrants checking unresolved issues and current platform compatibility before adoption.
 
 **Use cf-mail for the small ingestion/agent boundary design.** Its protocol separates stored untrusted message content from agent decisions, provides scoped tokens and acknowledgements, and uses signed webhook notifications with a pull fallback. Those concepts match a focused event-processing service well. Its documented single-user/global-token UI and lack of IMAP/POP mean it is a narrower product than Mailflare. Source claims about production usage have not been independently tested here.
 
-**Keep EmailFlare and Cloud Mail as secondary references.** EmailFlare is particularly relevant for a transactional sending API, team contact workflows, and reply correlation. Cloud Mail demonstrates multi-user administration, attachment storage, query APIs, and a Vue frontend, with Resend as a concrete extra service. Neither source review established the full classification, historical migration, semantic retrieval, and active-consumer handoff workflow Fumi would need.
+**Keep EmailFlare and Yuyuyang/cloudmail as secondary references.** EmailFlare is particularly relevant for a transactional sending API, team contact workflows, and reply correlation. Yuyuyang/cloudmail demonstrates multi-user administration, attachment storage, query APIs, and a Vue frontend, with Resend as a concrete extra service. Neither source review established the full classification, historical migration, semantic retrieval, and active-consumer handoff workflow Fumi would need.
 
 **Treat Zero as a provider-client and search reference.** Its provider integrations, MCP, and cached/searchable mail are relevant if retaining Gmail is acceptable. Its documented PostgreSQL/OAuth/provider dependencies make it a different adoption path from moving custom-domain receipt directly into Cloudflare.
 
-For the current Fumi bootstrap, retain the small repository foundation and record these alternatives. Before implementing mail storage or a web client, decide whether Fumi should integrate with an existing mailbox, extend one, or own that responsibility. Reuse can mean consuming an API or learning an architecture; it does not require copying an entire application. Validate the selected option with synthetic mail, attachments, duplicate deliveries, routing failures, migration reconciliation, and scoped access before moving real delivery.
+Retain fumi's focused ingestion/archive plan. Frontend reuse is a later choice and does not block Gmail forwarding plus R2 capture. Reuse can mean consuming an API or learning an architecture; it does not require copying an entire application. Validate a chosen UI adapter with synthetic list/reader/composer flows, attachments and scoped access before using real mail.
 
 ## Primary source map
 
