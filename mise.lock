@@ -228,6 +228,7 @@ url_api = "https://api.github.com/repos/google/yamlfmt/releases/assets/336650206
 version = "1.38.0"
 backend = "pypi:yamllint"
 specifiers = ["1.38.0"]
+uv = { path = ".mise/locks/yamllint/1.38.0", digest = "sha256:4d2a75ba1e4faad8efdd67bffce308785cd457d5cf23abbdbcd68017c8cc3c66" }
 
 [[tools.zizmor]]
 version = "1.32.0"

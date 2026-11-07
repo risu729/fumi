@@ -1,5 +1,7 @@
 node_modules/
-.mise/
+.mise/*
+!.mise/locks/
+!.mise/locks/**
 .wrangler/
 .cf/
 dist/
