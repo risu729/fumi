@@ -6,6 +6,9 @@ from _fumi_ (a letter or written message).
 **Status: initial email capture implemented.** The Email Worker preserves Gmail
 forwarding, archives original MIME bytes and private receipts in R2, and records
 archive and forwarding outcomes independently. Runtime tests use synthetic mail.
+A D1 catalog and bounded scheduled reconciler index existing R2 evidence separately
+from delivery; their production migration and activation are pending. See
+[catalog recovery](docs/archive-catalog.md) for identity, failures and rollout.
 Backfill, search, plugin routing, model classification, webhooks and outbound MCP
 are planned. See the [ingress runbook](docs/ingress.md) for deployment, acceptance
 and recovery; a deployed Worker alone does not establish production delivery.

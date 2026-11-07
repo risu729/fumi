@@ -51,7 +51,7 @@ description = "Build the Worker using the pinned Cloudflare toolchain."
 run = "cf build --mode production"
 
 [tasks.test]
-description = "Run synthetic Email/R2 tests inside the local Workers runtime."
+description = "Run synthetic Email/R2/D1 tests inside the local Workers runtime."
 run = "vitest run"
 
 [tasks."check:output"]
@@ -60,7 +60,7 @@ depends = ["build"]
 run = "cf workers versions create --prebuilt --mode production --worker fumi --dry-run"
 
 [tasks."test:artifact"]
-description = "Run a native synthetic Email event against the built bundle and local R2."
+description = "Run native synthetic Email/Cron events against the built bundle and local R2/D1."
 depends = ["build"]
 run = "node test/artifact.mjs"
 

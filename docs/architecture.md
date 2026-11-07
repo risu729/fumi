@@ -1,9 +1,11 @@
 # Architecture proposal
 
 Status: initial R2 capture and Gmail forwarding implemented, 2026-11-07; the
-remaining flow is an implementation proposal. The first slice uses R2 originals
-and private receipt sidecars. D1, Queues, reconciliation and downstream processing
-remain future work. See the [ingress runbook](ingress.md).
+remaining flow is partly an implementation proposal. Ingress uses R2 originals
+and private receipt sidecars. A D1 catalog and separate scheduled R2 reconciler
+are implemented with production activation pending; Queues, outbox and downstream
+processing remain future work. See [catalog recovery](archive-catalog.md) and the
+[ingress runbook](ingress.md).
 Cloudflare Email Sending, Valibot and CEL are selected for later stages; revisit
 the CEL evaluator and limits before implementing routing.
 
@@ -14,7 +16,9 @@ flowchart TD
   Mail[Inbound email] --> Ingress[Small Email Worker]
   Ingress --> Gmail[Existing Gmail forwarding]
   Ingress --> Raw[Private R2 originals]
-  Ingress --> Receipt[D1 receipts and outbox]
+  Raw --> Repair[Scheduled evidence reconciliation]
+  Repair --> Catalog[D1 archive catalog]
+  Ingress -.->|future| Receipt[D1 processing state and outbox]
   Gmail --> Import[Resumable read-only backfill]
   Import --> Raw
   Import --> Receipt
@@ -40,8 +44,9 @@ single long synchronous workflow.
 ## Capture and recovery
 
 Keep the email handler small: archive bytes, record receipt, preserve forwarding.
-The initial implementation records receipts in R2; the D1/outbox design below is
-for the later processing stages.
+The email handler records receipts in R2. The separate D1 catalog indexes that
+evidence through bounded scheduled scans; it is not on the SMTP path. The D1
+outbox design below is for later processing stages.
 Do not run model inference, extraction or decryption on the SMTP path. Forwarding
 and R2/D1/Queue writes are separate operations, not one transaction. The initial
 policy prioritizes existing Gmail delivery when archival fails, with alerts and

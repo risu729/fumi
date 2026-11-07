@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { createScheduledController } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
 import { CAPTURE_TIMEOUT_MS, MAX_RAW_BYTES } from "../src/limits.ts";
@@ -85,6 +86,24 @@ afterEach(() => {
 });
 
 describe("archive and forward ingress in workerd", () => {
+  it("keeps catalog failures out of delivery and redacts scheduled failure diagnostics", async () => {
+    const database = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation(() => {
+      throw new Error("private database diagnostic with recipient and key");
+    });
+    const incoming = message();
+    await run(incoming);
+    expect(incoming.forward).toHaveBeenCalledOnce();
+    expect(database).not.toHaveBeenCalled();
+
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(worker.scheduled(createScheduledController(), env)).rejects.toThrow(
+      "Archive reconciliation did not complete",
+    );
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ event: "archive_reconcile", status: "failed" }),
+    );
+  });
+
   it("preserves exact multipart bytes, checksum, private envelope and forwarding provenance", async () => {
     const incoming = message();
     await run(incoming);
