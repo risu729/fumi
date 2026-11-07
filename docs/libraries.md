@@ -1,7 +1,8 @@
 # Library and service evaluation
 
-Status: proposals checked against primary sources on 2026-11-07. Only the
-development toolchain is installed. No runtime dependency below is adopted yet.
+Status: selected decisions and proposals checked against primary sources on
+2026-11-07. Valibot and Cloudflare Email Sending are selected. Only the development
+toolchain is installed; no runtime dependencies or adapters are implemented yet.
 
 ## Installed foundation
 
@@ -14,15 +15,15 @@ and [kogane](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531e
 Bun installs are selected for this small package, as in Kogane; Pateat's aube
 installer and monorepo-specific checks are not copied.
 
-## Proposed runtime stack
+## Runtime stack
 
 | Area                      | First candidate                   | Why / adoption gate                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workers toolchain         | `cf` and native configuration     | Matches Pateat's new configuration; pin a tested release when adding the first handler. See [cf agents guide](https://developers.cloudflare.com/cf/agents/).                                                                                                                                                                                                    |
 | Runtime tests             | Vitest + Cloudflare Vitest plugin | Exercise Email/R2/Queue behavior in the Workers runtime; add when behavior exists. [Testing guide](https://developers.cloudflare.com/workers/testing/vitest-integration/).                                                                                                                                                                                      |
 | MIME                      | `postal-mime`                     | Workers-oriented MIME/attachment parser; set nesting/header/input limits and run asynchronously. [Upstream](https://github.com/postalsys/postal-mime).                                                                                                                                                                                                          |
-| HTTP API                  | Hono                              | Small Worker HTTP shell for authenticated read APIs and callbacks. Native email/queue handlers remain separate. [Workers guide](https://hono.dev/docs/getting-started/cloudflare-workers).                                                                                                                                                                      |
-| Runtime schemas           | Zod; compare Valibot              | Zod is convenient for MCP and model-output integration; Valibot matches Pateat and may reduce bundle cost. Choose one application schema layer after adapter compatibility checks. [Zod](https://zod.dev/), [Valibot](https://valibot.dev/).                                                                                                                    |
+| HTTP API                  | Hono + @hono/standard-validator   | Follow the current Pateat pattern with a schema-neutral wrapper. Keep native email/queue handlers separate. [Integration policy](schema-boundaries.md).                                                                                                                                                                                                         |
+| Runtime schemas           | Valibot + Standard Schema         | Selected: Valibot authoring, Standard Schema validation boundaries, and explicit Standard JSON Schema conversion for MCP/model APIs. [Integration policy](schema-boundaries.md).                                                                                                                                                                                |
 | Claude/GPT abstraction    | Vercel AI SDK                     | Useful when both providers are required; direct provider SDKs remain a smaller alternative. Check the pinned version's structured-output API and budgets. [Official docs](https://ai-sdk.dev/docs/introduction).                                                                                                                                                |
 | MCP                       | `@modelcontextprotocol/server`    | Current v2 server package and Streamable HTTP. Avoid starting on the old v1 `@modelcontextprotocol/sdk` line. Optional Cloudflare transport adapter, no DO solely for stateless tools. [SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Workers transport](https://developers.cloudflare.com/agents/model-context-protocol/protocol/transport/). |
 | Search                    | AI Search hybrid baseline         | Evaluate exact-match filters, Japanese tokenization, attachment coverage, freshness and costs before selection. [Limits](https://developers.cloudflare.com/ai-search/platform/limits-pricing/).                                                                                                                                                                 |
@@ -30,6 +31,13 @@ installer and monorepo-specific checks are not copied.
 | State and background work | D1 + R2 + Queues                  | Metadata/outbox, immutable bytes and asynchronous work respectively. DO/Workflows only when a specific coordination or durable multi-step requirement warrants them.                                                                                                                                                                                            |
 
 ## Rule language
+
+**CEL is the Google-origin library/language family.** Google moved the official
+repositories to `cel-expr` in June 2026. Its listed official implementations are
+Go/C++/C/Java/Python; this review did not establish an official Google TS runtime.
+Buf's ECMAScript package below is an independent implementation, not Google's
+TypeScript SDK. [Google announcement](https://opensource.googleblog.com/2026/06/cel-finds-a-new-home-at-githubcomcel-expr.html),
+[official implementations](https://cel.dev/reference/api-reference).
 
 **Recommend evaluating CEL first.** It expresses typed predicates with familiar
 operators and separates matching from privileged actions. A manifest can carry
@@ -54,14 +62,28 @@ compatibility. CEL as a language does not guarantee any particular JS engine is
 safe, conformant or cost-metered. Verify the used subset, no dynamic code/native
 addons, bounded AST/input/comprehension/regex evaluation, prototype escape
 resistance, startup/bundle size and Workers CPU. Pin the evaluator version with
-the adopted manifest. Do not run arbitrary plugin JS in fumi.
+the adopted manifest. Do not run arbitrary plugin JS in fumi. An official Go
+runtime would require another execution strategy; do not add a server just for
+predicates. WASM would be a separate evaluated option, not a presumed drop-in.
 
 ## Outbound and mailbox reuse
 
-For outbound mail, compare Cloudflare Email Sending's native binding with a
-Resend HTTPS adapter. Personal-correspondence suitability and safe retries must
-be resolved before adoption; see [outbound MCP](outbound-mcp.md). For complete
-mailbox reuse rather than individual libraries, see [existing projects](existing-projects.md).
+Cloudflare Email Sending's native binding is selected; see [outbound MCP](outbound-mcp.md).
+Historical Gmail SENT backfill is included, ongoing Gmail Sent sync is excluded.
+For mailbox and UI reuse rather than individual backend libraries, see
+[existing projects](existing-projects.md) and [maintained UI options](web-client-options.md).
+
+## Schema boundaries and attachment representations
+
+Use Valibot internally and Standard Schema at reusable validation boundaries.
+Hono's standard validator accepts Valibot directly; MCP and model APIs also need
+JSON Schema conversion. This keeps integrations replaceable without pretending
+all library semantics are identical. [Schema policy and repository evidence](schema-boundaries.md).
+
+Attachment RAG does not require fumi to turn every file into `.txt`. Supported
+objects can use managed conversion/OCR, and visual retrieval can use image
+representations. Keep originals and retrieval derivatives distinct.
+[Attachment retrieval design](attachment-retrieval.md).
 
 ## Encrypted attachments
 

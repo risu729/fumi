@@ -1,6 +1,8 @@
 # Architecture proposal
 
-Status: proposed, 2026-11-07. No application runtime has been implemented.
+Status: implementation proposal with selected decisions, 2026-11-07.
+Cloudflare Email Sending and Valibot are selected; no application runtime has
+been implemented.
 
 ## Data flow
 
@@ -24,7 +26,7 @@ flowchart TD
   Owner -->|handled| Receipt
   Classify --> Dispatch[Active-destination webhook outbox]
   SendMCP[Authenticated send MCP] --> SendOutbox[Durable outbound outbox]
-  SendOutbox --> Provider[Selected sending provider]
+  SendOutbox --> Provider[Cloudflare Email Sending]
   Provider --> Sent[Sent inputs and delivery receipts]
 ```
 
@@ -69,14 +71,20 @@ message by default. Workflows are optional for multi-step durable jobs later.
 ## Gmail import and search
 
 Use `gmail.readonly`, paginated message listing and `messages.get(format=RAW)`;
-RAW includes attachment MIME. Preserve Gmail labels, thread IDs and internalDate.
-Define spam/trash inclusion explicitly. Commit checkpoints only after durable
-storage; use history sync for reconciliation and restart a full scan when the
-history cursor expires. [Gmail messages](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages),
+RAW includes attachment MIME. Backfill includes historical SENT messages as well
+as received mail. Preserve labels, thread IDs and internalDate; one Gmail message
+with multiple labels is still one source message. Define spam/trash inclusion
+explicitly. Commit checkpoints only after durable storage. Read-only history sync
+may reconcile the bounded import or inbound archival gaps; it is not a continuous
+Gmail Sent mirror. Restart the relevant scan when a history cursor expires.
+[Gmail messages](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages),
 [sync guide](https://developers.google.com/workspace/gmail/api/guides/sync).
 
-Index normalized text and supported attachment derivatives, never assume `.eml`
-or encrypted bytes are searchable. Start with metadata filters plus keyword and
+Index normalized bodies and supported attachments/derivatives, never assume `.eml`
+or encrypted bytes are searchable. A managed index can convert supported original
+attachments; fumi need not pre-create a `.txt` for each one. Preserve originals,
+structure and visual evidence. See [attachment representations](attachment-retrieval.md)
+for OCR and optional multimodal retrieval. Start with metadata filters plus keyword and
 vector/hybrid retrieval. Evaluate managed AI Search before writing a full custom
 indexer; keep D1 metadata authoritative and evaluate D1 FTS5 plus Vectorize if
 filtering, freshness or ranking needs exceed the managed path. Japanese keyword
@@ -108,7 +116,10 @@ whether they can actually handle them. Owner rules stay upstream. Only explicit
 
 Ordinary rules decide known cases first. The classifier receives bounded excerpts
 only when needed and returns a schema-validated category, evidence and proposed
-action. Claude/GPT are provider choices; the model cannot choose a URL or grant
+action. Author schemas in Valibot; reusable integration contracts use Standard
+Schema, with explicit JSON Schema conversion for MCP/model tooling as described
+in [schema boundaries](schema-boundaries.md). Claude/GPT are provider choices;
+the model cannot choose a URL or grant
 capabilities. Low-confidence/error outcomes remain explicit. Webhook destination
 IDs map to configured allowed endpoints, with signing, idempotency and retries
 outside the model. Dispatch only to the currently active destination, using a
@@ -124,6 +135,9 @@ Record closed outcome codes and IDs in logs, not bodies, codes, passwords or tok
 
 MCP also gains a separate [outbound send capability](outbound-mcp.md), with
 optional drafts/previews, explicit sender authorization and a durable outbox.
+The selected transport is the native Cloudflare Email Sending binding on Workers
+Paid. Future sent records stay in fumi; ongoing Gmail Sent synchronization is out
+of scope, while historical SENT messages remain part of backfill.
 It is independent of incoming classification and specialist plugin ownership.
 Submission inputs and delivery receipts join the archive with their own
 provenance; receiving mail never implicitly authorizes sending a reply.

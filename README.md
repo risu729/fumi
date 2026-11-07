@@ -19,7 +19,16 @@ are part of this repository bootstrap.
 See [the roadmap](docs/roadmap.md), [architecture proposal](docs/architecture.md),
 and [library evaluation](docs/libraries.md). See also the
 [existing Cloudflare mail projects](docs/existing-projects.md) and
-[outbound MCP proposal](docs/outbound-mcp.md). Runtime choices remain proposals.
+[outbound MCP proposal](docs/outbound-mcp.md).
+
+Selected decisions: Cloudflare Email Sending for outbound mail and Valibot with
+Standard Schema integration boundaries for runtime validation. Backfill includes historical Gmail SENT messages; ongoing
+Gmail Sent synchronization is out of scope. These decisions are recorded, not
+implemented yet. Other runtime choices remain proposals.
+
+Further evidence: [schema integration and existing repository conventions](docs/schema-boundaries.md),
+[maintained webmail and frontend components](docs/web-client-options.md), and
+[attachment retrieval representations](docs/attachment-retrieval.md).
 
 ## Development
 
