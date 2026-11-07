@@ -60,14 +60,15 @@ Pateat, Kogane or Kuebiko. No cross-job artifact transfer is needed for the depl
 job because its checks, build, native email test, validation and publication use
 the same checkout and build output.
 
-Branch protection is separate GitHub repository configuration, not a workflow
-file. The aligned default-branch ruleset requires pull requests, the GitHub Actions
-`CI Check`, signed commits, linear history, and CodeQL analysis with errors and
-high-or-higher security findings blocked. It prevents deletion and force-pushes,
-with the same repository-administrator bypass as Pateat and Kogane.
-As in the reference repositories, it does not require an approval count or strict
-up-to-date status checks. Contributors must still obtain the independent review
-required by AGENTS.md; a zero approval-count policy does not waive that instruction.
+Branch protection is separate GitHub repository configuration, not a workflow file. The
+aligned default-branch ruleset requires pull requests, the GitHub Actions `CI Check`,
+signed commits, linear history, and CodeQL analysis that blocks every new alert a pull
+request introduces, whatever its severity or level. A push dismisses earlier approvals.
+It prevents deletion and force-pushes, with the same repository-administrator bypass as
+Pateat and Kogane, which works only through a pull request. As in the reference
+repositories, it does not require an approval count or strict up-to-date status checks.
+Contributors must still obtain the independent review required by AGENTS.md; a zero
+approval-count policy does not waive that instruction.
 
 Mail route acceptance, Gmail inbox placement and original-byte archival are
 verified independently of CI and deployment. See the [ingress runbook](ingress.md).
