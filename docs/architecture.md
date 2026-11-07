@@ -48,11 +48,11 @@ policy prioritizes existing Gmail delivery when archival fails, with alerts and
 Gmail gap reconciliation. Verify forwarding and archival outcomes independently;
 do not assume an uncaught exception guarantees SMTP redelivery.
 
-Store original MIME without rewriting it, including encrypted attachments. R2
-stream uploads require known length; test `rawSize` with `FixedLengthStream` or
-bounded buffering. Workers memory limits apply to parser object graphs, base64
-decoding and decompression together. Queue messages carry object IDs, not mail
-bodies. See the [email handler](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/),
+Store original MIME without rewriting it, including encrypted attachments. R2 stream
+uploads require known length; test `rawSize` with `FixedLengthStream` or bounded
+buffering. Workers memory limits apply to parser object graphs, base64 decoding and
+decompression together. Queue messages carry object IDs, not mail bodies. See the
+[email handler](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/),
 [R2 binding](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/),
 [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) and
 [Queue limits](https://developers.cloudflare.com/queues/platform/limits/).
@@ -85,16 +85,17 @@ Gmail Sent mirror. Restart the relevant scan when a history cursor expires.
 [Gmail messages](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages),
 [sync guide](https://developers.google.com/workspace/gmail/api/guides/sync).
 
-Index normalized bodies and supported attachments/derivatives, never assume `.eml`
-or encrypted bytes are searchable. A managed index can convert supported original
+Index normalized bodies and supported attachments/derivatives, never assume `.eml` or
+encrypted bytes are searchable. A managed index can convert supported original
 attachments; fumi need not pre-create a `.txt` for each one. Preserve originals,
 structure and visual evidence. See [attachment representations](attachment-retrieval.md)
 for OCR and optional multimodal retrieval. Start with metadata filters plus keyword and
 vector/hybrid retrieval. Evaluate managed AI Search before writing a full custom
 indexer; keep D1 metadata authoritative and evaluate D1 FTS5 plus Vectorize if
-filtering, freshness or ranking needs exceed the managed path. Japanese keyword
-search needs explicit tokenizer evaluation: AI Search's trigram has a short-term
-limitation below three characters. [R2 data source](https://developers.cloudflare.com/ai-search/configuration/data-source/r2/),
+filtering, freshness or ranking needs exceed the managed path. Japanese keyword search
+needs explicit tokenizer evaluation: AI Search's trigram has a short-term limitation
+below three characters.
+[R2 data source](https://developers.cloudflare.com/ai-search/configuration/data-source/r2/),
 [keyword indexing](https://developers.cloudflare.com/ai-search/configuration/indexing/keyword-search/).
 
 Expose read-only MCP search, message/thread access and attachment access with
@@ -104,13 +105,14 @@ be visible. A custom authenticated Worker can call the private search binding;
 do not expose a managed public search endpoint for private mail by default.
 Apply access filters before evidence reaches the model.
 
-The requested paper, [Retriever-Free Retrieval: Navigating Documents with Decision Models](https://arxiv.org/html/2610.35868),
+The requested paper,
+[Retriever-Free Retrieval: Navigating Documents with Decision Models](https://arxiv.org/html/2610.35868),
 introduces DecisionRAG: joint candidate decisions traverse a topic/document/passage
-hierarchy. It still needs hierarchy construction and has pruning-recall risks.
-Reported results use non-generative decision models, including Jev; replacing
-them with Claude/GPT calls does not establish the same latency or cost. Treat it
-as an experiment alongside a hybrid baseline on bilingual mail, exact identifiers,
-attachments and cross-message questions, not as a settled production dependency.
+hierarchy. It still needs hierarchy construction and has pruning-recall risks. Reported
+results use non-generative decision models, including Jev; replacing them with
+Claude/GPT calls does not establish the same latency or cost. Treat it as an experiment
+alongside a hybrid baseline on bilingual mail, exact identifiers, attachments and
+cross-message questions, not as a settled production dependency.
 
 ## Rules, plugins and classification
 

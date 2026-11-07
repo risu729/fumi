@@ -8,16 +8,18 @@ node = "26.13.0"
 hk = "2.11.1"
 "npm:oxlint" = "1.91.0"
 oxfmt = "0.75.0"
-jactionlint = "2.4.0"
+jactionlint = "2.5.0"
 shellcheck = "0.11.0"
 ghalint = "1.6.0"
 pinact = "5.0.2"
 zizmor = "1.32.0"
 tombi = "1.10.0"
+rumdl = "0.3.2"
 yamlfmt = "0.21.0"
 uv = "0.13.7"
 yamllint = "1.38.0"
 typos = "1.52.0"
+pkl = "0.32.2"
 betterleaks = "1.10.0"
 
 [settings]
@@ -55,15 +57,15 @@ run = "vitest run"
 [tasks."check:output"]
 description = "Validate production Build Output without contacting deployed resources."
 depends = ["build"]
-run = "cf deploy --prebuilt --mode production --dry-run"
+run = "cf workers versions create --prebuilt --mode production --worker fumi --dry-run"
 
 [tasks."test:artifact"]
 description = "Run a native synthetic Email event against the built bundle and local R2."
 depends = ["build"]
 run = "node test/artifact.mjs"
 
-[tasks.deploy]
-description = "Deploy the built Worker without modifying Email Routing rules."
+[tasks."deploy:bootstrap"]
+description = "Explicitly deploy the full built Worker for bootstrap or configuration changes."
 run = "cf deploy --prebuilt --mode production --no-provision"
 
 [tasks.check]

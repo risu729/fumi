@@ -11,10 +11,10 @@ baseline; sender-domain onboarding and generated binding types are implementatio
 prerequisites. Keep the binding call behind a small adapter for testing and durable
 submission handling. A second sending provider is not part of the plan.
 
-Cloudflare's current limits allow arbitrary recipients after sending-domain
-onboarding, a 25 MiB complete message and 50 total recipients. Allow for MIME
-encoding overhead. The native API returns `{ messageId }` and supports to/cc/bcc,
-replyTo, text/HTML and attachments. [Limits](https://developers.cloudflare.com/email-service/platform/limits/),
+Cloudflare's current limits allow arbitrary recipients after sending-domain onboarding,
+a 25 MiB complete message and 50 total recipients. Allow for MIME encoding overhead. The
+native API returns `{ messageId }` and supports to/cc/bcc, replyTo, text/HTML and
+attachments. [Limits](https://developers.cloudflare.com/email-service/platform/limits/),
 [Workers API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/).
 
 Cloudflare's published scope is transactional email and excludes marketing.
@@ -67,20 +67,22 @@ inbox placement, delivery to every recipient, or human reading.
 
 - A crash/timeout after submission starts is `unknown`, even without a saved
   provider ID. An expired local lease does not prove it is safe to send again.
-- The reviewed [Cloudflare REST contract](https://developers.cloudflare.com/email-service/api/send-emails/rest-api/)
-  and [send API](https://developers.cloudflare.com/api/resources/email_sending/methods/send/)
+- The reviewed
+  [Cloudflare REST contract](https://developers.cloudflare.com/email-service/api/send-emails/rest-api/)
+  and
+  [send API](https://developers.cloudflare.com/api/resources/email_sending/methods/send/)
   do not document a provider idempotency guarantee. Reconcile using available
   receipts/activity; hold unresolved results rather than blindly resubmitting.
-- Never mint a new key automatically after an unknown outcome. A deliberate resend records the
-  possibility that the original submission succeeded.
+- Never mint a new key automatically after an unknown outcome. A deliberate resend
+  records the possibility that the original submission succeeded.
 - Let the provider retry temporary SMTP delivery failures after acceptance; a
   deferred event is not a reason to submit a second message.
 
 Process delivery events idempotently and tolerate duplication/reordering without
-regressing settled states. Cloudflare sends domain-scoped delivery events to
-Queues, but excludes Email Routing events and delivery to verified routing
-recipients. A verified-destination smoke test therefore does not validate the
-production event path. [Cloudflare events](https://developers.cloudflare.com/email-service/reference/event-subscriptions/).
+regressing settled states. Cloudflare sends domain-scoped delivery events to Queues, but
+excludes Email Routing events and delivery to verified routing recipients. A
+verified-destination smoke test therefore does not validate the production event path.
+[Cloudflare events](https://developers.cloudflare.com/email-service/reference/event-subscriptions/).
 
 ## Attachments, replies and sent records
 
@@ -90,11 +92,11 @@ decrypted derivatives explicitly. Validate count/size/encoding overhead, filenam
 content types and header injection before provider I/O. Keep Bcc private in
 envelope metadata and out of shared search results and citations.
 
-Archive the submitted input, attachment hashes, renderer/adapter version and
-provider receipts. A locally generated preview/export MIME is not the provider's
-final transmitted bytes. Cloudflare controls Message-ID, Date and transport/MIME
-headers; save provider IDs separately from RFC Message-ID until their relationship
-is verified. [Header contract](https://developers.cloudflare.com/email-service/reference/headers/).
+Archive the submitted input, attachment hashes, renderer/adapter version and provider
+receipts. A locally generated preview/export MIME is not the provider's final
+transmitted bytes. Cloudflare controls Message-ID, Date and transport/MIME headers; save
+provider IDs separately from RFC Message-ID until their relationship is verified.
+[Header contract](https://developers.cloudflare.com/email-service/reference/headers/).
 
 Replies use stored parent headers for In-Reply-To/References and retain a local
 thread link. MCP new sends and later replies use the outbound API, not the live

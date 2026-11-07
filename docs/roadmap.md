@@ -117,10 +117,11 @@ historical SENT messages. Future fumi sends stay in fumi's own sent archive.
 
 ## Phase 4: optional web client (low priority)
 
-- [ ] Evaluate mailbox-only UI reuse using [maintained project evidence](web-client-options.md).
-      Compare Cloud Mail as an application with independent components and a fumi
-      API adapter. Calendar, booking and drive features are out of scope; this
-      decision does not block initial ingestion/archive work.
+- [ ] Evaluate mailbox-only UI reuse using
+      [maintained project evidence](web-client-options.md). Compare Cloud Mail as an
+      application with independent components and a fumi API adapter. Calendar, booking
+      and drive features are out of scope; this decision does not block initial
+      ingestion/archive work.
 - [ ] Authenticated search, thread view, safe attachment preview and download.
 - [ ] Explain routing decisions, adoption versions, retry states and pending items.
 - [ ] Sanitize message HTML, block remote trackers, and isolate attachment previews.

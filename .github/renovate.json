@@ -3,8 +3,26 @@
   "extends": ["github>risu729/renovate-config#3.23.1"],
   "packageRules": [
     {
+      "description": "Keep the cf build and Workers test runtimes together, including prereleases.",
+      "matchPackageNames": ["cf", "miniflare", "@cloudflare/**"],
+      "groupName": "cloudflare workers",
+      "ignoreUnstable": false
+    },
+    {
+      "description": "Follow Vite plugin beta releases whose commit hashes do not sort by release date.",
+      "matchPackageNames": ["@cloudflare/vite-plugin"],
+      "followTag": "beta",
+      "rollbackPrs": true
+    },
+    {
+      "description": "An offered beta with a lower-sorting hash is still an update.",
+      "matchPackageNames": ["@cloudflare/vite-plugin"],
+      "matchUpdateTypes": ["rollback"],
+      "commitMessageAction": "Update"
+    },
+    {
       "description": "Review TypeScript and the shared compiler configuration together.",
-      "matchPackageNames": ["typescript", "@risu729/tsconfigs"],
+      "matchPackageNames": ["typescript", "npm:typescript", "@risu729/tsconfigs", "@types/**"],
       "groupName": "typescript"
     }
   ]

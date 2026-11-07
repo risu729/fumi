@@ -48,6 +48,7 @@ async function capture(message: ForwardableEmailMessage): Promise<Uint8Array<Arr
   let offset = 0;
   try {
     while (true) {
+      // oxlint-disable-next-line no-await-in-loop -- Read each MIME chunk before enforcing the byte limit and deadline.
       const { value, done } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       if (value.byteLength > size - offset) throw new CaptureError("size_mismatch");

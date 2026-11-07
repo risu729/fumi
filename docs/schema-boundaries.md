@@ -6,13 +6,26 @@ comes from public repository source and official integration documentation.
 
 ## Findings for Fumi
 
-The owner's current instruction selects **Valibot** and asks for **Standard Schema at integration boundaries**. That is supported by a close Pateat precedent, but it is not a uniform convention across every inspected repository. Hono, the official MCP TypeScript SDK, AI SDK, and Workers-runtime testing all have useful precedents. Keep their adoption separate from choosing the schema authoring library.
+The owner's current instruction selects **Valibot** and asks for
+**Standard Schema at integration boundaries**. That is supported by a close Pateat
+precedent, but it is not a uniform convention across every inspected repository. Hono,
+the official MCP TypeScript SDK, AI SDK, and Workers-runtime testing all have useful
+precedents. Keep their adoption separate from choosing the schema authoring library.
 
-Use Valibot to author Fumi's schemas, `StandardSchemaV1` for validation-capable consumer interfaces, and Standard JSON Schema where an integration also needs a model/tool/API description. Hono's `@hono/standard-validator` supports Valibot directly. MCP v2 and AI SDK also need JSON Schema conversion; plain Standard Schema validation alone does not supply it. A schema-library switch still requires semantic compatibility tests for coercion, transforms, strict objects, optional/default values, async validation, and generated JSON Schema.
+Use Valibot to author Fumi's schemas, `StandardSchemaV1` for validation-capable consumer
+interfaces, and Standard JSON Schema where an integration also needs a model/tool/API
+description. Hono's `@hono/standard-validator` supports Valibot directly. MCP v2 and AI
+SDK also need JSON Schema conversion; plain Standard Schema validation alone does not
+supply it. A schema-library switch still requires semantic compatibility tests for
+coercion, transforms, strict objects, optional/default values, async validation, and
+generated JSON Schema.
 
 ## Public repository sample
 
-Default-branch heads were freshly fetched. The sample deliberately includes two close application repositories and three different public projects; it is not an exhaustive inventory or evidence of a global personal preference. Manifest entries below were checked against actual imports/configuration.
+Default-branch heads were freshly fetched. The sample deliberately includes two close
+application repositories and three different public projects; it is not an exhaustive
+inventory or evidence of a global personal preference. Manifest entries below were
+checked against actual imports/configuration.
 
 | Repository / inspected commit                                                                                                       | Installed and actually used                                                                                                                                                                                                                                                                                                                                       | Implication                                                                                                                                                                   |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -24,26 +37,84 @@ Default-branch heads were freshly fetched. The sample deliberately includes two 
 
 Primary code pointers:
 
-- Pateat: [API dependencies](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/services/api/package.json), [boundary validator](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/services/api/src/validation.ts), [inference dependencies](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/packages/inference/package.json), [structured generation](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/packages/inference/src/structured.ts), [development decisions](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/docs/development.md).
-- Kogane: [app manifest](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/package.json), [Hono operations API](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/src/ops-api.ts), [MCP adapter](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/src/mcp.ts).
-- Kuebiko: [manifest](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/package.json), [validation](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/src/validation.ts), [test example](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/src/config.test.ts).
-- Notification cleanup: [manifest](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/package.json), [Workers tests](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/vitest.config.ts).
-- Emulate: [root manifest](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/package.json), [web manifest](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/apps/web/package.json), [AI SDK call site](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/apps/web/app/api/docs-chat/route.ts), [local Hono-compatible implementation](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/packages/@emulators/core/src/http.ts).
+- Pateat:
+  [API dependencies](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/services/api/package.json),
+  [boundary validator](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/services/api/src/validation.ts),
+  [inference dependencies](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/packages/inference/package.json),
+  [structured generation](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/packages/inference/src/structured.ts),
+  [development decisions](https://github.com/risu729/pateat/blob/a9e96280b51f137422e0a867aec206eb4b28ba38/docs/development.md).
+- Kogane:
+  [app manifest](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/package.json),
+  [Hono operations API](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/src/ops-api.ts),
+  [MCP adapter](https://github.com/risu729/kogane/blob/88eeb21a72f3fae101810d5c099f1fd9d6eff354/services/app/src/mcp.ts).
+- Kuebiko:
+  [manifest](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/package.json),
+  [validation](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/src/validation.ts),
+  [test example](https://github.com/risu729/kuebiko/blob/50869fde158b408bda01c6ca0c699382b9b6c0ba/src/config.test.ts).
+- Notification cleanup:
+  [manifest](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/package.json),
+  [Workers tests](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/vitest.config.ts).
+- Emulate:
+  [root manifest](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/package.json),
+  [web manifest](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/apps/web/package.json),
+  [AI SDK call site](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/apps/web/app/api/docs-chat/route.ts),
+  [local Hono-compatible implementation](https://github.com/risu729/emulate/blob/c77cb73e7ab525c5260dd36c04c91a54a23e7e75/packages/@emulators/core/src/http.ts).
 
 ## Official interoperability contracts
 
-**Hono:** `sValidator('json', schema)` from `@hono/standard-validator` accepts Valibot directly; its official guide demonstrates both Valibot and Zod with the same middleware. Define Fumi's wrapper against Standard Schema rather than importing Valibot-specific generic types. Preserve fixed public error responses and keep raw validation input/issues out of logs. [Hono validation guide](https://hono.dev/docs/guides/validation#standard-schema-validator-middleware).
+**Hono:** `sValidator('json', schema)` from `@hono/standard-validator` accepts Valibot
+directly; its official guide demonstrates both Valibot and Zod with the same middleware.
+Define Fumi's wrapper against Standard Schema rather than importing Valibot-specific
+generic types. Preserve fixed public error responses and keep raw validation
+input/issues out of logs.
+[Hono validation guide](https://hono.dev/docs/guides/validation#standard-schema-validator-middleware).
 
-**Standard Schema versus Standard JSON Schema:** `StandardSchemaV1` standardizes validation, issue paths and input/output type inference; validation may be asynchronous. `StandardJSONSchemaV1` separately supplies input/output JSON Schema conversion. Valibot implements the first natively and provides the second through `@valibot/to-json-schema`'s `toStandardJsonSchema`. The Valibot guide also notes its standard validation path uses global configuration. Do not assume every validation transform or refinement can be faithfully described as JSON Schema. [Specification](https://standardschema.dev/), [JSON Schema specification](https://standardschema.dev/json-schema), [Valibot integration](https://valibot.dev/guides/integrate-valibot/).
+**Standard Schema versus Standard JSON Schema:** `StandardSchemaV1` standardizes
+validation, issue paths and input/output type inference; validation may be asynchronous.
+`StandardJSONSchemaV1` separately supplies input/output JSON Schema conversion. Valibot
+implements the first natively and provides the second through
+`@valibot/to-json-schema`'s `toStandardJsonSchema`. The Valibot guide also notes its
+standard validation path uses global configuration. Do not assume every validation
+transform or refinement can be faithfully described as JSON Schema.
+[Specification](https://standardschema.dev/),
+[JSON Schema specification](https://standardschema.dev/json-schema),
+[Valibot integration](https://valibot.dev/guides/integrate-valibot/).
 
-**MCP TypeScript SDK v2:** official examples use `inputSchema: toStandardJsonSchema(v.object(...))`. The SDK derives the advertised JSON Schema and uses Valibot to validate calls. Output schemas and prompt argument schemas follow the same contract. This does not require making Zod Fumi's schema authoring library; retain the necessary transitive dependencies of the chosen SDK. Pin versions and test generated schemas and transport on workerd before claiming compatibility. [Official schema-library guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/advanced/schema-libraries.md).
+**MCP TypeScript SDK v2:** official examples use
+`inputSchema: toStandardJsonSchema(v.object(...))`. The SDK derives the advertised JSON
+Schema and uses Valibot to validate calls. Output schemas and prompt argument schemas
+follow the same contract. This does not require making Zod Fumi's schema authoring
+library; retain the necessary transitive dependencies of the chosen SDK. Pin versions
+and test generated schemas and transport on workerd before claiming compatibility.
+[Official schema-library guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/advanced/schema-libraries.md).
 
-**AI SDK:** its current schema implementation accepts Standard Schema but requires JSON Schema conversion when constructing the provider schema; it throws if conversion is absent and requests draft-07 input conversion. Therefore use a Standard JSON Schema-capable wrapper, or isolate the documented `@ai-sdk/valibot` helper in an adapter. `jsonSchema(document, { validate })` is another explicit adapter path; omitting its optional validation is not equivalent to a Valibot runtime validator. No model/API call was made to verify a provider's accepted subset. [Official implementation](https://github.com/vercel/ai/blob/main/packages/provider-utils/src/schema.ts), [Valibot helper](https://ai-sdk.dev/docs/reference/ai-sdk-core/valibot-schema), [JSON Schema helper](https://ai-sdk.dev/docs/reference/ai-sdk-core/json-schema).
+**AI SDK:** its current schema implementation accepts Standard Schema but requires JSON
+Schema conversion when constructing the provider schema; it throws if conversion is
+absent and requests draft-07 input conversion. Therefore use a Standard JSON
+Schema-capable wrapper, or isolate the documented `@ai-sdk/valibot` helper in an
+adapter. `jsonSchema(document, { validate })` is another explicit adapter path; omitting
+its optional validation is not equivalent to a Valibot runtime validator. No model/API
+call was made to verify a provider's accepted subset.
+[Official implementation](https://github.com/vercel/ai/blob/main/packages/provider-utils/src/schema.ts),
+[Valibot helper](https://ai-sdk.dev/docs/reference/ai-sdk-core/valibot-schema),
+[JSON Schema helper](https://ai-sdk.dev/docs/reference/ai-sdk-core/json-schema).
 
 ## Selected integration policy
 
-- Record Valibot as the selected authoring library, replacing the previous Zod-versus-Valibot proposal. Do not install runtime packages in this research-only change.
-- Keep reusable validators and plugin adapters typed as Standard Schema consumers. Author concrete schemas with Valibot internally; do not wrap every internal parsing call merely to hide the library.
-- For MCP/model integrations require both validation and JSON Schema conversion, or provide one narrow adapter. Test wire-schema equivalence against actual runtime acceptance; reject unsupported conversions rather than silently broadening validation.
-- Standard Schema objects contain executable validation functions and are not a remotely portable plugin manifest. Remote owner plugins still publish authenticated, versioned declarative manifests/JSON Schema and execute privileged domain code in their own Workers. Fumi may use Standard Schema for its local adapter contract without evaluating arbitrary remote JavaScript.
-- Keep Hono, MCP SDK, AI SDK/provider selection, deployment tooling and test-runtime adoption scoped to the feature that needs them. Existing usage is evidence of familiarity, not blanket approval or proof of production compatibility.
+- Record Valibot as the selected authoring library, replacing the previous
+  Zod-versus-Valibot proposal. Do not install runtime packages in this research-only
+  change.
+- Keep reusable validators and plugin adapters typed as Standard Schema consumers.
+  Author concrete schemas with Valibot internally; do not wrap every internal parsing
+  call merely to hide the library.
+- For MCP/model integrations require both validation and JSON Schema conversion, or
+  provide one narrow adapter. Test wire-schema equivalence against actual runtime
+  acceptance; reject unsupported conversions rather than silently broadening validation.
+- Standard Schema objects contain executable validation functions and are not a remotely
+  portable plugin manifest. Remote owner plugins still publish authenticated, versioned
+  declarative manifests/JSON Schema and execute privileged domain code in their own
+  Workers. Fumi may use Standard Schema for its local adapter contract without
+  evaluating arbitrary remote JavaScript.
+- Keep Hono, MCP SDK, AI SDK/provider selection, deployment tooling and test-runtime
+  adoption scoped to the feature that needs them. Existing usage is evidence of
+  familiarity, not blanket approval or proof of production compatibility.

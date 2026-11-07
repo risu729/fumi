@@ -2,19 +2,43 @@ amends "https://raw.githubusercontent.com/risu729/hk-config/v3.1.0/presets.pkl"
 
 import "https://raw.githubusercontent.com/risu729/hk-config/v3.1.0/helpers.pkl"
 
-steps = (helpers.pick(new Listing {
-  "oxlint"
-  "oxfmt"
-  "github-actions"
-  "tombi"
-  "yaml"
-  "typos"
-  "hygiene"
-  "betterleaks"
-})) {
-  ["typos"] = new Step {
-    check = "typos --force-exclude {{ files }}"
-    fix = "typos --force-exclude --write-changes {{ files }}"
+steps = (
+  helpers.pick(new Listing {
+    "oxlint"
+    "oxfmt"
+    "github-actions"
+    "tombi"
+    "rumdl"
+    "yaml"
+    "typos"
+    "hygiene"
+    "mise"
+    "hk-validate"
+    "pkl-format"
+    "betterleaks"
+  })
+) {
+  ["typos"] {
+    // The preset's diff wrapper uses POSIX shell syntax; direct checks work on Windows.
+    check_diff = null
+  }
+  ["pkl-format"] {
+    // Use the formatter directly because Windows does not provide the preset's sh.
+    shell = null
+    fix {
+      command = "pkl format --write {{ files }}"
+    }
+  }
+  ["yaml"] {
+    steps {
+      // mise owns the exact generated lockfile layout for installed tools.
+      ["yamllint"] {
+        exclude = helpers.yamlLockExcludes + List(".mise/locks/**")
+      }
+      ["yamlfmt"] {
+        exclude = helpers.yamlLockExcludes + List(".mise/locks/**")
+      }
+    }
   }
 }
 

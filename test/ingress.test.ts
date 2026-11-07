@@ -77,7 +77,7 @@ async function receipts(): Promise<Receipt[]> {
 }
 
 beforeEach(async () => {
-  for (const object of await objects()) await env.MAIL_ARCHIVE.delete(object.key);
+  await Promise.all((await objects()).map(({ key }) => env.MAIL_ARCHIVE.delete(key)));
 });
 afterEach(() => {
   vi.restoreAllMocks();
