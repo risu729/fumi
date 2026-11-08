@@ -68,8 +68,11 @@ a repair path; tune throughput using measured volume and cost.
 
 The reconciler does not forward mail, recreate R2 receipts, restore MIME from
 Gmail, extract attachments, run models or emit notifications. If both R2 objects
-are absent, it cannot discover the lost invocation. Logs/Gmail reconciliation
-and alert delivery remain future work. Retention/deletion must include catalog
+are absent, it cannot discover the lost invocation. Ingestion-outcome monitoring
+and alert delivery remain future work. Gmail-based recovery is out of scope:
+forwarding is temporary, and the eventual capture/recovery path must work without
+Gmail. Historical Gmail backfill remains a separate migration task.
+Retention/deletion must include catalog
 tombstones before automatic object deletion is introduced.
 
 ## Verification and rollout

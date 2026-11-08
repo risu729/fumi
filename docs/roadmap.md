@@ -4,6 +4,11 @@ Status: development foundation and initial phase-1 runtime implemented,
 2026-11-07. Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
+Target state: fumi operates independently of Gmail. Existing Gmail forwarding is
+temporary and will be retired after migration readiness is verified. Historical
+Gmail backfill remains in scope; ongoing Gmail synchronization, automatic recovery
+of live archive gaps from Gmail, and Gmail inbox management are out of scope.
+
 ## Phase 0: development foundation
 
 - [x] Public repository with a single TypeScript package and locked dependencies.
@@ -22,7 +27,8 @@ production acceptance is separate. Unchecked items remain future work.
       durable ingest status and forwarding outcome independently.
 - [x] Specify duplicate handling and partial R2/receipt/forwarding failure recovery.
       D1 and Queue failure handling belongs to their later implementation.
-- [ ] Automate archive-gap monitoring and reconciliation from Gmail.
+- [ ] Monitor archival failures using fumi's ingestion outcomes and R2/D1 evidence;
+      report missing originals without relying on Gmail for recovery.
 - [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler;
       production database migration and Cron activation remain pending. This repairs the
       catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
@@ -80,8 +86,6 @@ establish production delivery.
       bounded retries, a dead-letter path and status reconciliation for ambiguity.
 - [ ] Run rules/model decisions in shadow mode and replay synthetic cases before
       allowing notifications. Backfill never triggers historical notifications.
-- [ ] If Gmail archiving is later enabled, treat it as a separate authorized action:
-      remove only INBOX, verify the result, retain labels and never advance on failure.
 
 ## Phase 2C: outbound email through MCP
 
@@ -105,6 +109,20 @@ See [outbound MCP](outbound-mcp.md). This is future functionality; no actual
 message is sent and no sending domain is configured by the bootstrap.
 Ongoing Gmail Sent synchronization is out of scope; phase 2A still imports
 historical SENT messages. Future fumi sends stay in fumi's own sent archive.
+
+## Phase 2D: retire Gmail forwarding
+
+- [ ] Verify historical import completeness and fumi's independent receive/store,
+      retrieval/MCP, routing/notification and send/reply paths.
+- [ ] Define and test durable capture, failure reporting and retry/recovery behavior
+      without a Gmail copy. R2/D1 reconciliation cannot recreate an original that
+      was never stored; do not assume SMTP retries after an invocation failure.
+- [ ] Disable Gmail forwarding in fumi and adopted specialist routes through a
+      separately authorized cutover; remove forwarding-only configuration when
+      no longer needed and verify mail handling without Gmail delivery.
+
+This is a future runtime and routing change. Current forwarding remains enabled;
+the low-priority web client is not a prerequisite for retirement.
 
 ## Phase 3: encrypted attachments
 
