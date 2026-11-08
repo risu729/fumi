@@ -5,6 +5,11 @@ It does not parse mail, extract attachments, run CEL or models, dispatch plugins
 backfill Gmail, or send new mail. Encrypted attachments remain in their original
 MIME representation. Revisit CEL before implementing routing.
 
+Gmail forwarding is temporary. The
+[roadmap](roadmap.md#phase-2d-retire-gmail-forwarding) includes its retirement after
+independent mail handling is verified. Gmail-based archive recovery is out of scope;
+historical backfill remains a migration task.
+
 ## Delivery and storage boundaries
 
 Gmail forwarding and archival are independent operations. An archive failure must
@@ -26,10 +31,12 @@ ingest ID, schema version and hash for recovery if the receipt write fails.
 The original and receipt are separate R2 writes. A stored original with a missing
 receipt is an orphan to reconcile, not proof that forwarding failed. A receipt
 with a missing original is an archive gap. R2 outage and invocation termination
-can prevent both records; payload-free logs and Gmail are the recovery sources.
+can prevent both records. Payload-free logs can identify failed attempts but
+cannot reconstruct missing MIME bytes. The future capture/recovery design must
+work without Gmail before forwarding is retired.
 The separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from
 remaining R2 evidence; its production activation is pending. It cannot restore
-missing originals from Gmail, and no alert destination is configured.
+missing originals, and no alert destination is configured.
 
 Use a private R2 bucket: no r2.dev public access, no public custom domain, and no
 HTTP endpoint serving messages. Keep envelope addresses and forwarding settings
@@ -53,7 +60,7 @@ include email-event envelope metadata; restrict access to the Cloudflare account
    the destination independently. Do not publish real messages as fixtures.
    Route activation can lag API readback: require the received message's fresh
    `X-Fumi-Ingest-ID` to match the stored receipt. Record the propagation window
-   for later gap reconciliation; an earlier message may use the old route.
+   for capture coverage checks; an earlier message may use the old route.
 5. Move one selected ordinary route only after acceptance. Re-read the route and
    test it again. Keep the other domain and specialist routes unchanged until
    they have their own acceptance evidence.
@@ -68,16 +75,15 @@ limitation and keep broad cutover pending.
 - Restore the selected rule's original forwarding action from the private
   snapshot. Preserve its other fields, then read it back. Retain stored originals
   and receipts; route rollback does not require deleting evidence or the bucket.
-- For an archival failure, identify the affected time window using outcome logs
-  and receipts, then reconcile from Gmail. Gmail's forwarded copy can have added
-  headers, so preserve it as a distinct source with its own hash. Do not overwrite
-  the ingress original or claim it is byte-identical.
+- For an archival failure, identify the affected time window using outcome logs,
+  receipts and R2 metadata. Record missing originals as unresolved; catalog repair
+  cannot recreate them. There is no automatic Gmail recovery in the plan.
 - For a forwarding error or unknown outcome, check Cloudflare delivery activity
   and Gmail first. Archive presence does not authorize or prove a second delivery.
 - For missing receipts, list the original/receipt pairs and inspect stored object
   metadata. Reconstruct only facts supported by evidence; retain unknown outcomes.
 - Keep all originals by default in this initial slice. Retention/deletion policy,
-  lifecycle rules, automated gap reconciliation and alert delivery are follow-up
+  lifecycle rules, archive-failure monitoring and alert delivery are follow-up
   work; no automatic expiry is configured.
 
 ## Access and repeatable deployments
@@ -111,7 +117,7 @@ bindings, select **Send to a Worker** with `fumi`, then read the rule back. Wher
 Email Routing already handles the domain, this changes the routing action rather
 than the domain's MX records. Repeat the controlled attachment test and require
 both received Gmail provenance and matching R2 bytes before accepting cutover.
-Record activation delay and reconcile any messages that took the old route.
+Record activation delay and any capture coverage gaps from the old route.
 
 Explicit specialist Worker rules take precedence over the catch-all; switching
 the catch-all does not archive their messages through fumi. Keep them in place

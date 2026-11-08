@@ -15,11 +15,14 @@ and recovery; a deployed Worker alone does not establish production delivery.
 
 ## Direction
 
-1. Preserve existing Gmail forwarding and archive incoming raw MIME in R2.
+1. Temporarily preserve existing Gmail forwarding while capturing raw MIME in R2.
 2. In parallel, backfill historical Gmail and build attachment-aware search/MCP;
    build deterministic routing, bounded model classification, and webhook delivery;
    add authenticated MCP email sending and replies.
-3. Add password-protected attachment processing, then a low-priority web client.
+3. Retire Gmail forwarding once fumi can reliably receive, store, retrieve, route
+   and send mail independently. Gmail-based archive recovery is out of scope;
+   historical Gmail backfill remains part of migration.
+4. Add password-protected attachment processing, then a low-priority web client.
 
 See [the roadmap](docs/roadmap.md), [architecture proposal](docs/architecture.md),
 and [library evaluation](docs/libraries.md). See also the
@@ -36,6 +39,8 @@ Further evidence:
 [schema integration and existing repository conventions](docs/schema-boundaries.md),
 [maintained webmail and frontend components](docs/web-client-options.md), and
 [attachment retrieval representations](docs/attachment-retrieval.md).
+The [Gmail connector tool reference](docs/reference/gmail-tools.md) preserves the
+tool descriptions and argument declarations available during design work.
 
 ## Development
 

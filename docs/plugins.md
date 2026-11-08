@@ -62,6 +62,8 @@ fumi. Revoking an adoption immediately blocks further data disclosure.
 Gmail forwarding and archival are independent delivery lanes. A plugin's
 `handled` result suppresses the ordinary action webhook for that lane; it does
 not suppress Gmail forwarding or raw archival during the initial phase.
+Gmail forwarding is temporary; after retirement, plugin handling preserves raw
+archival and normal webhook fallback without requiring a Gmail delivery lane.
 
 ## Kogane integration gap
 
@@ -71,8 +73,10 @@ uses a Cloudflare email event and forwards mail itself. Its
 [session object](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/session.ts)
 exposes a pending-challenge check and code completion, not the generic offer
 protocol above. The adapter and atomic claim/receipt semantics must be implemented
-in Kogane; they are not existing features. During cutover designate exactly one
-Gmail-forwarding owner to prevent duplicate delivery.
+in Kogane; they are not existing features. While Gmail forwarding remains enabled,
+designate exactly one forwarding owner to prevent duplicate delivery. Retirement
+must also remove specialist forwarding so adopted routes do not retain a hidden
+Gmail dependency.
 
 ## Acceptance cases
 

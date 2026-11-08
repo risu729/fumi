@@ -14,12 +14,12 @@ the CEL evaluator and limits before implementing routing.
 ```mermaid
 flowchart TD
   Mail[Inbound email] --> Ingress[Small Email Worker]
-  Ingress --> Gmail[Existing Gmail forwarding]
+  Ingress --> Gmail[Temporary Gmail forwarding: retire after migration]
   Ingress --> Raw[Private R2 originals]
   Raw --> Repair[Scheduled evidence reconciliation]
   Repair --> Catalog[D1 archive catalog]
   Ingress -.->|future| Receipt[D1 processing state and outbox]
-  Gmail --> Import[Resumable read-only backfill]
+  History[Historical Gmail mailbox] --> Import[Bounded read-only backfill]
   Import --> Raw
   Import --> Receipt
   Receipt --> Queue[Queue: object references only]
@@ -49,8 +49,13 @@ evidence through bounded scheduled scans; it is not on the SMTP path. The D1
 outbox design below is for later processing stages.
 Do not run model inference, extraction or decryption on the SMTP path. Forwarding
 and R2/D1/Queue writes are separate operations, not one transaction. The initial
-policy prioritizes existing Gmail delivery when archival fails, with alerts and
-Gmail gap reconciliation. Verify forwarding and archival outcomes independently;
+policy prioritizes existing Gmail delivery when archival fails. Gmail forwarding
+is transitional; the target system receives, stores and processes mail without it.
+Archive-failure alerts use fumi outcomes and R2/D1 evidence. Automatic recovery
+from Gmail is out of scope. Before retiring forwarding, define and verify durable
+capture and retry/recovery behavior that does not depend on a Gmail copy. Logs and
+catalog metadata alone cannot recreate original bytes that were never stored.
+Verify forwarding and archival outcomes independently during the transition;
 do not assume an uncaught exception guarantees SMTP redelivery.
 
 Store original MIME without rewriting it, including encrypted attachments. R2 stream
@@ -84,9 +89,10 @@ Use `gmail.readonly`, paginated message listing and `messages.get(format=RAW)`;
 RAW includes attachment MIME. Backfill includes historical SENT messages as well
 as received mail. Preserve labels, thread IDs and internalDate; one Gmail message
 with multiple labels is still one source message. Define spam/trash inclusion
-explicitly. Commit checkpoints only after durable storage. Read-only history sync
-may reconcile the bounded import or inbound archival gaps; it is not a continuous
-Gmail Sent mirror. Restart the relevant scan when a history cursor expires.
+explicitly. Commit checkpoints only after durable storage. Read-only history sync,
+if used, is limited to completing the bounded historical import. It does not repair
+live archival gaps or maintain an ongoing Gmail mirror. Restart the relevant import
+scan when a history cursor expires and stop synchronization when import completes.
 [Gmail messages](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages),
 [sync guide](https://developers.google.com/workspace/gmail/api/guides/sync).
 
