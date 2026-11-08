@@ -96,6 +96,11 @@ do not widen the deploy token by assumption.
    runs do not execute or validate SQL. Even `migrations list` may create its
    bookkeeping table; use explicit read-only queries for inspection.
 4. Deploy the reviewed code and binding to the provisioned database. Existing
+   deployment requires the production environment variable
+   `FUMI_CATALOG_DATABASE_ID` in GitHub Actions. Set it to the verified UUID so the
+   Worker-scoped token does not need a D1 API lookup to resolve a name.
+   Local tests and CI dry runs can omit it and use a local database.
+   The
    manual CI deployment uses the versions strategy with `deploy-triggers: false`;
    it will not activate the Cron schedule. Verify resource resolution and
    deployment credentials separately.

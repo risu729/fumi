@@ -24,12 +24,21 @@ jobs:
     permissions:
       contents: read
     environment: production
+    env:
+      FUMI_CATALOG_DATABASE_ID: ${{ vars.FUMI_CATALOG_DATABASE_ID }}
     steps:
       - name: Checkout the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Require the provisioned catalog database
+        run: |
+          if [[ ! "${FUMI_CATALOG_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo '::error::Set the production FUMI_CATALOG_DATABASE_ID variable after provisioning and migrating the catalog database.'
+            exit 1
+          fi
+          echo "::add-mask::${FUMI_CATALOG_DATABASE_ID}"
       - name: Install locked tools
         uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
