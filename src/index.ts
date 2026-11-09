@@ -1,6 +1,9 @@
 // This is an archive-and-forward ingress only. Message content cannot choose actions.
 import { MAX_RAW_BYTES, CAPTURE_TIMEOUT_MS } from "./limits.ts";
 import { reconcileArchive } from "./reconcile.ts";
+import { repairProcessing, requestProcessing } from "./processing-jobs.ts";
+
+export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
 
 export type Receipt = ArchiveReceipt;
@@ -103,16 +106,25 @@ async function forward(
 
 export default {
   async scheduled(_controller, env): Promise<void> {
+    let failed = false;
     try {
       const result = await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
       console.log(JSON.stringify({ event: "archive_reconcile", ...result }));
     } catch {
       // Storage errors can include private keys or SQL parameters. Log only a fixed code.
       console.error(JSON.stringify({ event: "archive_reconcile", status: "failed" }));
-      throw new Error("Archive reconciliation did not complete");
+      failed = true;
     }
+    try {
+      const processing = await repairProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING);
+      console.log(JSON.stringify({ event: "processing_repair", ...processing }));
+    } catch {
+      console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
+      failed = true;
+    }
+    if (failed) throw new Error("Archive reconciliation did not complete");
   },
-  async email(message, env): Promise<void> {
+  async email(message, env, ctx): Promise<void> {
     const ingestId = crypto.randomUUID();
     const receivedAt = new Date().toISOString();
     const prefix = `ingest/${receivedAt.slice(0, 10)}/${ingestId}`;
@@ -160,6 +172,17 @@ export default {
       console.error(JSON.stringify(outcome));
     } else {
       console.log(JSON.stringify(outcome));
+    }
+    if (archive.status === "stored" || receiptStatus === "stored") {
+      // Delivery has already been attempted. A D1/Workflow outage never changes
+      // its result; R2 sweeps recover work lost beyond the background lifetime.
+      ctx.waitUntil(
+        requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, `${prefix}/raw.eml`).catch(() => {
+          console.error(
+            JSON.stringify({ event: "processing_dispatch", status: "deferred", ingestId }),
+          );
+        }),
+      );
     }
     // Preserve successful forwarding across R2 failures. Surface forwarding failure
     // to Email Routing only after saving whatever recovery evidence was possible.

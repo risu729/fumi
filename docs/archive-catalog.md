@@ -34,8 +34,10 @@ reconstruction cannot recreate evidence absent from R2.
 
 ## Bounded reconciliation
 
-The Email handler does not access D1. A D1 outage or schema failure cannot delay
-or fail its Gmail forwarding path. The scheduled handler performs one R2 list
+The Email handler schedules background D1/Workflow job creation after delivery
+outcomes settle. A D1 outage or schema failure cannot fail Gmail forwarding.
+See [processing Workflows](processing-workflows.md) for immediate indexing and
+missing-start repair. The scheduled handler also performs one R2 list
 page of at most 20 objects, inspecting candidates discovered from either sibling
 filename. It reads raw metadata only and bounds receipt reads to 16 KiB. It
 validates the schema, ingest ID, date and sibling key before indexing. It never
@@ -62,9 +64,10 @@ proof that every mail was captured or all siblings existed at the same instant.
 The configured cadence is one page every five minutes. This is an initial repair
 mechanism for the small live archive, not low-latency indexing for a large
 historical import. Each pass costs at least one listing per 20 objects plus
-sibling reads and D1 writes. New mail may wait an entire pass. Before bulk
-backfill, add incremental indexing with stable source keys and retain sweeps as
-a repair path; tune throughput using measured volume and cost.
+sibling reads and D1 writes. Workflows provides immediate indexing with stable
+source keys; mail whose background start fails may wait an entire scan pass.
+Before bulk backfill, tune incremental processing and sweep throughput using
+measured volume and cost.
 
 The reconciler does not forward mail, recreate R2 receipts, restore MIME from
 Gmail, extract attachments, run models or emit notifications. If both R2 objects
@@ -80,8 +83,9 @@ tombstones before automatic object deletion is introduced.
 `mise run test` exercises the migration and reconciler against local workerd
 R2/D1 with synthetic fixtures. `mise run test:artifact` executes native Email and
 Cron events against the production bundle. It delivers synthetic mail before the
-D1 schema exists, then applies the migration locally and verifies scheduled
-catalog creation. These checks do not access production mail.
+D1 schema exists, then applies migrations locally and verifies scheduled recovery
+and Workflow completion. A second message is cataloged without another scan.
+These checks do not access production mail.
 
 Do not dispatch deployment expecting it to provision or migrate D1. The existing
 Worker-scoped deploy token has not been verified for D1 provisioning or schema

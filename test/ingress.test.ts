@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { createScheduledController } from "cloudflare:test";
+import {
+  createExecutionContext,
+  createScheduledController,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
 import { CAPTURE_TIMEOUT_MS, MAX_RAW_BYTES } from "../src/limits.ts";
@@ -59,7 +63,12 @@ function message(bytes = mime, rawSize = bytes.byteLength, chunkSize = 37) {
 }
 
 async function run(incoming: ForwardableEmailMessage, bindings = env) {
-  await worker.email(incoming, bindings);
+  const ctx = createExecutionContext();
+  try {
+    await worker.email(incoming, bindings, ctx);
+  } finally {
+    await waitOnExecutionContext(ctx);
+  }
 }
 
 async function objects() {
@@ -93,14 +102,20 @@ describe("archive and forward ingress in workerd", () => {
     const incoming = message();
     await run(incoming);
     expect(incoming.forward).toHaveBeenCalledOnce();
-    expect(database).not.toHaveBeenCalled();
+    expect(database).toHaveBeenCalledOnce();
 
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await expect(worker.scheduled(createScheduledController(), env)).rejects.toThrow(
       "Archive reconciliation did not complete",
     );
-    expect(error).toHaveBeenCalledExactlyOnceWith(
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenNthCalledWith(
+      1,
       JSON.stringify({ event: "archive_reconcile", status: "failed" }),
+    );
+    expect(error).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({ event: "processing_repair", status: "failed" }),
     );
   });
 
