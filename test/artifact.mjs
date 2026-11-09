@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { Miniflare } from "miniflare";
 import { readD1Migrations } from "@cloudflare/vitest-plugin";
+import { setTimeout } from "node:timers/promises";
 
 // Execute the built production bundle with native workerd Email/Cron events and local R2/D1.
 // Miniflare simulates forwarding; this never sends SMTP or uses provisioned storage.
@@ -81,7 +82,45 @@ try {
   assert.equal(scanResult.outcome, "ok");
   const rows = await catalog.prepare("SELECT COUNT(*) AS count FROM archive_sources").first();
   assert.equal(rows.count, 1);
-  console.log("Native Email/Cron events, R2/D1 and built artifact: passed");
+  const bindings = await runtime.getBindings();
+  async function waitForProcessing(rawKey) {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      // oxlint-disable-next-line no-await-in-loop -- Poll the real local Workflow with a deadline.
+      const job = await catalog
+        .prepare("SELECT * FROM processing_jobs WHERE raw_key = ?")
+        .bind(rawKey)
+        .first();
+      if (job?.state === "failed") assert.fail(`Workflow failed: ${job.failure_code}`);
+      if (job?.state === "complete") {
+        // oxlint-disable-next-line no-await-in-loop -- Confirm the managed engine also reached completion.
+        const instance = await bindings.MAIL_PROCESSING.get(job.instance_id);
+        // oxlint-disable-next-line no-await-in-loop -- Confirm engine state after ledger persistence.
+        if ((await instance.status()).status === "complete") return;
+      }
+      // oxlint-disable-next-line no-await-in-loop -- Bounded local runtime polling.
+      await setTimeout(50);
+    }
+    assert.fail("Workflow did not complete before deadline");
+  }
+  await waitForProcessing(receipt.archive.key);
+  const immediate = await runtime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/email?from=envelope@example.invalid&to=bcc@example.invalid&format=json",
+    { method: "POST", body: raw },
+  );
+  assert.equal(immediate.status, 200);
+  assert.equal((await immediate.json()).outcome, "ok");
+  const second = (await bucket.list()).objects.find(
+    (object) => object.key.endsWith("/raw.eml") && object.key !== receipt.archive.key,
+  );
+  assert.ok(second);
+  await waitForProcessing(second.key);
+  assert.equal(
+    (await catalog.prepare("SELECT COUNT(*) AS count FROM archive_sources").first()).count,
+    2,
+  );
+  assert.equal((await catalog.prepare("SELECT pass FROM archive_scan").first()).pass, 1);
+  console.log("Native Email/Cron/Workflow events, R2/D1 and built artifact: passed");
 } finally {
   await runtime.dispose();
 }

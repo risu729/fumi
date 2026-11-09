@@ -1,4 +1,6 @@
-import { commitPage, readCheckpoint } from "./catalog.ts";
+import { commitPage, commitSource, readCheckpoint } from "./catalog.ts";
+import { archiveCandidate, validArchiveTime } from "./archive-key.ts";
+import type { ArchiveCandidate as Candidate } from "./archive-key.ts";
 import { MAX_RAW_BYTES } from "./limits.ts";
 import { canonicalReceipt, parseReceipt } from "./receipt-schema.ts";
 import type { CatalogIssue, IssueCode, SourceObservation } from "./catalog.ts";
@@ -7,14 +9,6 @@ import type { ArchiveReceipt } from "./receipt-schema.ts";
 export const RECONCILE_PAGE_SIZE = 20;
 export const MAX_RECEIPT_BYTES = 16 * 1024;
 const RECEIPT_READ_TIMEOUT_MS = 5_000;
-const ingestKey =
-  /^ingest\/(\d{4}-\d{2}-\d{2})\/([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\/(raw\.eml|receipt\.json)$/;
-
-interface Candidate {
-  prefix: string;
-  ingestId: string;
-  day: string;
-}
 
 interface RawEvidence {
   receivedAt: string;
@@ -32,13 +26,6 @@ export interface ReconcileResult {
   pass: number;
 }
 
-function validTime(value: string, day: string): boolean {
-  const date = new Date(value);
-  return (
-    Number.isFinite(date.valueOf()) && date.toISOString() === value && value.slice(0, 10) === day
-  );
-}
-
 function rawEvidence(raw: R2Object, candidate: Candidate): RawEvidence | null {
   const metadata = raw.customMetadata;
   if (
@@ -46,7 +33,7 @@ function rawEvidence(raw: R2Object, candidate: Candidate): RawEvidence | null {
     metadata["schemaVersion"] !== "1" ||
     metadata["ingestId"] !== candidate.ingestId ||
     typeof metadata["receivedAt"] !== "string" ||
-    !validTime(metadata["receivedAt"], candidate.day) ||
+    !validArchiveTime(metadata["receivedAt"], candidate.day) ||
     typeof metadata["envelopeFrom"] !== "string" ||
     typeof metadata["envelopeTo"] !== "string" ||
     typeof metadata["sha256"] !== "string" ||
@@ -129,7 +116,7 @@ async function readReceipt(bucket: R2Bucket, candidate: Candidate): Promise<Rece
   if (
     !receipt ||
     receipt.ingestId !== candidate.ingestId ||
-    !validTime(receipt.receivedAt, candidate.day) ||
+    !validArchiveTime(receipt.receivedAt, candidate.day) ||
     (receipt.archive.status === "stored" && receipt.archive.key !== `${candidate.prefix}/raw.eml`)
   ) {
     return { state: "invalid", code: "invalid_receipt" };
@@ -201,15 +188,12 @@ export async function reconcileArchive(bucket: R2Bucket, db: D1Database): Promis
   const candidates = new Map<string, Candidate>();
   const issues: CatalogIssue[] = [];
   for (const object of listed.objects) {
-    const match = ingestKey.exec(object.key);
-    const day = match?.[1];
-    const ingestId = match?.[2];
-    if (!match || !day || !ingestId || !validTime(`${day}T00:00:00.000Z`, day)) {
+    const candidate = archiveCandidate(object.key);
+    if (!candidate) {
       issues.push({ key: object.key, code: "invalid_key" });
       continue;
     }
-    const prefix = `ingest/${day}/${ingestId}`;
-    candidates.set(prefix, { prefix, day, ingestId });
+    candidates.set(candidate.prefix, candidate);
   }
   const observations: SourceObservation[] = [];
   // Twenty objects cap both candidate count and concurrent request fanout.
@@ -228,5 +212,29 @@ export async function reconcileArchive(bucket: R2Bucket, db: D1Database): Promis
     indexed: result.indexed,
     issues: result.issues,
     pass: checkpoint.pass,
+  };
+}
+
+/** Index one source without moving the sweep cursor or claiming a completed pass. */
+export async function indexArchiveSource(
+  bucket: R2Bucket,
+  db: D1Database,
+  rawKey: string,
+  instanceId?: string,
+) {
+  const candidate = archiveCandidate(rawKey);
+  if (!candidate || rawKey !== `${candidate.prefix}/raw.eml`) {
+    throw new Error("Invalid archive source key");
+  }
+  const session = db.withSession("first-primary");
+  const checkpoint = await readCheckpoint(session);
+  const { observation, issues } = await observe(bucket, candidate);
+  const result = await commitSource(session, checkpoint, observation, issues, instanceId);
+  if (!result.committed) throw new Error("Catalog revision changed");
+  return {
+    indexed: result.indexed,
+    issues: result.issues,
+    rawState: observation.rawState,
+    receiptState: observation.receiptState,
   };
 }

@@ -26,12 +26,15 @@ of live archive gaps from Gmail, and Gmail inbox management are out of scope.
 - [x] Record envelope metadata, content hash, original size, ingress provenance,
       durable ingest status and forwarding outcome independently.
 - [x] Specify duplicate handling and partial R2/receipt/forwarding failure recovery.
-      D1 and Queue failure handling belongs to their later implementation.
+      Processing start failures now have a D1 ledger and bounded repair path.
 - [ ] Monitor archival failures using fumi's ingestion outcomes and R2/D1 evidence;
       report missing originals without relying on Gmail for recovery.
-- [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler;
-      production database migration and Cron activation remain pending. This repairs the
+- [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler.
+      This repairs the
       catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
+- [x] Add Cloudflare Workflows for immediate catalog registration, durable job state,
+      retry and missing-start repair. Production activation remains pending;
+      see [processing Workflows](processing-workflows.md).
 - [x] Bound memory and MIME sizes; test actual length, capture timeouts, oversized mail,
       malformed MIME, duplicate deliveries, and forwarding loops.
 - [x] Establish payload-free application logs, observability and manual recovery.
@@ -154,5 +157,5 @@ coverage; classifier SDK/provider/model; plugin distribution and trust mechanism
 production delivery/recovery policy. Cloudflare Email Sending and Valibot are
 selected, with Standard Schema integration boundaries; their runtime integration
 has not been implemented.
-The first implementation stays focused on
-forwarding plus raw archival; none of these later choices blocks the scaffold.
+The implemented runtime covers forwarding, raw archival, catalog reconciliation
+and a Workflows catalog stage; extraction and other consumers remain future work.

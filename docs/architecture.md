@@ -3,8 +3,10 @@
 Status: initial R2 capture and Gmail forwarding implemented, 2026-11-07; the
 remaining flow is partly an implementation proposal. Ingress uses R2 originals
 and private receipt sidecars. A D1 catalog and separate scheduled R2 reconciler
-are implemented with production activation pending; Queues, outbox and downstream
-processing remain future work. See [catalog recovery](archive-catalog.md) and the
+are implemented. Cloudflare Workflows adds a catalog stage and durable job ledger,
+with production activation pending. Queues, outbox and downstream consumers
+remain future work. See [processing Workflows](processing-workflows.md),
+[catalog recovery](archive-catalog.md) and the
 [ingress runbook](ingress.md).
 Cloudflare Email Sending, Valibot and CEL are selected for later stages; revisit
 the CEL evaluator and limits before implementing routing.
@@ -18,7 +20,11 @@ flowchart TD
   Ingress --> Raw[Private R2 originals]
   Raw --> Repair[Scheduled evidence reconciliation]
   Repair --> Catalog[D1 archive catalog]
-  Ingress -.->|future| Receipt[D1 processing state and outbox]
+  Ingress -->|background start| Jobs[D1 job ledger]
+  Jobs --> Workflow[Workflows catalog stage]
+  Workflow --> Catalog
+  Repair -->|missing-start repair| Jobs
+  Workflow -.->|future| Receipt[Downstream state and outbox]
   History[Historical Gmail mailbox] --> Import[Bounded read-only backfill]
   Import --> Raw
   Import --> Receipt
@@ -45,7 +51,8 @@ single long synchronous workflow.
 
 Keep the email handler small: archive bytes, record receipt, preserve forwarding.
 The email handler records receipts in R2. The separate D1 catalog indexes that
-evidence through bounded scheduled scans; it is not on the SMTP path. The D1
+evidence through Workflows and bounded scheduled scans. Background job creation
+runs after the delivery outcomes settle; it cannot change them. The D1
 outbox design below is for later processing stages.
 Do not run model inference, extraction or decryption on the SMTP path. Forwarding
 and R2/D1/Queue writes are separate operations, not one transaction. The initial
@@ -74,14 +81,16 @@ forwarding adds headers. Preserve both provenance and the relationship rather
 than assuming equal hashes. Derivatives retain parent IDs, hashes, extraction
 version, page/part locations and success/unsupported/error states.
 
-D1 holds structured metadata, processing status, checkpoints and an outbox.
-Queues provide independent retryable work. A small scheduled reconciler can
-repair R2 objects lacking metadata and outbox rows not yet enqueued. Consumers
+D1 holds structured metadata and processing status; an outbox remains planned.
+Workflows owns durable step retries and checkpoints. Queues remain optional for
+future backpressure. A small scheduled reconciler repairs R2 objects lacking
+metadata and jobs not yet started. Future outbox consumers
 must be idempotent. Define object-key conventions that support recovery without
 putting subject lines or addresses in keys. Add a Durable Object only for a
 demonstrated coordination need, such as active-account fencing or a serialized
 claim that cannot be handled transactionally by its existing owner. No DO per
-message by default. Workflows are optional for multi-step durable jobs later.
+message by default. Workflows is the selected orchestration layer; D1 terminal
+state persists beyond the managed execution-history retention.
 
 ## Gmail import and search
 

@@ -1,4 +1,4 @@
-import { bindings, defineConfig, triggers } from "cf/config";
+import { bindings, defineConfig, exports, triggers } from "cf/config";
 import { loadEnv } from "vite";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 import { compatibilityDate } from "./worker-runtime.ts";
@@ -12,6 +12,12 @@ export default defineConfig({
     name: "fumi",
     entrypoint,
     compatibilityDate,
+    exports: {
+      MailProcessing: exports.workflow({
+        name: "fumi-mail-processing",
+        defaultRetention: { successRetention: "3 days", errorRetention: "3 days" },
+      }),
+    },
     env: {
       MAIL_ARCHIVE: bindings.r2({ name: "fumi-mail" }),
       MAIL_CATALOG: bindings.d1({
@@ -19,6 +25,11 @@ export default defineConfig({
         ...(catalogId ? { id: catalogId } : {}),
       }),
       FORWARD_TO: bindings.secret(),
+      MAIL_PROCESSING: bindings.workflow({
+        name: "fumi-mail-processing",
+        worker: "fumi",
+        exportName: "MailProcessing",
+      }),
     },
     workersDev: false,
     previewUrls: false,

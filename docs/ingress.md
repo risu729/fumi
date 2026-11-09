@@ -25,18 +25,18 @@ per invocation rather than deduplicating by the untrusted Message-ID header.
 Duplicate SMTP deliveries therefore remain distinct evidence. A later logical
 message index may link them using provenance and content hashes.
 
-Objects use `ingest/YYYY-MM-DD/<random-ingest-id>/raw.eml` and `receipt.json`.
-The original's private object metadata also preserves the envelope, capture time,
-ingest ID, schema version and hash for recovery if the receipt write fails.
-The original and receipt are separate R2 writes. A stored original with a missing
-receipt is an orphan to reconcile, not proof that forwarding failed. A receipt
-with a missing original is an archive gap. R2 outage and invocation termination
-can prevent both records. Payload-free logs can identify failed attempts but
-cannot reconstruct missing MIME bytes. The future capture/recovery design must
-work without Gmail before forwarding is retired.
-The separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from
-remaining R2 evidence; its production activation is pending. It cannot restore
-missing originals, and no alert destination is configured.
+Objects use `ingest/YYYY-MM-DD/<random-ingest-id>/raw.eml` and `receipt.json`. The
+original's private object metadata also preserves the envelope, capture time, ingest ID,
+schema version and hash for recovery if the receipt write fails. The original and
+receipt are separate R2 writes. A stored original with a missing receipt is an orphan to
+reconcile, not proof that forwarding failed. A receipt with a missing original is an
+archive gap. R2 outage and invocation termination can prevent both records. Payload-free
+logs can identify failed attempts but cannot reconstruct missing MIME bytes. The future
+capture/recovery design must work without Gmail before forwarding is retired. The
+separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from remaining
+R2 evidence. The new [Workflows stage](processing-workflows.md) also indexes immediately
+and repairs missing starts; its activation is pending. Neither can restore missing
+originals, and no alert destination is configured.
 
 Use a private R2 bucket: no r2.dev public access, no public custom domain, and no
 HTTP endpoint serving messages. Keep envelope addresses and forwarding settings

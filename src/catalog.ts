@@ -41,8 +41,6 @@ export interface PageCommit {
   issues: number;
 }
 
-const fence = "EXISTS (SELECT 1 FROM archive_scan WHERE id = 1 AND revision = ?)";
-
 export async function readCheckpoint(db: D1DatabaseSession): Promise<ScanCheckpoint> {
   const checkpoint = await db
     .prepare("SELECT cursor, revision, pass FROM archive_scan WHERE id = 1")
@@ -60,6 +58,45 @@ export async function commitPage(
   issues: CatalogIssue[],
   nextCursor: string | null,
 ): Promise<PageCommit> {
+  return commitObservations(db, checkpoint, observations, issues, nextCursor, nextCursor === null);
+}
+
+export async function commitSource(
+  db: D1DatabaseSession,
+  checkpoint: ScanCheckpoint,
+  observation: SourceObservation,
+  issues: CatalogIssue[],
+  instanceId?: string,
+): Promise<PageCommit> {
+  return commitObservations(
+    db,
+    checkpoint,
+    [observation],
+    issues,
+    checkpoint.cursor,
+    false,
+    instanceId,
+  );
+}
+
+// Single-source commits also advance the observation revision, fencing out scans
+// that read older R2 evidence. Only traversal commits may move the cursor/pass.
+async function commitObservations(
+  db: D1DatabaseSession,
+  checkpoint: ScanCheckpoint,
+  observations: SourceObservation[],
+  issues: CatalogIssue[],
+  nextCursor: string | null,
+  completedPass: boolean,
+  instanceId?: string,
+): Promise<PageCommit> {
+  const attemptFence =
+    instanceId === undefined
+      ? ""
+      : " AND EXISTS (SELECT 1 FROM processing_jobs WHERE instance_id = ? AND state = 'running')";
+  const fence = `EXISTS (SELECT 1 FROM archive_scan WHERE id = 1 AND revision = ?)${attemptFence}`;
+  const fenceArgs =
+    instanceId === undefined ? [checkpoint.revision] : [checkpoint.revision, instanceId];
   const statements: D1PreparedStatement[] = [];
   const sourceStatements: number[] = [];
   const issueStatements: number[] = [];
@@ -76,7 +113,7 @@ export async function commitPage(
                AND source_namespace = 'ingress-v1' AND external_id = ? AND raw_key != ?)
            ON CONFLICT (object_key, code) DO UPDATE SET last_pass = excluded.last_pass`,
         )
-        .bind(rawKey, checkpoint.pass, checkpoint.pass, checkpoint.revision, ingestId, rawKey),
+        .bind(rawKey, checkpoint.pass, checkpoint.pass, ...fenceArgs, ingestId, rawKey),
       db
         .prepare(
           `INSERT INTO archive_issues (object_key, code, first_pass, last_pass)
@@ -90,7 +127,7 @@ export async function commitPage(
           receiptKey,
           checkpoint.pass,
           checkpoint.pass,
-          checkpoint.revision,
+          ...fenceArgs,
           snapshot,
           ingestId,
           snapshot,
@@ -130,7 +167,7 @@ export async function commitPage(
           observation.rawSha256,
           checkpoint.pass,
           checkpoint.revision,
-          checkpoint.revision,
+          ...fenceArgs,
         ),
     );
   }
@@ -143,16 +180,16 @@ export async function commitPage(
            SELECT ?, ?, ?, ? WHERE ${fence}
            ON CONFLICT (object_key, code) DO UPDATE SET last_pass = excluded.last_pass`,
         )
-        .bind(issue.key, issue.code, checkpoint.pass, checkpoint.pass, checkpoint.revision),
+        .bind(issue.key, issue.code, checkpoint.pass, checkpoint.pass, ...fenceArgs),
     );
   }
   statements.push(
     db
       .prepare(
         `UPDATE archive_scan SET cursor = ?, revision = revision + 1,
-         pass = pass + ? WHERE id = 1 AND revision = ?`,
+         pass = pass + ? WHERE id = 1 AND revision = ?${attemptFence}`,
       )
-      .bind(nextCursor, nextCursor === null ? 1 : 0, checkpoint.revision),
+      .bind(nextCursor, completedPass ? 1 : 0, ...fenceArgs),
   );
   const results = await db.batch(statements);
   const committed = results.at(-1)?.meta.changes === 1;
