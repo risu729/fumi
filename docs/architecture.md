@@ -1,12 +1,12 @@
 # Architecture proposal
 
-Status: initial R2 capture and Gmail forwarding implemented, 2026-11-07; the
-remaining flow is partly an implementation proposal. Ingress uses R2 originals
-and private receipt sidecars. A D1 catalog and separate scheduled R2 reconciler
-are implemented. Cloudflare Workflows adds a catalog stage and durable job ledger,
-with production activation pending. Queues, outbox and downstream consumers
-remain future work. See [processing Workflows](processing-workflows.md),
-[catalog recovery](archive-catalog.md) and the
+Status: initial R2 capture and Gmail forwarding implemented, 2026-11-07; the remaining
+flow is partly an implementation proposal. Ingress uses R2 originals and private receipt
+sidecars. A D1 catalog and separate scheduled R2 reconciler are implemented. Cloudflare
+Workflows adds a catalog stage and durable job ledger, with production activation
+verified on 2026-11-10. Queues, outbox and downstream consumers remain future work. See
+[processing Workflows](processing-workflows.md), [catalog recovery](archive-catalog.md)
+and the
 [ingress runbook](ingress.md).
 Cloudflare Email Sending, Valibot and CEL are selected for later stages; revisit
 the CEL evaluator and limits before implementing routing.

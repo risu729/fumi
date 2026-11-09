@@ -35,7 +35,8 @@ logs can identify failed attempts but cannot reconstruct missing MIME bytes. The
 capture/recovery design must work without Gmail before forwarding is retired. The
 separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from remaining
 R2 evidence. The new [Workflows stage](processing-workflows.md) also indexes immediately
-and repairs missing starts; its activation is pending. Neither can restore missing
+and repairs missing starts; production activation was verified on 2026-11-10.
+Neither can restore missing
 originals, and no alert destination is configured.
 
 Use a private R2 bucket: no r2.dev public access, no public custom domain, and no

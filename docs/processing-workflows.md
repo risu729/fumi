@@ -1,7 +1,9 @@
 # Mail processing with Cloudflare Workflows
 
-Status: catalog-stage implementation, 2026-11-10. Production activation is a
-separate rollout. MIME extraction, OCR, indexing for search, classification and
+Status: catalog-stage production activation verified on 2026-11-10, including
+synthetic Gmail forwarding, R2 byte comparison, D1 completion and scheduled repair.
+Private rollout evidence is retained outside this public repository.
+MIME extraction, OCR, indexing for search, classification and
 external delivery are not implemented by this pipeline.
 
 ## Ownership and identity
@@ -37,6 +39,13 @@ observations advance the revision without advancing the sweep cursor or pass.
 They fence stale scans; superseded attempts cannot write stale observations.
 Retries are idempotent, including completion writes repeated after a lost response.
 
+The repository configures a Workflow concurrency limit of five. The platform queues
+excess instances, reducing concurrent catalog writes during repair bursts without
+delaying the SMTP forwarding path. This conservative initial limit is not a throughput
+measurement or a live/backfill priority mechanism; bulk import still needs its own
+scheduling policy. Apply changes to this limit through the Workflow resource
+configuration, not just a Worker version upload.
+
 States are `pending`, `running`, `complete`, and `failed`. A catalog operation may
 complete while recording missing or invalid R2 evidence: inspect catalog issues
 and source states separately. This stage does not recreate missing originals.
@@ -69,7 +78,7 @@ or restore an old ledger backup against live instances without reconciliation.
 
 ## Production rollout
 
-Code merge does not activate this feature. Before the next production deployment:
+The initial rollout is complete. For a new environment or configuration rollout:
 
 1. Verify the target Worker, R2 bucket and existing D1 database. Apply the additive
    `0002_processing_jobs.sql` migration with separately authorized access and

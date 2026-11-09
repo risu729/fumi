@@ -33,11 +33,13 @@ of live archive gaps from Gmail, and Gmail inbox management are out of scope.
       This repairs the
       catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
 - [x] Add Cloudflare Workflows for immediate catalog registration, durable job state,
-      retry and missing-start repair. Production activation remains pending;
+      retry and missing-start repair. Production activation was verified on 2026-11-10;
       see [processing Workflows](processing-workflows.md).
 - [x] Bound memory and MIME sizes; test actual length, capture timeouts, oversized mail,
       malformed MIME, duplicate deliveries, and forwarding loops.
 - [x] Establish payload-free application logs, observability and manual recovery.
+- [x] Configure Workers Issues beta and a per-Workflow concurrency limit.
+      See [Cloudflare features](cloudflare-features.md) for scope and verification.
 - [ ] Configure alert delivery and an explicit retention/deletion policy beyond
       the initial keep-all behavior.
 - [x] Complete and record staged production acceptance for selected routes.

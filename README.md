@@ -8,8 +8,9 @@ forwarding, archives original MIME bytes and private receipts in R2, and records
 archive and forwarding outcomes independently. Runtime tests use synthetic mail.
 A D1 catalog and bounded scheduled reconciler index existing R2 evidence separately
 from delivery. Cloudflare Workflows now adds immediate catalog registration,
-durable processing state and missing-start repair; its production activation is
-pending. See [processing Workflows](docs/processing-workflows.md) and
+durable processing state and missing-start repair. Production activation and
+synthetic forwarding/archive/Workflow acceptance were verified on 2026-11-10.
+See [processing Workflows](docs/processing-workflows.md) and
 [catalog recovery](docs/archive-catalog.md) for identity, failures and rollout.
 Backfill, search, plugin routing, model classification, webhooks and outbound MCP
 are planned. See the [ingress runbook](docs/ingress.md) for deployment, acceptance
@@ -41,6 +42,8 @@ Further evidence:
 [schema integration and existing repository conventions](docs/schema-boundaries.md),
 [maintained webmail and frontend components](docs/web-client-options.md), and
 [attachment retrieval representations](docs/attachment-retrieval.md).
+See [Cloudflare feature evaluation](docs/cloudflare-features.md) for adopted
+monitoring and concurrency controls and candidates for later processing stages.
 The [Gmail connector tool reference](docs/reference/gmail-tools.md) preserves the
 tool descriptions and argument declarations available during design work.
 
