@@ -16,8 +16,12 @@ hashes and explicit coverage failures. This stage has not been activated in
 production; see [MIME extraction](docs/mime-extraction.md) for limits and rollout.
 See [processing Workflows](docs/processing-workflows.md) and
 [catalog recovery](docs/archive-catalog.md) for identity, failures and rollout.
-Backfill, search, plugin routing, model classification, webhooks and outbound MCP
-are planned. See the [ingress runbook](docs/ingress.md) for deployment, acceptance
+Agent-facing read/search/draft/send MCP, durable sending records, provider delivery
+event ingestion and signed MCP Events are implemented with synthetic tests.
+Sender domains, authentication and delivery-event production activation remain
+pending; see the [agent mail API](docs/agent-mail.md).
+Backfill, full-text search, plugin routing and model classification remain planned.
+See the [ingress runbook](docs/ingress.md) for deployment, acceptance
 and recovery; a deployed Worker alone does not establish production delivery.
 
 ## Direction

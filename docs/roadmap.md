@@ -65,8 +65,9 @@ establish production delivery.
 - [ ] Use managed conversion/OCR for supported attachments where suitable; compare
       optional visual retrieval without requiring a custom `.txt` for every file.
       See [attachment representations](attachment-retrieval.md).
-- [ ] Build keyword/hybrid retrieval baseline and read-only authenticated MCP tools
-      for search, thread/message retrieval and attachment access with citations.
+- [x] Add authenticated MCP metadata search, message/thread reads and attachment
+      resources. See [agent mail](agent-mail.md) for explicit coverage and limits.
+- [ ] Build keyword/hybrid retrieval over bodies and attachments with citations.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -97,23 +98,29 @@ establish production delivery.
 ## Phase 2C: outbound email through MCP
 
 - [x] Select native Cloudflare Email Sending on the Workers Paid deployment baseline.
-- [ ] Verify the sender domain and binding configuration before implementing sending.
-- [ ] Add separately scoped draft, preview, send, reply and send-status MCP tools.
+- [ ] Verify sender domains, account quotas and production binding configuration
+      before activating sending.
+- [x] Add separately scoped draft, preview, send, reply and send-status MCP tools.
       A permitted explicit send invocation may send directly; an interactive
       confirmation screen is not a universal requirement.
-- [ ] Authorize sender identities, recipients, attachments and reply targets from
+- [x] Authorize sender identities, recipients, attachments and reply targets from
       trusted caller grants. Mail/search content cannot grant send permission.
-- [ ] Persist a stable logical send ID, validated input and outbox state before
+- [x] Persist a stable logical send ID, validated input and outbox state before
       provider submission. Reject key reuse with different content.
-- [ ] Reconcile uncertain submission outcomes; do not blindly retry a send after
+- [x] Reconcile retained submission receipts and known-provider delivery events;
+      preserve uncertainty and do not blindly retry a send after
       a timeout. Track accepted, delivered, bounced and failed as distinct states.
-- [ ] Archive the submitted content and provider receipts, linking replies to
+- [x] Archive the submitted content and provider receipts, linking replies to
       source messages. Do not claim these are the provider's final wire bytes.
-- [ ] Test thread headers, attachment limits, duplicate calls, timeout after
+- [x] Test thread headers, attachment limits, duplicate calls, timeout after
       acceptance, authorization failures and provider delivery events.
+- [x] Implement signed MCP Events with durable lifecycle events, scoped
+      subscriptions, replay and bounded retries.
+- [ ] Activate and verify the authenticated production client, sender domains,
+      provider delivery Queue subscription and real webhook acceptance.
 
-See [outbound MCP](outbound-mcp.md). This is future functionality; no actual
-message is sent and no sending domain is configured by the bootstrap.
+See [outbound MCP](outbound-mcp.md) and the [agent API](agent-mail.md).
+Implementation and synthetic tests do not establish production delivery.
 Ongoing Gmail Sent synchronization is out of scope; phase 2A still imports
 historical SENT messages. Future fumi sends stay in fumi's own sent archive.
 
@@ -159,8 +166,9 @@ the low-priority web client is not a prerequisite for retirement.
 CEL implementation; retrieval backend; DecisionRAG viability; attachment format
 coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
 production delivery/recovery policy. Cloudflare Email Sending and Valibot are
-selected, with Standard Schema integration boundaries; their runtime integration
-has not been implemented.
+selected, with implemented Standard Schema MCP boundaries and a native sending
+binding adapter; production sender activation remains pending.
 The implemented runtime covers forwarding, raw archival, catalog reconciliation
-and versioned Workflows for cataloging and bounded MIME extraction. Production
-currently uses the catalog stage; OCR, search and other consumers remain future work.
+and versioned Workflows for cataloging and bounded MIME extraction, plus the
+agent mail API described above. Production currently uses the catalog stage;
+OCR, full-text search and historical import remain future work.

@@ -1,3 +1,5 @@
+import { eventStatement } from "./event-store.ts";
+
 export type IssueCode =
   | "invalid_key"
   | "invalid_raw_metadata"
@@ -28,6 +30,7 @@ export interface SourceObservation {
   receiptState: "valid" | "missing" | "invalid";
   rawSize: number | null;
   rawSha256: string | null;
+  notifyEvents?: boolean;
 }
 
 export interface CatalogIssue {
@@ -137,8 +140,8 @@ async function commitObservations(
           `INSERT INTO archive_sources (
              source_kind, source_namespace, external_id, raw_key, receipt_key,
              received_at, receipt_snapshot, forward_status, raw_state,
-             receipt_state, raw_size, raw_sha256, observed_pass, observed_revision
-           ) SELECT 'email_routing', 'ingress-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             receipt_state, raw_size, raw_sha256, observed_pass, observed_revision, notify_events
+           ) SELECT 'email_routing', 'ingress-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE ${fence}
            ON CONFLICT (source_kind, source_namespace, external_id) DO UPDATE SET
              received_at = CASE WHEN archive_sources.receipt_snapshot IS NULL
@@ -150,6 +153,7 @@ async function commitObservations(
              receipt_state = excluded.receipt_state,
              raw_size = excluded.raw_size,
              raw_sha256 = excluded.raw_sha256,
+             notify_events = MAX(archive_sources.notify_events, excluded.notify_events),
              observed_pass = excluded.observed_pass,
              observed_revision = excluded.observed_revision
            WHERE archive_sources.raw_key = excluded.raw_key`,
@@ -167,9 +171,27 @@ async function commitObservations(
           observation.rawSha256,
           checkpoint.pass,
           checkpoint.revision,
+          observation.notifyEvents ? 1 : 0,
           ...fenceArgs,
         ),
     );
+    if (observation.notifyEvents && observation.rawState === "present" && observation.receivedAt) {
+      statements.push(
+        eventStatement(
+          db,
+          {
+            id: `received:${ingestId}`,
+            name: "email.received",
+            data: { ingestId },
+            occurredAt: observation.receivedAt,
+          },
+          {
+            sql: `${fence} AND EXISTS (SELECT 1 FROM archive_sources WHERE raw_key=? AND external_id=? AND raw_state='present' AND notify_events=1)`,
+            bindings: [...fenceArgs, rawKey, ingestId],
+          },
+        ),
+      );
+    }
   }
   for (const issue of issues) {
     issueStatements.push(statements.length);

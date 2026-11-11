@@ -9,6 +9,11 @@ export default defineConfig({
       miniflare: {
         bindings: {
           FORWARD_TO: "synthetic-forward@gmail.com",
+          ACCESS_ISSUER: "https://synthetic.cloudflareaccess.com",
+          ACCESS_AUDIENCE: "synthetic-app",
+          API_ORIGIN: "https://mail.example.invalid",
+          MAIL_GRANTS: "{}",
+          WEBHOOK_ORIGINS: "[]",
           TEST_MIGRATIONS: await readD1Migrations("migrations"),
         },
       },

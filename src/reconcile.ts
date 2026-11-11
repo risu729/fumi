@@ -170,6 +170,7 @@ async function observe(
       receiptState: receiptRead.state,
       rawSize: evidence?.size ?? null,
       rawSha256: evidence?.sha256 ?? null,
+      notifyEvents: evidence !== null && raw?.customMetadata?.["eventNotifications"] === "1",
     },
     issues,
   };

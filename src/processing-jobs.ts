@@ -1,4 +1,31 @@
 import { archiveCandidate } from "./archive-key.ts";
+import { eventStatement, type EventName } from "./event-store.ts";
+
+function processingEvent(
+  db: D1DatabaseSession,
+  rawKey: string,
+  instanceId: string,
+  name: EventName,
+  now: number,
+  state: string,
+) {
+  const candidate = archiveCandidate(rawKey);
+  if (!candidate) throw new Error("Invalid processing identity");
+  return eventStatement(
+    db,
+    {
+      id: `${name === "email.ready" ? "ready" : "failed"}:${instanceId}`,
+      name,
+      data: { ingestId: candidate.ingestId },
+      occurredAt: new Date(now).toISOString(),
+    },
+    {
+      sql: `EXISTS (SELECT 1 FROM processing_jobs j JOIN archive_sources s ON s.raw_key=j.raw_key WHERE j.raw_key=? AND j.instance_id=? AND j.state=? AND s.notify_events=1)
+      ${name === "email.ready" ? "AND EXISTS (SELECT 1 FROM mail_extractions WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete')" : ""}`,
+      bindings: [rawKey, instanceId, state, ...(name === "email.ready" ? [rawKey] : [])],
+    },
+  );
+}
 
 // Keep the previous pipeline executable while new jobs extract MIME.
 export const PIPELINE_VERSION = "mime-v1";
@@ -113,13 +140,18 @@ async function recordProblem(
   terminal: boolean,
   now: number,
 ) {
-  await db
+  const update = db
     .prepare(`UPDATE processing_jobs SET failure_code = ?, updated_at = ?,
     state = CASE WHEN ? THEN 'failed' ELSE state END
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running')`)
-    .bind(code, now, terminal ? 1 : 0, job.raw_key, job.pipeline_version, job.instance_id)
-    .run();
+    .bind(code, now, terminal ? 1 : 0, job.raw_key, job.pipeline_version, job.instance_id);
+  if (terminal)
+    await db.batch([
+      update,
+      processingEvent(db, job.raw_key, job.instance_id, "email.processing_failed", now, "failed"),
+    ]);
+  else await update.run();
 }
 
 async function dispatchJob(
@@ -143,14 +175,17 @@ async function dispatchJob(
 
   if (job.dispatched_at === null) {
     if (now - job.created_at >= DISPATCH_WINDOW_MS) {
-      const expired = await db
+      const expire = db
         .prepare(`UPDATE processing_jobs SET state = 'failed',
         failure_code = 'dispatch_expired', updated_at = ?
         WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
           AND state = 'pending' AND dispatched_at IS NULL`)
-        .bind(now, rawKey, pipelineVersion, job.instance_id)
-        .run();
-      return expired.meta.changes ? "terminal" : "deferred";
+        .bind(now, rawKey, pipelineVersion, job.instance_id);
+      const [expired] = await db.batch([
+        expire,
+        processingEvent(db, rawKey, job.instance_id, "email.processing_failed", now, "failed"),
+      ]);
+      return expired?.meta.changes ? "terminal" : "deferred";
     }
     try {
       const batch = await workflow.createBatch({
@@ -298,14 +333,19 @@ export async function beginProcessing(db: D1DatabaseSession, params: ProcessingP
 
 export async function completeProcessing(db: D1DatabaseSession, params: ProcessingParams) {
   const instanceId = processingInstanceId(params.rawKey, params.attempt, params.pipelineVersion);
-  const result = await db
+  const now = Date.now();
+  const update = db
     .prepare(`UPDATE processing_jobs SET state = 'complete',
     completed_at = ?, updated_at = ?, failure_code = NULL
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running')`)
-    .bind(Date.now(), Date.now(), params.rawKey, params.pipelineVersion, instanceId)
-    .run();
-  if (result.meta.changes) return;
+    .bind(now, now, params.rawKey, params.pipelineVersion, instanceId);
+  const [result] = await db.batch(
+    params.pipelineVersion === "mime-v1"
+      ? [update, processingEvent(db, params.rawKey, instanceId, "email.ready", now, "complete")]
+      : [update],
+  );
+  if (result?.meta.changes) return;
   const existing = await readProcessingJob(db, params.rawKey, params.pipelineVersion);
   if (existing?.instance_id !== instanceId || existing.state !== "complete") {
     throw new Error("Processing completion was fenced");
