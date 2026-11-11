@@ -19,5 +19,10 @@ export default defineConfig({
       },
     }),
   ],
-  test: { include: ["test/**/*.test.ts"] },
+  test: {
+    include: ["test/**/*.test.ts"],
+    // MIME/Gmail files allocate bounded raw buffers and isolated D1 runtimes.
+    // Avoid competing file runtimes while retaining every case and its deadline.
+    fileParallelism: false,
+  },
 });

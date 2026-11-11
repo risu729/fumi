@@ -1,13 +1,17 @@
 # Agent mail API
 
-Status: implemented with synthetic Workers tests, 2026-11-11. Production sender
-domain onboarding, Access configuration, Queue subscriptions and actual delivery
-acceptance are separate rollout steps. No UI is required.
+Status: authenticated production MCP reads, sends, replies, Gmail receipt and
+provider delivery-event projection were verified on 2026-11-11. Private acceptance
+evidence is retained outside this repository. Real signed MCP webhook acceptance
+remains deferred. Historical Gmail import is implemented with synthetic tests;
+OAuth setup, import activation and real-mail migration remain separate steps.
+No UI is required.
 
 ## Authentication and sender policy
 
-`/mcp` is a stateless Streamable HTTP MCP endpoint. `/api/mail/*` downloads use
-the same authentication. Cloudflare Access must front both paths. The Worker
+`/mcp` is a stateless Streamable HTTP MCP endpoint. `/api/mail/*` downloads and
+`/api/admin/gmail-import/*` operator actions use the same authentication.
+Cloudflare Access must front all three paths. The Worker
 verifies the RS256 assertion signature, issuer, application audience and expiry;
 it never accepts an identity from mail or request arguments. Configure Access
 Managed OAuth separately for clients that need OAuth discovery and login.
@@ -21,11 +25,16 @@ Server secrets:
 | `API_ORIGIN` | Exact HTTPS origin, without a trailing slash |
 | `MAIL_GRANTS` | JSON object from principal IDs to grants |
 | `WEBHOOK_ORIGINS` | JSON array of administrator-trusted exact HTTPS origins |
+| `GMAIL_IMPORT_CONFIG` | Optional private operator run/account/cutoff configuration |
+| `GMAIL_IMPORT_ACCESS_TOKEN` | Optional manually provisioned Gmail read-only access token |
 
 Principal IDs are `user:<verified sub>` or `service:<verified common_name>`.
 An unlisted principal has no access. Grants contain `scopes`, `fromAddresses`
-and optional `fromDomains`; every field is validated. The four scopes are
-`mail:read`, `mail:draft`, `mail:send` and `mail:events`. A domain grant permits
+and optional `fromDomains`; every field is validated. The scopes are
+`mail:read`, `mail:draft`, `mail:send`, `mail:events` and `mail:import`.
+The last scope grants only server-configured historical import operations; it
+does not authorize a caller to select credentials or import scope. See
+[historical Gmail import](gmail-import.md). A domain grant permits
 any local part at that exact domain, without permitting its subdomains or
 unrelated addresses. The provider must also have verified the sending domain.
 
@@ -38,7 +47,9 @@ uncacheable; HTML is downloaded as opaque content and never rendered.
 For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
 `from_address` overrides it within the caller's configured sender policy.
-New messages require an explicit sender. Recipients are always explicit;
+Imported Gmail has no trusted SMTP envelope and requires an explicit permitted
+sender when replying. Header To/From never supplies it. New messages require an
+explicit sender. Recipients are always explicit;
 replying never infers reply-all or adds an archive CC/BCC.
 
 ## Tools and bounded results
@@ -49,7 +60,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `search_emails`, `search_email_ids` | Bounded pages, opaque continuation token |
 | `search_mail_content` | Bounded literal body/text-attachment search with source citations |
 | `read_email`, `batch_read_email` | Full, metadata, minimal or raw; per-item batch errors |
-| `read_email_thread` | Direct Message-ID/In-Reply-To links, explicit truncation |
+| `read_email_thread` | Account-scoped Gmail threads or direct live header links, explicit truncation |
 | `read_attachment` | Parent message plus attachment ID; authenticated download |
 | `preview_email` | Validate without sending |
 | `upload_attachment`, `copy_attachment` | Stage new bytes or copy a verified archived part |
@@ -65,10 +76,17 @@ are client hints, not authorization.
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
 `after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
 `has:attachment`. Quote values containing spaces. It searches extracted metadata,
-not full bodies or attachments. `INBOX` denotes the inbound catalog. `SENT`
-lists the caller's outgoing operation records and accepts only an empty query.
-Other Gmail syntax is rejected. Pending/blocked extraction is reported explicitly.
-Thread links are direct header hints, not a complete conversation model.
+not full bodies or attachments. Without a source filter it includes live and
+imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
+Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
+live ingress has `INBOX`. Historical Gmail SENT messages therefore require
+`archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For compatibility,
+`SENT` without `archive_source` still lists the caller's outgoing operation records
+and accepts only an empty query. Continuation tokens bind query, source and labels;
+changing filters requires a new search. Other Gmail query syntax is rejected.
+Pending/blocked extraction remains visible. Gmail threads use retained account and
+thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
+direct untrusted header hints. Neither claims a complete conversation model.
 
 `search_mail_content` is a separate lexical baseline over bounded plain-text
 bodies and supported UTF-8 text attachments. It returns citations and explicit
@@ -153,7 +171,10 @@ Use controlled real-message acceptance after deployment: read an incoming
 message over authenticated MCP, send an authorized reply, confirm one received
 copy and its provider ID, inspect sent content, per-recipient events and signed
 MCP webhook delivery. Compare Gmail forwarding and raw R2 capture independently.
-Until those steps pass, production sending and MCP connectivity remain unverified.
+The read/send/reply/provider-event acceptance above passed on 2026-11-11.
+Keep real signed MCP webhook delivery as a separate acceptance gate; local signed
+callback tests do not establish production callback delivery. Gmail import and
+new retrieval features require their own migration and acceptance evidence.
 
 References:
 [Access JWT verification](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/),

@@ -1,6 +1,6 @@
 # Mail API activation
 
-The native configuration declares `fumi.risunosu.com`, a delivery-event consumer
+The native configuration declares `fumi.takuk.me`, a delivery-event consumer
 and its dead-letter queue. These declarations and a passing build do not prove
 that production resources or authentication are active. Keep account IDs,
 sender addresses, grants and acceptance evidence outside Git.
@@ -8,11 +8,16 @@ sender addresses, grants and acceptance evidence outside Git.
 ## Prepare and deploy
 
 Apply the catalog migrations and configure the secrets described in the
-[agent mail API](agent-mail.md#authentication-and-sender-policy) before deploying
-the new code. `API_ORIGIN` must be `https://fumi.risunosu.com`, with no trailing
-slash. Both `/mcp` and `/api/mail/*` must be covered by the owner-only Access
-application; retain the Worker's JWT checks. Keep Workers.dev and preview URLs
-disabled.
+[agent mail API](agent-mail.md#authentication-and-sender-policy) before deploying the
+new code. `API_ORIGIN` must be `https://fumi.takuk.me`, with no trailing slash. `/mcp`,
+`/api/mail/*` and `/api/admin/gmail-import/*` must be covered by the owner-only Access
+application; retain the Worker's JWT checks. Keep Workers.dev and preview URLs disabled.
+
+This hostname is the requested target configuration. Before changing the current
+deployment, reconcile its Worker domain, Access application and protected paths,
+and `API_ORIGIN` together. Verify denied anonymous access and authenticated MCP
+at the new hostname. Editing configuration alone does not move an existing endpoint
+or change secrets, DNS or Access policy.
 
 Verify the intended sending domains are enabled and review current quotas.
 Inspect existing Queues, consumers and subscriptions before creating anything;
@@ -122,8 +127,8 @@ on PATH is not required. Use the existing Access user policy and complete the
 browser login as the owner. Quiet login suppresses JWT output:
 
 ```sh
-mise exec -- cf access login --quiet https://fumi.risunosu.com
-mise exec -- cf access curl https://fumi.risunosu.com/mcp -- \
+mise exec -- cf access login --quiet https://fumi.takuk.me
+mise exec -- cf access curl https://fumi.takuk.me/mcp -- \
   --request POST --header 'Content-Type: application/json' \
   --header 'Accept: application/json, text/event-stream' \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fumi-owner-check","version":"1"}}}'

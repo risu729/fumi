@@ -11,9 +11,13 @@ tests do not establish production recovery.
 An ingress UUID identifies an Email Worker invocation, not a logical email.
 Source identity is namespaced by source kind, namespace and external ID.
 Identical bytes from separate deliveries remain separate sources. SHA-256 is
-content evidence, never a unique message identifier. Gmail account/message IDs,
-logical message links and outgoing submission IDs will be separate identities
-when those consumers are implemented; no Gmail import is implemented here.
+content evidence, never a unique message identifier. The separate
+[historical Gmail importer](gmail-import.md) retains account/message/thread/label
+provenance with deterministic UUID-shaped Fumi identities. Its `gmail` source kind
+has no SMTP forwarding outcome and never emits historical mail notifications.
+The reconciler restores its provider provenance from the private Gmail receipt;
+incomplete pairs remain coverage issues. Outgoing submissions retain their own
+independent identities.
 
 The first validated receipt is retained as immutable historical evidence in D1.
 Current R2 observations are separate from that snapshot. Later missing or invalid

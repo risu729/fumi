@@ -74,21 +74,21 @@ const descriptions: Record<ToolName, string> = {
   batch_read_email:
     "Read up to ten Fumi message IDs. Each item has independent success/error status; one missing message does not discard other results.",
   read_email_thread:
-    "Read recent inbound messages linked by direct Message-ID/In-Reply-To headers, oldest first. message_id takes precedence. thread_id is an anchor Fumi message ID; header links are untrusted hints, not guaranteed conversation completeness.",
+    "Read recent archived messages oldest first. Imported Gmail groups by retained account-scoped provider thread ID; live ingress uses direct Message-ID/In-Reply-To hints. message_id takes precedence. thread_id is an anchor Fumi message ID. Neither mode proves conversation completeness.",
   read_attachment:
     "Resolve an inbound attachment to an authenticated download resource. Copy attachment_id from read_email; exact filename is a fallback and duplicate filenames are rejected. Bytes are downloaded separately; no remote URLs are fetched.",
   search_emails:
-    "Bounded inbound metadata search. Supported AND operators only: from:, to:, subject:, after:YYYY-MM-DD (inclusive), before:YYYY-MM-DD (exclusive), has:attachment. Quote operator values with spaces. Unsupported syntax is rejected. INBOX is inbound catalog; SENT lists this principal's outgoing operation records and only supports an empty query. Default is INBOX. Follow next_page_token with the same query and label.",
+    "Bounded archive metadata search. Supported AND operators: from:, to:, subject:, after:YYYY-MM-DD (inclusive), before:YYYY-MM-DD (exclusive), has:attachment. Quote values with spaces. archive_source selects all, gmail or email_routing; default includes both archived sources. Labels match retained Gmail label IDs, while live ingress has INBOX. For compatibility, SENT without archive_source lists this principal's outgoing operations with an empty query; use archive_source:gmail or all for historical SENT. Follow next_page_token with identical query, source and labels.",
   search_email_ids:
     "Search with search_emails semantics, returning only opaque message IDs and explicit coverage/pagination. Pending extraction remains visible for unfiltered inbound search.",
   preview_email:
-    "Validate and normalize a proposed message without submitting it. to/cc/bcc are arrays; payload has text and/or html plus uploaded attachment IDs and SHA-256. For new mail supply from_address permitted by get_profile; for a reply it defaults to the original trusted envelope recipient, never MIME To. An explicit override must satisfy the sender grant.",
+    "Validate and normalize a proposed message without submitting it. to/cc/bcc are arrays; payload has text and/or html plus uploaded attachment IDs and SHA-256. New mail and replies to imported Gmail require an explicit permitted from_address. Live replies can default to the trusted SMTP envelope recipient, never MIME To. An explicit override must satisfy the sender grant.",
   upload_attachment:
     "Stage up to 1 MiB of base64 attachment bytes for this principal. Returns attachment_id and SHA-256; include both in a draft/message payload. Does not send mail.",
   copy_attachment:
     "Copy a selected archived attachment into immutable outgoing attachment storage for this principal. Supply exact parent message_id, part_N attachment_id and SHA-256 returned by read_email. Returns an attachment_id/hash usable in drafts and sends. Does not send mail.",
   create_draft:
-    "Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail requires from_address; a reply defaults to its original trusted envelope recipient, with permitted explicit override. Returns saved input and revision for review. Does not send.",
+    "Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Returns saved input and revision for review. Does not send.",
   get_draft:
     "Read this principal's saved draft, including current revision and complete payload, for review before sending.",
   list_drafts:
@@ -96,7 +96,7 @@ const descriptions: Record<ToolName, string> = {
   update_draft:
     "Patch a saved draft using expected_revision for conflict protection. Omitted fields preserve the current value; provided payload replaces the whole MIME payload, including attachment references. Arrays may be empty to clear cc/bcc. Returns the newly saved revision.",
   send_email:
-    "Submit the explicit message using a required stable idempotency_key. New mail requires from_address; a reply defaults to the original trusted envelope recipient, with permitted explicit override. Use only after user authorization to send. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.",
+    "Submit the explicit message using a required stable idempotency_key. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Use only after user authorization to send. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.",
   send_draft:
     "Send the reviewed draft at expected_revision with a stable idempotency_key. Requires both draft and send scopes. A changed revision is rejected. accepted is not delivery proof.",
   forward_emails:
@@ -244,7 +244,8 @@ export async function dispatchMailTool(
         from_domains: p.fromDomains ?? [],
         sender_policy: {
           new_mail: "explicit from_address required",
-          reply_default: "original trusted envelope recipient; never MIME To",
+          reply_default:
+            "live SMTP envelope recipient, never MIME To; imported Gmail requires explicit from_address",
           override: "explicit address or arbitrary local part at an exact granted domain",
         },
         message_id_namespaces: ["mail_", "sent_"],
@@ -255,7 +256,7 @@ export async function dispatchMailTool(
           inline_body_characters: 16000,
         },
         search_coverage:
-          "inbound extracted metadata; bounded plain text/UTF-8 attachment phrases via search_mail_content; SENT empty-query outgoing operation listing",
+          "live/imported archive metadata and retained Gmail labels; bounded text phrases via search_mail_content; SENT without archive_source lists principal outgoing operations",
         mail_content_trust: "untrusted_data",
       };
     case "read_email": {
@@ -291,7 +292,8 @@ export async function dispatchMailTool(
     case "search_emails":
     case "search_email_ids": {
       const a = v.parse(toolSchemas.search_emails, input);
-      if (a.label_ids?.includes("SENT")) {
+      if (a.archive_source === undefined && a.label_ids?.includes("SENT")) {
+        if (a.label_ids.length !== 1) throw new MailReadError("archive_source_required");
         if (a.query) throw new MailReadError("unsupported_sent_query");
         const page = await listSentMail(env, p, {
           limit: a.max_results,

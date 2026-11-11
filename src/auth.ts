@@ -26,7 +26,7 @@ const grantsSchema = v.record(
   // oxlint-disable-next-line no-control-regex -- Reject control characters in configured identity keys.
   v.pipe(v.string(), v.regex(/^(user|service):[^\s\x00-\x1f]{1,256}$/)),
   v.strictObject({
-    scopes: v.pipe(v.array(v.picklist(MAIL_SCOPES)), v.maxLength(4)),
+    scopes: v.pipe(v.array(v.picklist(MAIL_SCOPES)), v.maxLength(MAIL_SCOPES.length)),
     fromAddresses: v.pipe(v.array(address), v.maxLength(20)),
     fromDomains: v.optional(
       v.pipe(

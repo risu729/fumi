@@ -3,16 +3,16 @@
 A Cloudflare Workers email archive and routing service. The name comes
 from _fumi_ (a letter or written message).
 
-**Status: capture, MIME extraction and agent mail API implemented.** The Email Worker
-preserves Gmail forwarding, archives original MIME bytes and private receipts in R2, and
-records archive and forwarding outcomes independently. Runtime tests use synthetic mail.
-A D1 catalog and bounded scheduled reconciler index existing R2 evidence separately from
-delivery. Cloudflare Workflows now adds immediate catalog registration, durable
-processing state and missing-start repair. Production activation and synthetic
-forwarding/archive/Workflow acceptance were verified on 2026-11-10. Bounded MIME
-extraction is implemented and active: selected headers in D1, body and decoded
-attachments in private R2, with source hashes and explicit coverage failures. Production
-byte-level acceptance passed on 2026-11-11; see
+**Status: capture, MIME extraction, agent mail API and historical import implemented.**
+The Email Worker preserves Gmail forwarding, archives original MIME bytes and private
+receipts in R2, and records archive and forwarding outcomes independently. Runtime tests
+use synthetic mail. A D1 catalog and bounded scheduled reconciler index existing R2
+evidence separately from delivery. Cloudflare Workflows now adds immediate catalog
+registration, durable processing state and missing-start repair. Production activation
+and synthetic forwarding/archive/Workflow acceptance were verified on 2026-11-10.
+Bounded MIME extraction is implemented and active: selected headers in D1, body and
+decoded attachments in private R2, with source hashes and explicit coverage failures.
+Production byte-level acceptance passed on 2026-11-11; see
 [MIME extraction](docs/mime-extraction.md) for limits and rollout. See
 [processing Workflows](docs/processing-workflows.md) and
 [catalog recovery](docs/archive-catalog.md) for identity, failures and rollout.
@@ -20,14 +20,23 @@ Agent-facing read/search/draft/send MCP, durable sending records, provider deliv
 event ingestion and signed MCP Events are implemented with synthetic tests.
 Authenticated MCP reads, sending/replies and provider delivery events were verified in
 production on 2026-11-11; the MCP webhook receiver remains deferred. See the
-[agent mail API](docs/agent-mail.md). A bounded lexical
-[content search](docs/content-search.md) baseline and private
-[routing shadow](docs/routing-shadow.md) implementation are available. Routing
+[agent mail API](docs/agent-mail.md). The bounded lexical
+[content search](docs/content-search.md) baseline was verified in production on
+2026-11-12 with authenticated source downloads and matching hashes. Read-only
+[historical Gmail import](docs/gmail-import.md) now has resumable bounded pages,
+provider provenance, retained labels and account-scoped threads. OAuth provisioning,
+real-mail import and import acceptance remain pending. Private
+[routing shadow](docs/routing-shadow.md) implementation is also available. Routing
 configuration is administrator-owned and absent by default; shadow decisions never
 dispatch notifications. Model classification, live specialist adapters, dispatch and
 OCR/hybrid retrieval remain planned. See the [ingress runbook](docs/ingress.md) for
 deployment, acceptance and recovery; a deployed Worker alone does not establish
 production delivery.
+
+The requested protected API hostname is `fumi.takuk.me`. The native configuration
+and [activation runbook](docs/mail-activation.md) use this target; changing the
+Worker domain, Access protection and private origin configuration remains a
+separately verified operational step.
 
 ## Direction
 
@@ -46,9 +55,9 @@ and [library evaluation](docs/libraries.md). See also the
 [outbound MCP proposal](docs/outbound-mcp.md).
 
 Selected decisions: Cloudflare Email Sending for outbound mail, Valibot with
-Standard Schema integration boundaries, and CEL for rules. Revisit the CEL
-evaluator and safety limits before implementing routing. These future adapters
-are not installed in the R2 sink. Backfill includes historical Gmail SENT messages;
+Standard Schema integration boundaries, and a pinned bounded CEL subset for
+shadow rules. Authenticated owner adapters and dispatch remain future work.
+Backfill includes historical Gmail SENT messages;
 ongoing Gmail Sent synchronization is out of scope.
 
 Further evidence:

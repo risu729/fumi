@@ -1,4 +1,5 @@
 import { eventStatement } from "./event-store.ts";
+import type { GmailProvenance } from "./gmail-provenance.ts";
 
 export type IssueCode =
   | "invalid_key"
@@ -21,6 +22,9 @@ export interface ScanCheckpoint {
 
 export interface SourceObservation {
   ingestId: string;
+  gmail?: GmailProvenance;
+  sourceKind?: "gmail";
+  sourceNamespace?: string;
   rawKey: string;
   receiptKey: string;
   receivedAt: string | null;
@@ -104,7 +108,9 @@ async function commitObservations(
   const sourceStatements: number[] = [];
   const issueStatements: number[] = [];
   for (const observation of observations) {
-    const { ingestId, rawKey, receiptKey, snapshot } = observation;
+    const { ingestId, rawKey, receiptKey, snapshot, gmail } = observation;
+    const kind = gmail ? "gmail" : (observation.sourceKind ?? "email_routing");
+    const namespace = gmail?.accountNamespace ?? observation.sourceNamespace ?? "ingress-v1";
     issueStatements.push(statements.length, statements.length + 1);
     sourceStatements.push(statements.length + 2);
     statements.push(
@@ -112,17 +118,26 @@ async function commitObservations(
         .prepare(
           `INSERT INTO archive_issues (object_key, code, first_pass, last_pass)
            SELECT ?, 'identity_conflict', ?, ? WHERE ${fence}
-             AND EXISTS (SELECT 1 FROM archive_sources WHERE source_kind = 'email_routing'
-               AND source_namespace = 'ingress-v1' AND external_id = ? AND raw_key != ?)
+             AND EXISTS (SELECT 1 FROM archive_sources WHERE source_kind = ?
+               AND source_namespace = ? AND external_id = ? AND raw_key != ?)
            ON CONFLICT (object_key, code) DO UPDATE SET last_pass = excluded.last_pass`,
         )
-        .bind(rawKey, checkpoint.pass, checkpoint.pass, ...fenceArgs, ingestId, rawKey),
+        .bind(
+          rawKey,
+          checkpoint.pass,
+          checkpoint.pass,
+          ...fenceArgs,
+          kind,
+          namespace,
+          ingestId,
+          rawKey,
+        ),
       db
         .prepare(
           `INSERT INTO archive_issues (object_key, code, first_pass, last_pass)
            SELECT ?, 'receipt_conflict', ?, ? WHERE ${fence} AND ? IS NOT NULL
-             AND EXISTS (SELECT 1 FROM archive_sources WHERE source_kind = 'email_routing'
-               AND source_namespace = 'ingress-v1' AND external_id = ?
+             AND EXISTS (SELECT 1 FROM archive_sources WHERE source_kind = ?
+               AND source_namespace = ? AND external_id = ?
                AND receipt_snapshot IS NOT NULL AND receipt_snapshot != ?)
            ON CONFLICT (object_key, code) DO UPDATE SET last_pass = excluded.last_pass`,
         )
@@ -132,6 +147,8 @@ async function commitObservations(
           checkpoint.pass,
           ...fenceArgs,
           snapshot,
+          kind,
+          namespace,
           ingestId,
           snapshot,
         ),
@@ -141,7 +158,7 @@ async function commitObservations(
              source_kind, source_namespace, external_id, raw_key, receipt_key,
              received_at, receipt_snapshot, forward_status, raw_state,
              receipt_state, raw_size, raw_sha256, observed_pass, observed_revision, notify_events
-           ) SELECT 'email_routing', 'ingress-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE ${fence}
            ON CONFLICT (source_kind, source_namespace, external_id) DO UPDATE SET
              received_at = CASE WHEN archive_sources.receipt_snapshot IS NULL
@@ -159,6 +176,8 @@ async function commitObservations(
            WHERE archive_sources.raw_key = excluded.raw_key`,
         )
         .bind(
+          kind,
+          namespace,
           ingestId,
           rawKey,
           receiptKey,
@@ -175,6 +194,30 @@ async function commitObservations(
           ...fenceArgs,
         ),
     );
+    if (gmail) {
+      statements.push(
+        db
+          .prepare(`INSERT INTO gmail_messages
+        (raw_key,account_namespace,message_id,thread_id,internal_date,label_ids_json,imported_at)
+        SELECT ?,?,?,?,?,?,? WHERE ${fence}
+        AND EXISTS (SELECT 1 FROM archive_sources WHERE raw_key=? AND source_kind='gmail'
+          AND source_namespace=? AND external_id=?)
+        ON CONFLICT(raw_key) DO NOTHING`)
+          .bind(
+            rawKey,
+            namespace,
+            gmail.messageId,
+            gmail.threadId,
+            gmail.internalDate,
+            JSON.stringify(gmail.labelIds),
+            gmail.importedAt,
+            ...fenceArgs,
+            rawKey,
+            namespace,
+            ingestId,
+          ),
+      );
+    }
     if (observation.notifyEvents && observation.rawState === "present" && observation.receivedAt) {
       statements.push(
         eventStatement(

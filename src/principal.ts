@@ -6,7 +6,13 @@ export interface MailPrincipal {
   fromDomains?: readonly string[];
 }
 
-export const MAIL_SCOPES = ["mail:read", "mail:draft", "mail:send", "mail:events"] as const;
+export const MAIL_SCOPES = [
+  "mail:read",
+  "mail:draft",
+  "mail:send",
+  "mail:events",
+  "mail:import",
+] as const;
 
 export function hasScope(principal: MailPrincipal, scope: string): boolean {
   return principal.scopes.includes(scope);

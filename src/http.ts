@@ -2,6 +2,7 @@ import { apiOrigin, authenticate, HttpError } from "./auth.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { handleMailResource, handleMcp } from "./mcp.ts";
 import { MailReadError } from "./mail-read.ts";
+import { gmailImportRuntime, handleGmailImport } from "./gmail-import-http.ts";
 
 function secured(response: Response): Response {
   const result = new Response(response.body, response);
@@ -13,7 +14,8 @@ function secured(response: Response): Response {
 export async function handleHttp(request: Request, env: Env): Promise<Response> {
   try {
     const url = new URL(request.url);
-    if (url.pathname !== "/mcp" && !url.pathname.startsWith("/api/mail/"))
+    const gmailImport = url.pathname.startsWith("/api/admin/gmail-import/");
+    if (url.pathname !== "/mcp" && !url.pathname.startsWith("/api/mail/") && !gmailImport)
       throw new HttpError(404, "not_found");
     const origin = apiOrigin(env);
     if (
@@ -22,6 +24,10 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
     )
       throw new HttpError(403, "origin_not_allowed");
     const principal = await authenticate(request, env);
+    if (gmailImport) {
+      if (!principal.scopes.includes("mail:import")) throw new HttpError(403, "forbidden");
+      return secured(await handleGmailImport(request, env, principal, gmailImportRuntime(env)));
+    }
     if (url.pathname === "/mcp") {
       if (!["POST", "GET", "DELETE"].includes(request.method))
         throw new HttpError(405, "method_not_allowed");
