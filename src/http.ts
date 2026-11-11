@@ -30,7 +30,7 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
       );
     }
     if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
-    const match = /^\/api\/mail\/([^/]+)\/(raw|body|attachments\/([^/]+))$/.exec(url.pathname);
+    const match = /^\/api\/mail\/([^/]+)\/(raw|body|text|attachments\/([^/]+))$/.exec(url.pathname);
     if (!match) throw new HttpError(404, "not_found");
     return secured(
       await handleMailResource(
@@ -38,7 +38,13 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
         env,
         principal,
         match[1]!,
-        match[3] ? "attachment" : match[2] === "raw" ? "raw" : "body",
+        match[3]
+          ? "attachment"
+          : match[2] === "raw"
+            ? "raw"
+            : match[2] === "text"
+              ? "text"
+              : "body",
         match[3],
       ),
     );

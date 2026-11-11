@@ -47,6 +47,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | --- | --- |
 | `get_profile` | Scopes, sender addresses/domains, limits and coverage |
 | `search_emails`, `search_email_ids` | Bounded pages, opaque continuation token |
+| `search_mail_content` | Bounded literal body/text-attachment search with source citations |
 | `read_email`, `batch_read_email` | Full, metadata, minimal or raw; per-item batch errors |
 | `read_email_thread` | Direct Message-ID/In-Reply-To links, explicit truncation |
 | `read_attachment` | Parent message plus attachment ID; authenticated download |
@@ -68,6 +69,11 @@ not full bodies or attachments. `INBOX` denotes the inbound catalog. `SENT`
 lists the caller's outgoing operation records and accepts only an empty query.
 Other Gmail syntax is rejected. Pending/blocked extraction is reported explicitly.
 Thread links are direct header hints, not a complete conversation model.
+
+`search_mail_content` is a separate lexical baseline over bounded plain-text
+bodies and supported UTF-8 text attachments. It returns citations and explicit
+indexing/representation coverage. See [content search](content-search.md) for
+limits, phrase syntax and activation. Metadata search semantics are unchanged.
 
 Search pages contain at most 50 records; batches contain at most ten messages;
 thread reads contain at most 20. Bodies inline at most 16,000 characters per

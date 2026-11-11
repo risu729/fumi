@@ -6,6 +6,7 @@ import { handleHttp } from "./http.ts";
 import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.ts";
 import { deliverEvents } from "./event-delivery.ts";
 import { eventRuntime } from "./event-runtime.ts";
+import { repairContentSearch } from "./content-search.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
@@ -138,6 +139,13 @@ export default {
       console.log(JSON.stringify({ event: "processing_repair", ...processing }));
     } catch {
       console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
+      failed = true;
+    }
+    try {
+      const search = await repairContentSearch(env);
+      console.log(JSON.stringify({ event: "content_search_repair", ...search }));
+    } catch {
+      console.error(JSON.stringify({ event: "content_search_repair", status: "deferred" }));
       failed = true;
     }
     try {
