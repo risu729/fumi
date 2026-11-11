@@ -3,10 +3,12 @@
 Status: catalog-stage production activation verified on 2026-11-10, including
 synthetic Gmail forwarding, R2 byte comparison, D1 completion and scheduled repair.
 Private rollout evidence is retained outside this public repository.
-The next `mime-v1` pipeline adds bounded body and attachment extraction, tested
-locally and awaiting production migration/activation. OCR, indexing for search,
-classification and external delivery remain unimplemented.
-See [MIME extraction](mime-extraction.md) for the new stage and rollout.
+The `mime-v1` pipeline adds bounded body and attachment extraction; production
+migration and byte-level acceptance were verified on 2026-11-11. Bounded lexical
+[search](content-search.md) and deterministic [routing shadow](routing-shadow.md)
+are separate scheduled projections. OCR, model classification and live routing
+dispatch remain unimplemented. See [MIME extraction](mime-extraction.md) for limits
+and rollout, and [agent mail](agent-mail.md) for outbound sending and delivery evidence.
 
 ## Ownership and identity
 

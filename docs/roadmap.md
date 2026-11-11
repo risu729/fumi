@@ -80,12 +80,12 @@ establish production delivery.
 
 ## Phase 2B: routing and selective model use (parallel with 2A)
 
-- [ ] Revisit the selected CEL language before implementation: choose and pin a
-      Workers-compatible evaluator, test the supported subset and resource limits,
-      and confirm the owner-maintained plugin contract.
+- [x] Pin a Workers-compatible CEL evaluator and test a structurally bounded
+      subset. See [routing shadow](routing-shadow.md) for the deliberately narrow
+      language, input grants and synthetic runtime evidence.
 - [ ] Port private inbox policy as private configuration; retain rule precedence,
       thread deduplication, acknowledgements/case-state checks and urgent escalation.
-- [ ] Define a plugin manifest and adoption contract. Integration owners publish
+- [x] Define a plugin manifest and adoption contract. Integration owners publish
       their own rules and handlers; fumi pins and adopts them rather than maintaining
       copies of their business rules. See [plugins](plugins.md).
 - [ ] Add a specialist-owner adapter; Kogane needs a new return-value contract.
@@ -95,8 +95,10 @@ establish production delivery.
       fence so switching does not wake both old and new destinations.
 - [ ] Implement authenticated dispatch, stable idempotency keys, an outbox,
       bounded retries, a dead-letter path and status reconciliation for ambiguity.
-- [ ] Run rules/model decisions in shadow mode and replay synthetic cases before
-      allowing notifications. Backfill never triggers historical notifications.
+- [x] Persist deterministic rule/plugin shadow decisions with versioned private
+      configuration, provenance fences and bounded repair. Historical mail is
+      suppressed and no dispatch is permitted. Private policy activation and model
+      shadow evaluation remain separate.
 
 ## Phase 2C: outbound email through MCP
 
@@ -168,13 +170,14 @@ the low-priority web client is not a prerequisite for retirement.
 
 ## Decisions still open
 
-CEL implementation; retrieval backend; DecisionRAG viability; attachment format
-coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
-production delivery/recovery policy. Cloudflare Email Sending and Valibot are
-selected, with implemented Standard Schema MCP boundaries and a native sending
-binding adapter; production send/reply acceptance was verified on 2026-11-11.
-The implemented runtime covers forwarding, raw archival, catalog reconciliation
-and versioned Workflows for cataloging and bounded MIME extraction, plus the
-agent mail API described above. Production uses MIME extraction and the agent API.
-The bounded lexical content search baseline is implemented but not yet activated;
-OCR, hybrid retrieval and historical import remain future work.
+Broader CEL language support; retrieval backend; DecisionRAG viability; attachment
+format coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
+production delivery/recovery policy. A bounded CEL subset and pinned manifest adoption
+are implemented for shadow evaluation only. Cloudflare Email Sending and Valibot are
+selected, with implemented Standard Schema MCP boundaries and a native sending binding
+adapter; production send/reply acceptance was verified on 2026-11-11. The implemented
+runtime covers forwarding, raw archival, catalog reconciliation and versioned Workflows
+for cataloging and bounded MIME extraction, plus the agent mail API described above.
+Production uses MIME extraction and the agent API. The bounded lexical content search
+baseline is implemented but not yet activated; OCR, hybrid retrieval and historical
+import remain future work.
