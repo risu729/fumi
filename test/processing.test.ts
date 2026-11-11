@@ -16,6 +16,7 @@ import {
   retryFailedProcessing,
   completeProcessing,
   failProcessing,
+  parseProcessingParams,
 } from "../src/processing-jobs.ts";
 import { reconcileArchive, indexArchiveSource } from "../src/reconcile.ts";
 import { commitPage, readCheckpoint } from "../src/catalog.ts";
@@ -69,6 +70,7 @@ beforeEach(async () => {
   const objects = (await env.MAIL_ARCHIVE.list()).objects;
   if (objects.length) await env.MAIL_ARCHIVE.delete(objects.map((object) => object.key));
   await env.MAIL_CATALOG.batch([
+    env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions"),
     env.MAIL_CATALOG.prepare("DELETE FROM processing_jobs"),
     env.MAIL_CATALOG.prepare("DELETE FROM archive_sources"),
     env.MAIL_CATALOG.prepare("DELETE FROM archive_issues"),
@@ -214,7 +216,8 @@ describe("mail processing Workflows in workerd", () => {
     await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
     await instance.waitForStatus("complete");
     expect(await instance.getOutput()).toEqual({
-      status: "cataloged",
+      status: "extracted",
+      attachmentCount: 0,
       indexed: 1,
       issues: 0,
       rawState: "present",
@@ -251,7 +254,7 @@ describe("mail processing Workflows in workerd", () => {
     await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
     await instance.modify(async (modifier) => {
       await modifier.disableRetryDelays();
-      await modifier.mockStepError({ name: "index-catalog-v1" }, new Error("Synthetic failure"), 2);
+      await modifier.mockStepError({ name: "index-mime-v1" }, new Error("Synthetic failure"), 2);
     });
     await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
     await instance.waitForStatus("complete");
@@ -263,13 +266,13 @@ describe("mail processing Workflows in workerd", () => {
     await using first = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
     await first.modify(async (modifier) => {
       await modifier.disableRetryDelays();
-      await modifier.mockStepError({ name: "index-catalog-v1" }, new Error("Synthetic failure"));
+      await modifier.mockStepError({ name: "index-mime-v1" }, new Error("Synthetic failure"));
     });
     await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
     await first.waitForStatus("errored");
     expect(await job(source.key)).toMatchObject({
       state: "failed",
-      failure_code: "catalog_failed",
+      failure_code: "workflow_failed",
     });
     await using second = await introspectWorkflowInstance(
       env.MAIL_PROCESSING,
@@ -372,11 +375,7 @@ describe("mail processing Workflows in workerd", () => {
     await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
     await instance.modify(async (modifier) => {
       await modifier.disableRetryDelays();
-      await modifier.mockStepError(
-        { name: "complete-catalog-v1" },
-        new Error("Synthetic failure"),
-        2,
-      );
+      await modifier.mockStepError({ name: "complete-mime-v1" }, new Error("Synthetic failure"), 2);
     });
     await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
     await instance.waitForStatus("complete");
@@ -403,5 +402,84 @@ describe("mail processing Workflows in workerd", () => {
     });
     await instance.waitForStatus("complete");
     expect(await job(source.key)).toMatchObject({ state: "complete" });
+  });
+
+  it("preserves catalog-only jobs and discovers a separate MIME job on upgrade", async () => {
+    const source = await putSource();
+    const legacyId = processingInstanceId(source.key, 0, "catalog-v1");
+    await using legacy = await introspectWorkflowInstance(env.MAIL_PROCESSING, legacyId);
+    await requestProcessing(
+      env.MAIL_CATALOG,
+      env.MAIL_PROCESSING,
+      source.key,
+      Date.now(),
+      "catalog-v1",
+    );
+    await legacy.waitForStatus("complete");
+    expect(await legacy.getOutput()).toMatchObject({ status: "cataloged" });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_extractions").first(),
+    ).toEqual({ count: 0 });
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    const before = await readProcessingJob(session, source.key, "catalog-v1");
+    await using current = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    expect(await repairProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING)).toMatchObject({
+      discovered: 1,
+    });
+    await current.waitForStatus("complete");
+    expect(await current.getOutput()).toMatchObject({ status: "extracted", attachmentCount: 0 });
+    expect(await readProcessingJob(session, source.key, "catalog-v1")).toEqual(before);
+    expect(await job(source.key)).toMatchObject({ state: "complete", pipeline_version: "mime-v1" });
+  });
+
+  it("repairs pending legacy dispatches using the original pipeline identity", async () => {
+    const source = await putSource();
+    const now = Date.now();
+    const binding = { createBatch: vi.fn().mockRejectedValue(new Error("offline")), get: vi.fn() };
+    await requestProcessing(env.MAIL_CATALOG, binding, source.key, now, "catalog-v1");
+    binding.createBatch.mockClear();
+    await repairProcessing(env.MAIL_CATALOG, binding, now + PROCESSING_CHECK_INTERVAL_MS);
+    expect(binding.createBatch).toHaveBeenCalledWith({
+      instances: [
+        {
+          id: processingInstanceId(source.key, 0, "catalog-v1"),
+          params: { rawKey: source.key, pipelineVersion: "catalog-v1", attempt: 0 },
+        },
+      ],
+    });
+    expect(
+      parseProcessingParams({ rawKey: source.key, pipelineVersion: "unknown", attempt: 0 }),
+    ).toBeNull();
+  });
+
+  it("leaves missing originals blocked instead of claiming extraction completion", async () => {
+    const source = await putSource();
+    await env.MAIL_ARCHIVE.delete(source.key);
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
+    await instance.waitForStatus("errored");
+    expect(await job(source.key)).toMatchObject({ state: "failed", completed_at: null });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT status, failure_code FROM mail_extractions WHERE raw_key = ?",
+      )
+        .bind(source.key)
+        .first(),
+    ).toEqual({ status: "blocked", failure_code: "source_missing" });
+  });
+
+  it("retries the extraction step without creating another processing job", async () => {
+    const source = await putSource();
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify(async (modifier) => {
+      await modifier.disableRetryDelays();
+      await modifier.mockStepError({ name: "extract-mime-v1" }, new Error("Synthetic outage"), 2);
+    });
+    await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
+    await instance.waitForStatus("complete");
+    expect(await job(source.key)).toMatchObject({ state: "complete", attempt: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_extractions").first(),
+    ).toEqual({ count: 1 });
   });
 });

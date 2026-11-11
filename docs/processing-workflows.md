@@ -3,8 +3,10 @@
 Status: catalog-stage production activation verified on 2026-11-10, including
 synthetic Gmail forwarding, R2 byte comparison, D1 completion and scheduled repair.
 Private rollout evidence is retained outside this public repository.
-MIME extraction, OCR, indexing for search, classification and
-external delivery are not implemented by this pipeline.
+The next `mime-v1` pipeline adds bounded body and attachment extraction, tested
+locally and awaiting production migration/activation. OCR, indexing for search,
+classification and external delivery remain unimplemented.
+See [MIME extraction](mime-extraction.md) for the new stage and rollout.
 
 ## Ownership and identity
 
@@ -14,11 +16,14 @@ address, receipt content, attachment or secret enters Workflow parameters or
 results: only the validated raw object key, pipeline version, attempt number and
 small outcome counters/states. Service errors become fixed diagnostics.
 
-The ledger key is `(raw_key, pipeline_version)`. `catalog-v1` means catalog
-observation, not searchable mail. Each attempt has a deterministic instance ID
-containing the version, ingress date, UUID and attempt. Message-ID and content
-hashes are not deduplication keys. Separate ingress invocations remain separate
-sources. Future pipeline versions must preserve or explicitly migrate old jobs.
+The ledger key is `(raw_key, pipeline_version)`. `catalog-v1` means catalog observation;
+`mime-v1` means catalog observation followed by bounded MIME decoding and derivative
+storage. Neither means searchable mail. Each attempt has a deterministic instance ID
+containing the version, ingress date, UUID and attempt. Message-ID and content hashes
+are not deduplication keys. Separate ingress invocations remain separate sources.
+Existing `catalog-v1` jobs keep their original steps, identities and terminal state. New
+requests and discovery create `mime-v1` jobs; repair checks pending/running jobs from
+both versions under the same ten-job limit.
 
 ## Execution and repair
 
@@ -31,7 +36,10 @@ and checks up to 10 due jobs. A failed scan does not suppress repair of known jo
 Failed dispatches move behind other due jobs before remote calls, with a five-minute
 check interval. These bounds are for the small live archive, not bulk import.
 
-The Workflow has three checkpointed stages: begin, observe/catalog, complete.
+The catalog Workflow has three checkpointed stages: begin, observe/catalog, complete.
+MIME jobs insert a separate extraction stage before completion. Only small outcome
+counters leave that stage; message content stays in R2/D1. A durable blocked
+extraction fails the job with its coverage reason retained in `mail_extractions`.
 Each stage has five retries with exponential delay starting at ten seconds and a
 one-minute timeout. Catalog writes and checkpoint changes use one D1 batch guarded
 by both observation revision and the currently running instance. Single-source
@@ -78,7 +86,10 @@ or restore an old ledger backup against live instances without reconciliation.
 
 ## Production rollout
 
-The initial rollout is complete. For a new environment or configuration rollout:
+The initial catalog rollout is complete. MIME rollout additionally requires
+`0003_mail_extractions.sql` before activating the new Worker. The bounded discovery loop
+will also create MIME jobs for previously cataloged originals; review that processing
+scope before production activation. For a new environment or configuration rollout:
 
 1. Verify the target Worker, R2 bucket and existing D1 database. Apply the additive
    `0002_processing_jobs.sql` migration with separately authorized access and

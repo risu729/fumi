@@ -1,7 +1,12 @@
 import { archiveCandidate } from "./archive-key.ts";
 
-// Completion means this version's catalog stage finished, not MIME/OCR/search.
-export const PIPELINE_VERSION = "catalog-v1";
+// Keep the previous pipeline executable while new jobs extract MIME.
+export const PIPELINE_VERSION = "mime-v1";
+export type PipelineVersion = "catalog-v1" | typeof PIPELINE_VERSION;
+
+function isPipelineVersion(value: unknown): value is PipelineVersion {
+  return value === "catalog-v1" || value === PIPELINE_VERSION;
+}
 export const PROCESSING_REPAIR_LIMIT = 10;
 export const PROCESSING_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 // Stop uncertain creation retries before the configured three-day retention can
@@ -10,13 +15,13 @@ export const DISPATCH_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export interface ProcessingParams {
   rawKey: string;
-  pipelineVersion: typeof PIPELINE_VERSION;
+  pipelineVersion: PipelineVersion;
   attempt: number;
 }
 
 export interface ProcessingJob {
   raw_key: string;
-  pipeline_version: string;
+  pipeline_version: PipelineVersion;
   attempt: number;
   instance_id: string;
   state: "pending" | "running" | "complete" | "failed";
@@ -37,16 +42,21 @@ type FailureCode =
   | "incomplete_result"
   | "catalog_failed";
 
-export function processingInstanceId(rawKey: string, attempt = 0): string {
+export function processingInstanceId(
+  rawKey: string,
+  attempt = 0,
+  pipelineVersion: PipelineVersion = PIPELINE_VERSION,
+): string {
   const candidate = archiveCandidate(rawKey);
   if (
     !candidate ||
     rawKey !== `${candidate.prefix}/raw.eml` ||
     !Number.isSafeInteger(attempt) ||
-    attempt < 0
+    attempt < 0 ||
+    !isPipelineVersion(pipelineVersion)
   )
     throw new Error("Invalid processing identity");
-  return `${PIPELINE_VERSION}-${candidate.day}-${candidate.ingestId}-${attempt}`;
+  return `${pipelineVersion}-${candidate.day}-${candidate.ingestId}-${attempt}`;
 }
 
 export function parseProcessingParams(value: unknown): ProcessingParams | null {
@@ -56,37 +66,43 @@ export function parseProcessingParams(value: unknown): ProcessingParams | null {
     !("rawKey" in value) ||
     typeof value.rawKey !== "string" ||
     !("pipelineVersion" in value) ||
-    value.pipelineVersion !== PIPELINE_VERSION ||
+    !isPipelineVersion(value.pipelineVersion) ||
     !("attempt" in value) ||
     typeof value.attempt !== "number"
   )
     return null;
   try {
-    processingInstanceId(value.rawKey, value.attempt);
+    processingInstanceId(value.rawKey, value.attempt, value.pipelineVersion);
   } catch {
     return null;
   }
-  return { rawKey: value.rawKey, pipelineVersion: PIPELINE_VERSION, attempt: value.attempt };
+  return { rawKey: value.rawKey, pipelineVersion: value.pipelineVersion, attempt: value.attempt };
 }
 
 export async function readProcessingJob(
   db: D1DatabaseSession,
   rawKey: string,
+  pipelineVersion: PipelineVersion = PIPELINE_VERSION,
 ): Promise<ProcessingJob | null> {
   return db
     .prepare("SELECT * FROM processing_jobs WHERE raw_key = ? AND pipeline_version = ?")
-    .bind(rawKey, PIPELINE_VERSION)
+    .bind(rawKey, pipelineVersion)
     .first<ProcessingJob>();
 }
 
-async function ensureProcessingJob(db: D1DatabaseSession, rawKey: string, now: number) {
-  const instanceId = processingInstanceId(rawKey);
+async function ensureProcessingJob(
+  db: D1DatabaseSession,
+  rawKey: string,
+  now: number,
+  pipelineVersion: PipelineVersion,
+) {
+  const instanceId = processingInstanceId(rawKey, 0, pipelineVersion);
   await db
     .prepare(`INSERT INTO processing_jobs (
     raw_key, pipeline_version, instance_id, state, created_at, updated_at, next_check_at
   ) VALUES (?, ?, ?, 'pending', ?, ?, 0)
   ON CONFLICT (raw_key, pipeline_version) DO NOTHING`)
-    .bind(rawKey, PIPELINE_VERSION, instanceId, now, now)
+    .bind(rawKey, pipelineVersion, instanceId, now, now)
     .run();
 }
 
@@ -102,7 +118,7 @@ async function recordProblem(
     state = CASE WHEN ? THEN 'failed' ELSE state END
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running')`)
-    .bind(code, now, terminal ? 1 : 0, job.raw_key, PIPELINE_VERSION, job.instance_id)
+    .bind(code, now, terminal ? 1 : 0, job.raw_key, job.pipeline_version, job.instance_id)
     .run();
 }
 
@@ -111,8 +127,9 @@ async function dispatchJob(
   workflow: WorkflowBinding,
   rawKey: string,
   now: number,
+  pipelineVersion: PipelineVersion,
 ): Promise<"terminal" | "deferred" | "checked"> {
-  const job = await readProcessingJob(db, rawKey);
+  const job = await readProcessingJob(db, rawKey, pipelineVersion);
   if (!job) throw new Error("Processing job is missing");
   if (job.state === "complete" || job.state === "failed") return "terminal";
   // Move failures to the back of the repair queue before making remote calls.
@@ -120,7 +137,7 @@ async function dispatchJob(
     .prepare(`UPDATE processing_jobs SET next_check_at = ?
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running') AND next_check_at <= ?`)
-    .bind(now + PROCESSING_CHECK_INTERVAL_MS, rawKey, PIPELINE_VERSION, job.instance_id, now)
+    .bind(now + PROCESSING_CHECK_INTERVAL_MS, rawKey, pipelineVersion, job.instance_id, now)
     .run();
   if (!claim.meta.changes) return "deferred";
 
@@ -131,7 +148,7 @@ async function dispatchJob(
         failure_code = 'dispatch_expired', updated_at = ?
         WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
           AND state = 'pending' AND dispatched_at IS NULL`)
-        .bind(now, rawKey, PIPELINE_VERSION, job.instance_id)
+        .bind(now, rawKey, pipelineVersion, job.instance_id)
         .run();
       return expired.meta.changes ? "terminal" : "deferred";
     }
@@ -140,7 +157,7 @@ async function dispatchJob(
         instances: [
           {
             id: job.instance_id,
-            params: { rawKey, pipelineVersion: PIPELINE_VERSION, attempt: job.attempt },
+            params: { rawKey, pipelineVersion, attempt: job.attempt },
           },
         ],
       });
@@ -156,7 +173,7 @@ async function dispatchJob(
       await db
         .prepare(`UPDATE processing_jobs SET dispatched_at = COALESCE(dispatched_at, ?)
         WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?`)
-        .bind(now, rawKey, PIPELINE_VERSION, job.instance_id)
+        .bind(now, rawKey, pipelineVersion, job.instance_id)
         .run();
     } catch {
       await recordProblem(db, job, "dispatch_unavailable", false, now);
@@ -180,7 +197,7 @@ async function dispatchJob(
         .prepare(`UPDATE processing_jobs SET failure_code = NULL, updated_at = ?
         WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
           AND state IN ('pending', 'running')`)
-        .bind(now, rawKey, PIPELINE_VERSION, job.instance_id)
+        .bind(now, rawKey, pipelineVersion, job.instance_id)
         .run();
     }
     return "checked";
@@ -197,10 +214,11 @@ export async function requestProcessing(
   workflow: WorkflowBinding,
   rawKey: string,
   now = Date.now(),
+  pipelineVersion: PipelineVersion = PIPELINE_VERSION,
 ) {
   const session = db.withSession("first-primary");
-  await ensureProcessingJob(session, rawKey, now);
-  return dispatchJob(session, workflow, rawKey, now);
+  await ensureProcessingJob(session, rawKey, now, pipelineVersion);
+  return dispatchJob(session, workflow, rawKey, now, pipelineVersion);
 }
 
 /** The R2 sweep supplies sources absent from the ledger, including orphan pairs. */
@@ -218,19 +236,19 @@ export async function repairProcessing(
     .all<{ raw_key: string }>();
   for (const source of missing.results) {
     // oxlint-disable-next-line no-await-in-loop -- Bound ledger creation per scheduled run.
-    await ensureProcessingJob(session, source.raw_key, now);
+    await ensureProcessingJob(session, source.raw_key, now, PIPELINE_VERSION);
   }
   const pending = await session
-    .prepare(`SELECT raw_key FROM processing_jobs
-    WHERE pipeline_version = ? AND state IN ('pending', 'running') AND next_check_at <= ?
+    .prepare(`SELECT raw_key, pipeline_version FROM processing_jobs
+    WHERE pipeline_version IN ('catalog-v1', 'mime-v1') AND state IN ('pending', 'running') AND next_check_at <= ?
     ORDER BY next_check_at, raw_key LIMIT ?`)
-    .bind(PIPELINE_VERSION, now, PROCESSING_REPAIR_LIMIT)
-    .all<{ raw_key: string }>();
+    .bind(now, PROCESSING_REPAIR_LIMIT)
+    .all<{ raw_key: string; pipeline_version: PipelineVersion }>();
   let checked = 0;
   let deferred = 0;
   for (const job of pending.results) {
     // oxlint-disable-next-line no-await-in-loop -- Avoid burst creation and bound repair fanout.
-    const outcome = await dispatchJob(session, workflow, job.raw_key, now);
+    const outcome = await dispatchJob(session, workflow, job.raw_key, now, job.pipeline_version);
     if (outcome === "deferred") deferred++;
     else checked++;
   }
@@ -244,58 +262,67 @@ export async function retryFailedProcessing(
   rawKey: string,
   expectedAttempt: number,
   now = Date.now(),
+  pipelineVersion: PipelineVersion = PIPELINE_VERSION,
 ): Promise<boolean> {
   const session = db.withSession("first-primary");
-  const job = await readProcessingJob(session, rawKey);
+  const job = await readProcessingJob(session, rawKey, pipelineVersion);
   if (!job || job.state !== "failed" || job.attempt !== expectedAttempt) return false;
   // Unknown or expired status requires investigation; never guess that an old
   // attempt stopped. Concurrent callers are fenced by the attempt below.
   const status = await (await workflow.get(job.instance_id)).status();
   if (status.status !== "errored" && status.status !== "terminated") return false;
-  const instanceId = processingInstanceId(rawKey, job.attempt + 1);
+  const instanceId = processingInstanceId(rawKey, job.attempt + 1, pipelineVersion);
   const updated = await session
     .prepare(`UPDATE processing_jobs SET attempt = attempt + 1,
     instance_id = ?, state = 'pending', created_at = ?, updated_at = ?, next_check_at = 0,
     dispatched_at = NULL, completed_at = NULL, failure_code = NULL
     WHERE raw_key = ? AND pipeline_version = ? AND attempt = ? AND state = 'failed'`)
-    .bind(instanceId, now, now, rawKey, PIPELINE_VERSION, expectedAttempt)
+    .bind(instanceId, now, now, rawKey, pipelineVersion, expectedAttempt)
     .run();
   if (!updated.meta.changes) return false;
-  await dispatchJob(session, workflow, rawKey, now);
+  await dispatchJob(session, workflow, rawKey, now, pipelineVersion);
   return true;
 }
 
 export async function beginProcessing(db: D1DatabaseSession, params: ProcessingParams) {
-  const instanceId = processingInstanceId(params.rawKey, params.attempt);
+  const instanceId = processingInstanceId(params.rawKey, params.attempt, params.pipelineVersion);
   const result = await db
     .prepare(`UPDATE processing_jobs SET state = 'running',
     dispatched_at = COALESCE(dispatched_at, ?), updated_at = ?, failure_code = NULL
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running')`)
-    .bind(Date.now(), Date.now(), params.rawKey, PIPELINE_VERSION, instanceId)
+    .bind(Date.now(), Date.now(), params.rawKey, params.pipelineVersion, instanceId)
     .run();
   return result.meta.changes === 1;
 }
 
 export async function completeProcessing(db: D1DatabaseSession, params: ProcessingParams) {
-  const instanceId = processingInstanceId(params.rawKey, params.attempt);
+  const instanceId = processingInstanceId(params.rawKey, params.attempt, params.pipelineVersion);
   const result = await db
     .prepare(`UPDATE processing_jobs SET state = 'complete',
     completed_at = ?, updated_at = ?, failure_code = NULL
     WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
       AND state IN ('pending', 'running')`)
-    .bind(Date.now(), Date.now(), params.rawKey, PIPELINE_VERSION, instanceId)
+    .bind(Date.now(), Date.now(), params.rawKey, params.pipelineVersion, instanceId)
     .run();
   if (result.meta.changes) return;
-  const existing = await readProcessingJob(db, params.rawKey);
+  const existing = await readProcessingJob(db, params.rawKey, params.pipelineVersion);
   if (existing?.instance_id !== instanceId || existing.state !== "complete") {
     throw new Error("Processing completion was fenced");
   }
 }
 
 export async function failProcessing(db: D1DatabaseSession, params: ProcessingParams) {
-  const job = await readProcessingJob(db, params.rawKey);
-  if (job?.instance_id === processingInstanceId(params.rawKey, params.attempt)) {
-    await recordProblem(db, job, "catalog_failed", true, Date.now());
+  const job = await readProcessingJob(db, params.rawKey, params.pipelineVersion);
+  if (
+    job?.instance_id === processingInstanceId(params.rawKey, params.attempt, params.pipelineVersion)
+  ) {
+    await recordProblem(
+      db,
+      job,
+      params.pipelineVersion === "catalog-v1" ? "catalog_failed" : "workflow_failed",
+      true,
+      Date.now(),
+    );
   }
 }
