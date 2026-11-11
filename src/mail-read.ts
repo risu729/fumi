@@ -14,6 +14,14 @@ export class MailReadError extends Error {
 }
 
 interface MailRow {
+  source_kind: "email_routing" | "gmail";
+  source_namespace: string;
+  gmail_message_id: string | null;
+  gmail_thread_id: string | null;
+  gmail_internal_date: string | null;
+  gmail_label_ids_json: string | null;
+  gmail_imported_at: string | null;
+  gmail_thread_anchor: string | null;
   external_id: string;
   raw_key: string;
   received_at: string | null;
@@ -33,9 +41,14 @@ interface Attachment {
   size: number;
   sha256: string;
 }
-const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,
+const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_kind,s.source_namespace,
+ g.message_id AS gmail_message_id,g.thread_id AS gmail_thread_id,g.internal_date AS gmail_internal_date,
+ g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
+ (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
+   WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
  e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key
- FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'`;
+ FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
+ LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 const LIMIT = 16_000;
 function bodyPreview(value: string | null): string | null {
   if (value === null) return null;
@@ -81,9 +94,25 @@ function metadata(row: MailRow) {
 function summary(row: MailRow) {
   return {
     id: inboundMessageId(row.external_id),
-    thread_id: inboundMessageId(row.external_id),
+    thread_id: inboundMessageId(row.gmail_thread_anchor ?? row.external_id),
     received_at: row.received_at,
-    label_ids: ["INBOX"],
+    label_ids:
+      row.source_kind === "gmail"
+        ? (JSON.parse(row.gmail_label_ids_json ?? "[]") as string[])
+        : ["INBOX"],
+    provenance: {
+      source_kind: row.source_kind,
+      source_namespace: row.source_namespace,
+      ...(row.source_kind === "gmail"
+        ? {
+            message_id: row.gmail_message_id,
+            thread_id: row.gmail_thread_id,
+            internal_date: row.gmail_internal_date,
+            imported_at: row.gmail_imported_at,
+            smtp_envelope_available: false,
+          }
+        : {}),
+    },
     size_estimate: row.raw_size,
     extraction: { status: row.status ?? "pending", failure_code: row.failure_code },
     metadata: metadata(row),
@@ -206,6 +235,7 @@ export async function readMailResource(
 }
 
 export interface SearchArgs {
+  archive_source?: "all" | "gmail" | "email_routing" | undefined;
   query?: string | undefined;
   max_results?: number | undefined;
   next_page_token?: string | undefined;
@@ -280,14 +310,19 @@ export async function searchMail(
   args: SearchArgs,
 ) {
   requireRead(principal);
-  if (args.label_ids?.some((label) => label !== "INBOX"))
+  const source = args.archive_source ?? "all";
+  if (!["all", "gmail", "email_routing"].includes(source))
+    throw new MailReadError("unsupported_archive_source");
+  const labels = [...new Set(args.label_ids ?? [])].sort();
+  if (labels.length > 10 || labels.some((label) => !/^[A-Za-z0-9_-]{1,128}$/.test(label)))
     throw new MailReadError("unsupported_label");
   const query = args.query ?? "";
   const parsed = parseMailSearch(query);
   const limit = args.max_results ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
   const cursor = args.next_page_token ? decodeCursor(args.next_page_token) : null;
-  if (cursor && cursor.query !== query) throw new MailReadError("page_query_mismatch");
+  const binding = JSON.stringify([query, source, labels]);
+  if (cursor && cursor.query !== binding) throw new MailReadError("page_query_mismatch");
   const maximum =
     cursor?.snapshot ??
     (await env.MAIL_CATALOG.prepare(
@@ -295,6 +330,16 @@ export async function searchMail(
     ).first<{ maximum: number }>())!.maximum;
   const clauses = ["s.rowid<=?", ...parsed.clauses];
   const values: (string | number)[] = [maximum, ...parsed.values];
+  if (source !== "all") {
+    clauses.push("s.source_kind=?");
+    values.push(source);
+  }
+  for (const label of labels) {
+    clauses.push(
+      "((s.source_kind='email_routing' AND ?='INBOX') OR (s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value=?)))",
+    );
+    values.push(label, label);
+  }
   if (cursor) {
     clauses.push(
       "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND s.external_id < ?))",
@@ -319,11 +364,13 @@ export async function searchMail(
             snapshot: maximum,
             beforeTime: last.received_at ?? "",
             beforeId: last.external_id,
-            query,
+            query: binding,
           })
         : null,
     coverage: {
-      source: "inbound_catalog",
+      source: "archive_catalog",
+      archive_source: source,
+      label_ids: labels,
       searches: "extracted_metadata_only",
       incomplete_extractions_visible: true,
     },
@@ -358,31 +405,45 @@ export async function readMailThread(
   const limit = args.max_messages ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
   // Header links are untrusted conversation hints; they never grant access or prove identity.
-  const rows = (
-    await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.external_id=? OR
+  const rows =
+    row.source_kind === "gmail"
+      ? (
+          await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.source_kind='gmail' AND
+      ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)
+      ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`)
+            .bind(row.source_namespace, row.gmail_thread_id, row.external_id, limit + 1)
+            .all<MailRow>()
+        ).results
+      : (
+          await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.source_kind='email_routing' AND (s.external_id=? OR
     (? IS NOT NULL AND (json_extract(e.metadata_json,'$.messageId')=? OR json_extract(e.metadata_json,'$.inReplyTo')=?)) OR
-    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?)
+    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))
     ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`)
-      .bind(
-        row.external_id,
-        messageId ?? null,
-        messageId ?? null,
-        messageId ?? null,
-        reply ?? null,
-        reply ?? null,
-        limit + 1,
-      )
-      .all<MailRow>()
-  ).results;
+            .bind(
+              row.external_id,
+              messageId ?? null,
+              messageId ?? null,
+              messageId ?? null,
+              reply ?? null,
+              reply ?? null,
+              limit + 1,
+            )
+            .all<MailRow>()
+        ).results;
   const messages = [];
   for (const item of rows.slice(0, limit).reverse()) {
     // oxlint-disable-next-line no-await-in-loop -- Parse at most one bounded body at a time; retain only truncated results.
     messages.push(await readMail(env, principal, inboundMessageId(item.external_id), "full", base));
   }
   return {
-    thread_id: anchor,
+    thread_id: inboundMessageId(row.gmail_thread_anchor ?? row.external_id),
     messages,
     truncated: rows.length > limit,
-    threading: "direct_message_id_header_links_only",
+    threading:
+      row.source_kind === "gmail"
+        ? row.gmail_thread_id
+          ? "gmail_account_thread_id"
+          : "gmail_provenance_unavailable"
+        : "direct_message_id_header_links_only",
   };
 }

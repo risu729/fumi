@@ -1,6 +1,8 @@
 # Content search
 
-Status: implemented as a bounded lexical baseline. Production activation requires
+Status: the bounded lexical baseline was verified in production on 2026-11-12,
+including authenticated source downloads and citation SHA-256 comparisons. Private
+acceptance evidence is retained outside this repository. New environments require
 the additive `0007_content_search.sql` migration and a reviewed Worker deployment.
 No embedding service, model call or new Cloudflare resource is required.
 

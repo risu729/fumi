@@ -12,7 +12,7 @@ export default defineConfig({
     name: "fumi",
     entrypoint,
     compatibilityDate,
-    domains: ["fumi.risunosu.com"],
+    domains: ["fumi.takuk.me"],
     exports: {
       MailProcessing: exports.workflow({
         name: "fumi-mail-processing",
@@ -33,6 +33,9 @@ export default defineConfig({
       API_ORIGIN: bindings.secret(),
       MAIL_GRANTS: bindings.secret(),
       WEBHOOK_ORIGINS: bindings.secret(),
+      // GMAIL_IMPORT_CONFIG/GMAIL_IMPORT_ACCESS_TOKEN remain optional runtime secrets.
+      // cf secret declarations mark credentials required; optional Env types live
+      // in gmail-import-http.ts so deployment does not require import activation.
       MAIL_PROCESSING: bindings.workflow({
         name: "fumi-mail-processing",
         worker: "fumi",

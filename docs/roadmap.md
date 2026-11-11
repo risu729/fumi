@@ -1,7 +1,8 @@
 # Roadmap
 
-Status: capture, MIME extraction and agent mail runtime implemented,
-2026-11-11. Checked items describe completed implementation or preparation;
+Status: capture, MIME extraction, agent mail, historical import and routing shadow
+implemented; lexical retrieval verified in production on 2026-11-12.
+Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
 Target state: fumi operates independently of Gmail. Existing Gmail forwarding is
@@ -54,11 +55,15 @@ establish production delivery.
 
 ## Phase 2A: historical import and attachment-aware retrieval
 
-- [ ] Read-only Gmail OAuth and resumable backfill, explicitly including historical
-      SENT messages, labels,
-      thread linkage, dates and attachment provenance. Never mutate Gmail in import.
-- [ ] Rate limits, bounded concurrency, checkpoints only after durable commits,
-      reconciliation counts and duplicate handling across live/backfill sources.
+- [x] Implement read-only resumable historical Gmail import, preserving SENT,
+      labels, account/thread/date provenance and exact MIME. Trusted admin routes,
+      transport account verification and synthetic checks are complete. See
+      [historical Gmail import](gmail-import.md).
+- [ ] Provision read-only Gmail OAuth, activate the configured historical scope and
+      verify real-mail migration independently. No Gmail writes are supported.
+- [x] Bound request rate/concurrency and advance checkpoints only after durable commits.
+      Count unique per-run provider IDs and preserve distinct live/backfill sources even
+      when MIME hashes match. Production import acceptance remains separate.
 - [x] Extract bounded MIME parts into versioned derivatives; preserve original bytes.
       Production migration, extraction and attachment-byte acceptance were verified
       on 2026-11-11. See [MIME extraction](mime-extraction.md).
@@ -67,10 +72,11 @@ establish production delivery.
       See [attachment representations](attachment-retrieval.md).
 - [x] Add authenticated MCP metadata search, message/thread reads and attachment
       resources. See [agent mail](agent-mail.md) for explicit coverage and limits.
-- [ ] Build keyword/hybrid retrieval over bodies and attachments with citations.
-      A bounded plain-text/UTF-8 attachment lexical baseline is implemented in
-      [content search](content-search.md); its production activation, OCR and
-      semantic/hybrid comparison remain separate.
+- [x] Build a bounded lexical retrieval baseline over plain-text bodies and supported
+      UTF-8 attachments with citations. Authenticated source downloads and citation
+      hashes were verified in production on 2026-11-12. See
+      [content search](content-search.md).
+- [ ] Add OCR and compare semantic/hybrid retrieval against the lexical baseline.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -178,6 +184,9 @@ selected, with implemented Standard Schema MCP boundaries and a native sending b
 adapter; production send/reply acceptance was verified on 2026-11-11. The implemented
 runtime covers forwarding, raw archival, catalog reconciliation and versioned Workflows
 for cataloging and bounded MIME extraction, plus the agent mail API described above.
-Production uses MIME extraction and the agent API. The bounded lexical content search
-baseline is implemented but not yet activated; OCR, hybrid retrieval and historical
-import remain future work.
+Production uses MIME extraction, the agent API and the bounded lexical content search
+baseline. Historical import and private deterministic shadow routing are implemented
+and synthetically tested; real Gmail migration and private policy activation remain
+separate. OCR, hybrid retrieval, model classification, owner adapters and dispatch
+remain future work. The configured API target is `fumi.takuk.me`; hostname, Access
+and private-origin activation require their own verified rollout.

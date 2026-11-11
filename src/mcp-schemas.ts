@@ -10,6 +10,16 @@ const page = {
   max_results: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(50)), 20),
   next_page_token: v.optional(v.pipe(v.string(), v.maxLength(8192))),
 };
+const archiveSearch = {
+  ...page,
+  query: v.optional(shortText),
+  archive_source: v.optional(v.picklist(["all", "gmail", "email_routing"])),
+  label_ids: v.optional(
+    v.nullable(
+      v.pipe(v.array(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/))), v.maxLength(10)),
+    ),
+  ),
+};
 export const payloadSchema = v.strictObject({
   text: v.optional(boundedBody),
   html: v.optional(boundedBody),
@@ -61,20 +71,8 @@ export const toolSchemas = {
     attachment_id: v.optional(identifier),
     filename: v.optional(shortText),
   }),
-  search_emails: v.strictObject({
-    ...page,
-    query: v.optional(shortText),
-    label_ids: v.optional(
-      v.nullable(v.pipe(v.array(v.picklist(["INBOX", "SENT"])), v.maxLength(1))),
-    ),
-  }),
-  search_email_ids: v.strictObject({
-    ...page,
-    query: v.optional(shortText),
-    label_ids: v.optional(
-      v.nullable(v.pipe(v.array(v.picklist(["INBOX", "SENT"])), v.maxLength(1))),
-    ),
-  }),
+  search_emails: v.strictObject(archiveSearch),
+  search_email_ids: v.strictObject(archiveSearch),
   preview_email: mailInputSchema,
   create_draft: mailInputSchema,
   get_draft: v.strictObject({ draft_id: identifier }),
@@ -217,7 +215,11 @@ export const toolOutputSchemas = {
     thread_id: identifier,
     messages: v.array(messageOutput),
     truncated: v.boolean(),
-    threading: v.literal("direct_message_id_header_links_only"),
+    threading: v.picklist([
+      "direct_message_id_header_links_only",
+      "gmail_account_thread_id",
+      "gmail_provenance_unavailable",
+    ]),
   }),
   read_attachment: v.looseObject({
     message_id: identifier,

@@ -5,6 +5,7 @@ import { MAX_RAW_BYTES } from "./limits.ts";
 import { canonicalReceipt, parseReceipt } from "./receipt-schema.ts";
 import type { CatalogIssue, IssueCode, SourceObservation } from "./catalog.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
+import { parseGmailProvenance, gmailRawMatches, gmailNamespace } from "./gmail-provenance.ts";
 
 export const RECONCILE_PAGE_SIZE = 20;
 export const MAX_RECEIPT_BYTES = 16 * 1024;
@@ -130,6 +131,61 @@ async function observe(
 ): Promise<{ observation: SourceObservation; issues: CatalogIssue[] }> {
   const rawKey = `${candidate.prefix}/raw.eml`;
   const receiptKey = `${candidate.prefix}/receipt.json`;
+  const gmailRaw = await bucket.head(rawKey);
+  if (gmailRaw?.customMetadata?.["sourceKind"] === "gmail" || !gmailRaw) {
+    const object = await bucket.get(receiptKey);
+    let provenance = null;
+    if (object && object.size <= MAX_RECEIPT_BYTES) {
+      try {
+        provenance = parseGmailProvenance(await object.json());
+      } catch {
+        /* Invalid evidence is recorded below. */
+      }
+    } else if (object) await object.body.cancel();
+    if (provenance?.rawKey !== rawKey) provenance = null;
+    const namespace = provenance?.accountNamespace ?? gmailRaw?.customMetadata?.["gmailNamespace"];
+    if (
+      provenance ||
+      (gmailRaw?.customMetadata?.["sourceKind"] === "gmail" && gmailNamespace(namespace))
+    ) {
+      const valid =
+        gmailRaw !== null && provenance !== null && gmailRawMatches(gmailRaw, provenance);
+      // Partial writes are coverage issues; they never block the rest of a sweep
+      // or acquire fabricated SMTP forwarding evidence. Import replay repairs them.
+      return {
+        observation: {
+          ingestId: candidate.ingestId,
+          rawKey,
+          receiptKey,
+          receivedAt: provenance ? new Date(Number(provenance.internalDate)).toISOString() : null,
+          snapshot: null,
+          forward: null,
+          rawState: !gmailRaw ? "missing" : valid ? "present" : "invalid",
+          receiptState: provenance ? "valid" : object ? "invalid" : "missing",
+          rawSize: provenance?.rawSize ?? null,
+          rawSha256: provenance?.rawSha256 ?? null,
+          notifyEvents: false,
+          ...(provenance ? { gmail: provenance } : {}),
+          sourceKind: "gmail",
+          sourceNamespace: namespace!,
+        },
+        issues: valid
+          ? []
+          : [
+              {
+                key: !gmailRaw ? rawKey : receiptKey,
+                code: !gmailRaw
+                  ? "missing_raw"
+                  : provenance
+                    ? "evidence_mismatch"
+                    : object
+                      ? "invalid_receipt"
+                      : "missing_receipt",
+              },
+            ],
+      };
+    }
+  }
   // Service failures reject the whole page. Only confirmed absence is "missing".
   const [raw, receiptRead] = await Promise.all([
     bucket.head(rawKey),
