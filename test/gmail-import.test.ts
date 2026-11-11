@@ -247,6 +247,53 @@ describe("bounded historical Gmail import", () => {
 });
 
 describe("trusted Gmail import operator handler", () => {
+  it("accepts an empty network stream while rejecting streamed input or a stalled body", async () => {
+    const runtime = { importId: "network-stream", scope, transport: transport() };
+    const operator = { id: "synthetic-operator", scopes: ["mail:import"], fromAddresses: [] };
+    const url = "https://mail.example.invalid/api/admin/gmail-import/start";
+    const empty = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    });
+    expect(
+      (
+        await handleGmailImport(
+          new Request(url, { method: "POST", body: empty }),
+          env,
+          operator,
+          runtime,
+        )
+      ).status,
+    ).toBe(200);
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+    });
+    expect(
+      (
+        await handleGmailImport(
+          new Request(url, { method: "POST", body: input }),
+          env,
+          operator,
+          runtime,
+        )
+      ).status,
+    ).toBe(400);
+    const stalled = new ReadableStream<Uint8Array>();
+    expect(
+      (
+        await handleGmailImport(
+          new Request(url, { method: "POST", body: stalled }),
+          env,
+          operator,
+          runtime,
+        )
+      ).status,
+    ).toBe(400);
+    expect(runtime.transport.list).not.toHaveBeenCalled();
+  });
   it("requires a separate grant and accepts only configured bodyless actions", async () => {
     const runtime = { importId: "operator", scope, transport: transport() };
     const reader = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };

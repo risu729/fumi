@@ -28,6 +28,32 @@ export interface GmailImportRuntime {
   transport: GmailTransport;
 }
 
+/** Network POST requests may expose an empty stream instead of a null body. */
+async function hasNoInput(request: Request): Promise<boolean> {
+  if (new URL(request.url).search) return false;
+  if (!request.body) return true;
+  const reader = request.body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Import input deadline")), 1000);
+  });
+  try {
+    for (let chunks = 0; chunks < 8; chunks++) {
+      // oxlint-disable-next-line no-await-in-loop -- Reject the first byte; bound empty chunks and elapsed time.
+      const part = await Promise.race([reader.read(), deadline]);
+      if (part.done) return true;
+      if (part.value.byteLength) return false;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    await Promise.race([reader.cancel().catch(() => undefined), Promise.resolve()]);
+    reader.releaseLock();
+  }
+}
+
 /** Server-owned configuration only. Never accept OAuth material or scope from HTTP/mail. */
 export function gmailImportRuntime(env: {
   GMAIL_IMPORT_CONFIG?: string;
@@ -90,8 +116,7 @@ export async function handleGmailImport(
   if (request.method !== (action === "status" ? "GET" : "POST"))
     return respond({ error: { code: "method_not_allowed" } }, 405);
   // These actions intentionally have no request body, query scope, IDs, or credentials.
-  if (new URL(request.url).search || request.body !== null)
-    return respond({ error: { code: "invalid_request" } }, 400);
+  if (!(await hasNoInput(request))) return respond({ error: { code: "invalid_request" } }, 400);
   try {
     if (action === "start") {
       await startGmailImport(env, runtime.importId, runtime.scope);
