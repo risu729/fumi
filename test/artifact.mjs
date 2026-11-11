@@ -140,6 +140,29 @@ try {
     2,
   );
   assert.equal((await catalog.prepare("SELECT pass FROM archive_scan").first()).pass, 1);
+  await bucket.put(
+    "config/routing-shadow-v1.json",
+    JSON.stringify({
+      schemaVersion: 1,
+      configJson: JSON.stringify({
+        schemaVersion: 1,
+        adoptions: [],
+        rules: [
+          {
+            id: "synthetic",
+            priority: 1,
+            match: 'subject.startsWith("Native")',
+            outcome: "review",
+          },
+        ],
+        fallback: "unresolved",
+      }),
+      manifests: [],
+    }),
+  );
+  const eventsBeforeShadow = await catalog
+    .prepare("SELECT COUNT(*) AS count FROM mail_events")
+    .first();
   const searchScan = await runtime.dispatchFetch(
     "http://localhost/cdn-cgi/local/scheduled?cron=*/5%20*%20*%20*&format=json",
   );
@@ -158,8 +181,23 @@ try {
     .bind('"Synthetic body"')
     .first();
   assert.equal(contentMatches.count, 2);
+  const shadow = await catalog
+    .prepare("SELECT state,decision_json FROM routing_shadow_decisions")
+    .all();
+  assert.equal(shadow.results.length, 2);
+  for (const row of shadow.results) {
+    assert.equal(row.state, "complete");
+    const decision = JSON.parse(row.decision_json);
+    assert.equal(decision.dispatchAllowed, false);
+    assert.equal(decision.status, "shadow");
+    assert.equal(decision.fallback.outcome, "review");
+  }
+  assert.deepEqual(
+    await catalog.prepare("SELECT COUNT(*) AS count FROM mail_events").first(),
+    eventsBeforeShadow,
+  );
   console.log(
-    "Native Email/Cron/Workflow events, MIME derivatives, content search, R2/D1 and built artifact: passed",
+    "Native Email/Cron/Workflow events, MIME derivatives, search, routing shadow, R2/D1 and built artifact: passed",
   );
 } finally {
   await runtime.dispose();

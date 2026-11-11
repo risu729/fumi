@@ -1,7 +1,8 @@
 # MIME extraction
 
-Status: implemented and tested locally, 2026-11-11. The production catalog pipeline
-has not yet been upgraded to this stage. No real mail is parsed by repository tests.
+Status: implemented and activated in production on 2026-11-11. Controlled acceptance
+verified original, body and attachment bytes and durable extraction state. Private
+evidence stays outside the repository; repository tests use synthetic mail only.
 
 ## Stored representations
 

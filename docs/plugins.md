@@ -1,6 +1,9 @@
 # Owner-maintained integration plugins
 
-Status: proposal, 2026-11-07. No plugin loader or adapter is implemented.
+Status: the strict owner manifest and administrator adoption contracts have an
+isolated [bounded CEL shadow implementation](routing-shadow.md). Authenticated
+manifest distribution, owner adapters, durable claims and dispatch remain proposals;
+no plugin is called by the live runtime.
 
 ## Ownership and adoption
 

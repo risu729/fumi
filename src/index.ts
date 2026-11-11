@@ -7,6 +7,7 @@ import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.t
 import { deliverEvents } from "./event-delivery.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { repairContentSearch } from "./content-search.ts";
+import { repairRoutingShadow } from "./routing-shadow-runtime.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
@@ -146,6 +147,22 @@ export default {
       console.log(JSON.stringify({ event: "content_search_repair", ...search }));
     } catch {
       console.error(JSON.stringify({ event: "content_search_repair", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const routing = await repairRoutingShadow(env);
+      if (
+        routing.status === "invalid_config" ||
+        routing.status === "unavailable" ||
+        routing.failed
+      ) {
+        console.error(JSON.stringify({ event: "routing_shadow", ...routing }));
+        failed = true;
+      } else {
+        console.log(JSON.stringify({ event: "routing_shadow", ...routing }));
+      }
+    } catch {
+      console.error(JSON.stringify({ event: "routing_shadow", status: "unavailable" }));
       failed = true;
     }
     try {

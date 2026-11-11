@@ -5,6 +5,7 @@
     "": {
       "name": "fumi",
       "dependencies": {
+        "@bufbuild/cel": "0.6.2",
         "@modelcontextprotocol/server": "2.4.0",
         "@valibot/to-json-schema": "1.8.0",
         "jose": "6.2.17",
@@ -25,6 +26,14 @@
     },
   },
   "packages": {
+    "@bufbuild/cel": ["@bufbuild/cel@0.6.2", "", { "dependencies": { "@bufbuild/cel-spec": "0.6.2", "@bufbuild/re2": "0.6.2" }, "peerDependencies": { "@bufbuild/protobuf": "^2.6.2" } }, "sha512-AcZd2OnTqtiViJw2U+UQdUxjKQn3MqK1i1QyJtG5+wUKRPS5LzdkXLV3bWbKysuuUlZGJECm6wl3uLp1Cy+eQA=="],
+
+    "@bufbuild/cel-spec": ["@bufbuild/cel-spec@0.6.2", "", { "peerDependencies": { "@bufbuild/protobuf": "^2.6.2" } }, "sha512-Zgs67gtVTIzva36INEeTWbk/UgMRWKwNk4kISaV3BuEH+Qv+HDBmfgGXRwSH99XC1WKx4CGfrjXnPdH92nM4Ow=="],
+
+    "@bufbuild/protobuf": ["@bufbuild/protobuf@2.17.0", "", {}, "sha512-hcPkSz6D7MiTU/5VBBhK+kxaYDoOdQ6yJRFJ3kS8Nydp+VZXfg1vrpABKPNod8bXMufsVCmiUJVIKFzCzta4uw=="],
+
+    "@bufbuild/re2": ["@bufbuild/re2@0.6.2", "", {}, "sha512-/J0aKLB8jZSRe8P5h988GGA15pX/QTBcYvmUzvSdqSJlandchxDxbvykJf1RUpR4bgAEM3eobH8rarINw74bCQ=="],
+
     "@cloudflare/build-output-utils": ["@cloudflare/build-output-utils@0.9.12", "", { "dependencies": { "@cloudflare/config": "0.31.1" } }, "sha512-lHJBLteR0vXruYU6N8K1I5sqAhhK5QE14LTDrMXf+ac4dUsN4lO+TN+xdL0o6P9k+fBcyzngMzXBK5wFu+HIlw=="],
 
     "@cloudflare/config": ["@cloudflare/config@0.31.1", "", { "dependencies": { "zod": "4.6.6" } }, "sha512-6tuAEST/fKTLxUNZ+p6Jx0lHTInb8wG09LyUY2bY11N2YQgOaXZfYANp0IcOifLEmkW/zPDnVmWEY8fCYh8UNQ=="],
