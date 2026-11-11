@@ -7,10 +7,10 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "2.0.0-beta.v.12",
-    "@cloudflare/vitest-plugin": "1.6.0",
+    "@cloudflare/vitest-plugin": "1.6.1",
     "@risu729/tsconfigs": "3.0.1",
     "cf": "1.0.0-beta.28",
-    "miniflare": "5.20261104.0-beta",
+    "miniflare": "5.20261109.0-beta",
     "typescript": "7.0.2",
     "vite": "8.3.7",
     "vitest": "5.1.0"
