@@ -37,6 +37,11 @@ export const mailInputEntries = {
 };
 export const mailInputSchema = v.strictObject(mailInputEntries);
 export const toolSchemas = {
+  search_mail_content: v.strictObject({
+    ...page,
+    query: v.pipe(v.string(), v.minLength(3), v.maxLength(200)),
+    filters: v.optional(shortText),
+  }),
   get_profile: v.strictObject({}),
   read_email: v.strictObject({
     message_id: identifier,
@@ -170,6 +175,17 @@ const searchOutput = v.looseObject({
   coverage: v.record(v.string(), v.unknown()),
 });
 export const toolOutputSchemas = {
+  search_mail_content: v.looseObject({
+    matches: v.array(
+      v.looseObject({
+        message_id: identifier,
+        excerpt: v.string(),
+        citation: v.record(v.string(), v.unknown()),
+      }),
+    ),
+    next_page_token: v.nullable(v.string()),
+    coverage: v.record(v.string(), v.unknown()),
+  }),
   get_profile: v.looseObject({
     principal_id: v.string(),
     scopes: v.array(v.string()),

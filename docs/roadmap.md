@@ -1,7 +1,7 @@
 # Roadmap
 
-Status: development foundation and initial phase-1 runtime implemented,
-2026-11-07. Checked items describe completed implementation or preparation;
+Status: capture, MIME extraction and agent mail runtime implemented,
+2026-11-11. Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
 Target state: fumi operates independently of Gmail. Existing Gmail forwarding is
@@ -60,14 +60,17 @@ establish production delivery.
 - [ ] Rate limits, bounded concurrency, checkpoints only after durable commits,
       reconciliation counts and duplicate handling across live/backfill sources.
 - [x] Extract bounded MIME parts into versioned derivatives; preserve original bytes.
-      Local implementation and synthetic checks are complete; production migration and
-      activation remain pending. See [MIME extraction](mime-extraction.md).
+      Production migration, extraction and attachment-byte acceptance were verified
+      on 2026-11-11. See [MIME extraction](mime-extraction.md).
 - [ ] Use managed conversion/OCR for supported attachments where suitable; compare
       optional visual retrieval without requiring a custom `.txt` for every file.
       See [attachment representations](attachment-retrieval.md).
 - [x] Add authenticated MCP metadata search, message/thread reads and attachment
       resources. See [agent mail](agent-mail.md) for explicit coverage and limits.
 - [ ] Build keyword/hybrid retrieval over bodies and attachments with citations.
+      A bounded plain-text/UTF-8 attachment lexical baseline is implemented in
+      [content search](content-search.md); its production activation, OCR and
+      semantic/hybrid comparison remain separate.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -98,8 +101,8 @@ establish production delivery.
 ## Phase 2C: outbound email through MCP
 
 - [x] Select native Cloudflare Email Sending on the Workers Paid deployment baseline.
-- [ ] Verify sender domains, account quotas and production binding configuration
-      before activating sending.
+- [x] Verify sender domains, account quotas and production binding configuration
+      before activating sending; controlled sending was verified on 2026-11-11.
 - [x] Add separately scoped draft, preview, send, reply and send-status MCP tools.
       A permitted explicit send invocation may send directly; an interactive
       confirmation screen is not a universal requirement.
@@ -116,8 +119,10 @@ establish production delivery.
       acceptance, authorization failures and provider delivery events.
 - [x] Implement signed MCP Events with durable lifecycle events, scoped
       subscriptions, replay and bounded retries.
-- [ ] Activate and verify the authenticated production client, sender domains,
-      provider delivery Queue subscription and real webhook acceptance.
+- [x] Activate and verify authenticated production MCP reads, sender domains,
+      sends/replies, attachment hashes, idempotency and provider delivery events.
+- [ ] Verify signed MCP Events against the chosen production webhook receiver.
+      Receiver selection and end-to-end delivery remain deferred.
 
 See [outbound MCP](outbound-mcp.md) and the [agent API](agent-mail.md).
 Implementation and synthetic tests do not establish production delivery.
@@ -167,8 +172,9 @@ CEL implementation; retrieval backend; DecisionRAG viability; attachment format
 coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
 production delivery/recovery policy. Cloudflare Email Sending and Valibot are
 selected, with implemented Standard Schema MCP boundaries and a native sending
-binding adapter; production sender activation remains pending.
+binding adapter; production send/reply acceptance was verified on 2026-11-11.
 The implemented runtime covers forwarding, raw archival, catalog reconciliation
 and versioned Workflows for cataloging and bounded MIME extraction, plus the
-agent mail API described above. Production currently uses the catalog stage;
-OCR, full-text search and historical import remain future work.
+agent mail API described above. Production uses MIME extraction and the agent API.
+The bounded lexical content search baseline is implemented but not yet activated;
+OCR, hybrid retrieval and historical import remain future work.

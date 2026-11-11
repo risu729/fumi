@@ -23,6 +23,7 @@ interface MailRow {
   metadata_json: string | null;
   attachments_json: string | null;
   body_json_key: string | null;
+  body_text_key: string | null;
 }
 interface Attachment {
   index: number;
@@ -33,7 +34,7 @@ interface Attachment {
   sha256: string;
 }
 const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,
- e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key
+ e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key
  FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'`;
 const LIMIT = 16_000;
 function bodyPreview(value: string | null): string | null {
@@ -170,7 +171,7 @@ export async function readMailResource(
   env: MailReadEnvironment,
   principal: MailPrincipal,
   messageId: string,
-  kind: "raw" | "body" | "attachment",
+  kind: "raw" | "body" | "text" | "attachment",
   attachmentId?: string,
 ): Promise<Response> {
   requireRead(principal);
@@ -178,7 +179,13 @@ export async function readMailResource(
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   const row = await mailRow(env, messageId);
   let key: string | null =
-    kind === "raw" ? row.raw_key : kind === "body" ? row.body_json_key : null;
+    kind === "raw"
+      ? row.raw_key
+      : kind === "body"
+        ? row.body_json_key
+        : kind === "text"
+          ? row.body_text_key
+          : null;
   if (kind === "attachment") {
     const entries = JSON.parse(row.attachments_json ?? "[]") as Attachment[];
     key = entries.find((a) => `part_${a.index}` === attachmentId)?.key ?? null;

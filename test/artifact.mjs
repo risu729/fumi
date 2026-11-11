@@ -140,8 +140,26 @@ try {
     2,
   );
   assert.equal((await catalog.prepare("SELECT pass FROM archive_scan").first()).pass, 1);
+  const searchScan = await runtime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/scheduled?cron=*/5%20*%20*%20*&format=json",
+  );
+  assert.equal(searchScan.status, 200);
+  assert.equal((await searchScan.json()).outcome, "ok");
+  assert.equal(
+    (
+      await catalog
+        .prepare("SELECT COUNT(*) AS count FROM mail_search_documents WHERE status='ready'")
+        .first()
+    ).count,
+    2,
+  );
+  const contentMatches = await catalog
+    .prepare("SELECT COUNT(*) AS count FROM mail_search_fts WHERE mail_search_fts MATCH ?")
+    .bind('"Synthetic body"')
+    .first();
+  assert.equal(contentMatches.count, 2);
   console.log(
-    "Native Email/Cron/Workflow events, MIME derivatives, R2/D1 and built artifact: passed",
+    "Native Email/Cron/Workflow events, MIME derivatives, content search, R2/D1 and built artifact: passed",
   );
 } finally {
   await runtime.dispose();
