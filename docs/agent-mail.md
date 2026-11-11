@@ -135,6 +135,9 @@ DNS administration. Redirects are refused on verification and delivery.
 
 ## Activation checklist
 
+Follow the [activation runbook](mail-activation.md) for targeted Queue and
+subscription commands, the protected hostname and owner login.
+
 Apply D1 migrations before activating new code. Verify sender domains and current
 account quotas, configure the `EMAIL` binding and private grants, provision the
 delivery Queue/DLQ and Email Sending event subscription, and configure Access and
