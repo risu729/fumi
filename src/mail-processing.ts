@@ -9,6 +9,7 @@ import {
   readProcessingJob,
 } from "./processing-jobs.ts";
 import { indexArchiveSource } from "./reconcile.ts";
+import { extractArchiveMail } from "./mime-extraction.ts";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import type { ProcessingParams } from "./processing-jobs.ts";
 
@@ -30,20 +31,25 @@ async function redacted<T>(operation: () => Promise<T>): Promise<T> {
 export class MailProcessing extends WorkflowEntrypoint<Env, ProcessingParams> {
   override async run(event: WorkflowEvent<ProcessingParams>, step: WorkflowStep) {
     const params = parseProcessingParams(event.payload);
-    if (!params || event.instanceId !== processingInstanceId(params.rawKey, params.attempt)) {
+    if (
+      !params ||
+      event.instanceId !==
+        processingInstanceId(params.rawKey, params.attempt, params.pipelineVersion)
+    ) {
       throw new NonRetryableError("Invalid mail processing identity");
     }
     const session = this.env.MAIL_CATALOG.withSession("first-primary");
     try {
-      const active = await step.do("begin-catalog-v1", retry, () =>
+      const active = await step.do(`begin-${params.pipelineVersion}`, retry, () =>
         redacted(() => beginProcessing(session, params)),
       );
       if (!active) return { status: "skipped" };
-      const result = await step.do("index-catalog-v1", retry, () =>
+      const result = await step.do(`index-${params.pipelineVersion}`, retry, () =>
         redacted(async () => {
           const current = await readProcessingJob(
             this.env.MAIL_CATALOG.withSession("first-primary"),
             params.rawKey,
+            params.pipelineVersion,
           );
           if (current?.instance_id !== event.instanceId || current.state !== "running") {
             throw new Error("Processing attempt is no longer active");
@@ -56,15 +62,37 @@ export class MailProcessing extends WorkflowEntrypoint<Env, ProcessingParams> {
           );
         }),
       );
+      if (params.pipelineVersion === "mime-v1") {
+        const extraction = await step.do("extract-mime-v1", retry, () =>
+          redacted(() =>
+            extractArchiveMail(
+              this.env.MAIL_ARCHIVE,
+              this.env.MAIL_CATALOG,
+              params.rawKey,
+              event.instanceId,
+            ),
+          ),
+        );
+        if (extraction.status !== "complete") {
+          // A durable blocked result needs investigation, not retries of the same input.
+          throw new NonRetryableError("Mail extraction is blocked");
+        }
+        await step.do("complete-mime-v1", retry, () =>
+          redacted(() => completeProcessing(session, params)),
+        );
+        return { status: "extracted", ...result, attachmentCount: extraction.attachmentCount };
+      }
       await step.do("complete-catalog-v1", retry, () =>
         redacted(() => completeProcessing(session, params)),
       );
       return { status: "cataloged", ...result };
     } catch {
-      await step.do("record-catalog-failure-v1", retry, () =>
-        redacted(() => failProcessing(session, params)),
-      );
-      throw new NonRetryableError("Mail catalog processing failed");
+      const failureStep =
+        params.pipelineVersion === "catalog-v1"
+          ? "record-catalog-failure-v1"
+          : "record-mime-failure-v1";
+      await step.do(failureStep, retry, () => redacted(() => failProcessing(session, params)));
+      throw new NonRetryableError("Mail processing failed");
     }
   }
 }

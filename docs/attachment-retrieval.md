@@ -1,7 +1,9 @@
 # Attachment retrieval representations
 
-Status: proposed, checked 2026-11-07. No attachment processing or model inference
-has been implemented or run.
+Status: retrieval representations proposed, checked 2026-11-07. Bounded MIME
+decoding and private attachment storage are implemented and tested locally as of
+2026-11-11; see [MIME extraction](mime-extraction.md). Production activation,
+document conversion, OCR and model inference remain pending.
 
 ## Text is useful, not a universal prerequisite
 

@@ -115,12 +115,34 @@ try {
   );
   assert.ok(second);
   await waitForProcessing(second.key);
+  const extraction = await catalog
+    .prepare("SELECT * FROM mail_extractions WHERE raw_key = ? AND extractor_version = 'mime-v1'")
+    .bind(second.key)
+    .first();
+  assert.equal(extraction.status, "complete");
+  assert.equal(extraction.attachment_count, 1);
+  assert.equal(JSON.parse(extraction.metadata_json).messageId, "<artifact@example.invalid>");
+  const body = await bucket.get(extraction.body_json_key);
+  assert.match((await body.json()).text, /Synthetic body/);
+  const [attachment] = JSON.parse(extraction.attachments_json);
+  const attachmentObject = await bucket.get(attachment.key);
+  assert.deepEqual(
+    new Uint8Array(await attachmentObject.arrayBuffer()),
+    new Uint8Array([0, 1, 2, 3, 255, 254, 253]),
+  );
+  // Derivatives do not replace or rewrite the original source.
+  assert.deepEqual(
+    new Uint8Array(await (await bucket.get(second.key)).arrayBuffer()),
+    new TextEncoder().encode(raw),
+  );
   assert.equal(
     (await catalog.prepare("SELECT COUNT(*) AS count FROM archive_sources").first()).count,
     2,
   );
   assert.equal((await catalog.prepare("SELECT pass FROM archive_scan").first()).pass, 1);
-  console.log("Native Email/Cron/Workflow events, R2/D1 and built artifact: passed");
+  console.log(
+    "Native Email/Cron/Workflow events, MIME derivatives, R2/D1 and built artifact: passed",
+  );
 } finally {
   await runtime.dispose();
 }

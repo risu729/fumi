@@ -10,6 +10,10 @@ A D1 catalog and bounded scheduled reconciler index existing R2 evidence separat
 from delivery. Cloudflare Workflows now adds immediate catalog registration,
 durable processing state and missing-start repair. Production activation and
 synthetic forwarding/archive/Workflow acceptance were verified on 2026-11-10.
+Bounded MIME extraction is now implemented for the next pipeline version:
+selected headers in D1, body and decoded attachments in private R2, with source
+hashes and explicit coverage failures. This stage has not been activated in
+production; see [MIME extraction](docs/mime-extraction.md) for limits and rollout.
 See [processing Workflows](docs/processing-workflows.md) and
 [catalog recovery](docs/archive-catalog.md) for identity, failures and rollout.
 Backfill, search, plugin routing, model classification, webhooks and outbound MCP
@@ -74,4 +78,4 @@ The toolchain follows [pateat](https://github.com/risu729/pateat) and
 [kogane](https://github.com/risu729/kogane), scaled down to a single package.
 The native cf toolchain builds the Worker. Vitest with Cloudflare's plugin tests
 the handler in the Workers runtime. See mise tasks for checking, building and
-deploying; the initial handler needs no third-party application dependencies.
+deploying. Background extraction uses the pinned `postal-mime` parser.

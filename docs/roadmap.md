@@ -59,7 +59,9 @@ establish production delivery.
       thread linkage, dates and attachment provenance. Never mutate Gmail in import.
 - [ ] Rate limits, bounded concurrency, checkpoints only after durable commits,
       reconciliation counts and duplicate handling across live/backfill sources.
-- [ ] Extract MIME parts into versioned derivatives; preserve original bytes.
+- [x] Extract bounded MIME parts into versioned derivatives; preserve original bytes.
+      Local implementation and synthetic checks are complete; production migration and
+      activation remain pending. See [MIME extraction](mime-extraction.md).
 - [ ] Use managed conversion/OCR for supported attachments where suitable; compare
       optional visual retrieval without requiring a custom `.txt` for every file.
       See [attachment representations](attachment-retrieval.md).
@@ -160,4 +162,5 @@ production delivery/recovery policy. Cloudflare Email Sending and Valibot are
 selected, with Standard Schema integration boundaries; their runtime integration
 has not been implemented.
 The implemented runtime covers forwarding, raw archival, catalog reconciliation
-and a Workflows catalog stage; extraction and other consumers remain future work.
+and versioned Workflows for cataloging and bounded MIME extraction. Production
+currently uses the catalog stage; OCR, search and other consumers remain future work.
