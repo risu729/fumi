@@ -1,4 +1,5 @@
 import { hasScope, type MailPrincipal } from "./principal.ts";
+import { createConnectorGmailTransport } from "./gmail-connector-transport.ts";
 import {
   runGmailImportPage,
   startGmailImport,
@@ -31,14 +32,26 @@ export interface GmailImportRuntime {
 export function gmailImportRuntime(env: {
   GMAIL_IMPORT_CONFIG?: string;
   GMAIL_IMPORT_ACCESS_TOKEN?: string;
+  MAIL_ARCHIVE?: R2Bucket;
 }): GmailImportRuntime | null {
-  if (!env.GMAIL_IMPORT_CONFIG || !env.GMAIL_IMPORT_ACCESS_TOKEN) return null;
+  if (!env.GMAIL_IMPORT_CONFIG) return null;
   try {
     const value = JSON.parse(env.GMAIL_IMPORT_CONFIG) as {
       importId: string;
       expectedAccountHash: string;
       scope: GmailImportScope;
+      transport?: "oauth" | "connector";
     };
+    if (value.transport === "connector") {
+      if (!env.MAIL_ARCHIVE) throw new GmailImportError("invalid_import_configuration");
+      return {
+        ...value,
+        transport: createConnectorGmailTransport({ bucket: env.MAIL_ARCHIVE, ...value }),
+      };
+    }
+    if (value.transport !== undefined && value.transport !== "oauth")
+      throw new GmailImportError("invalid_import_configuration");
+    if (!env.GMAIL_IMPORT_ACCESS_TOKEN) return null;
     return {
       ...value,
       transport: createReadonlyGmailTransport({
