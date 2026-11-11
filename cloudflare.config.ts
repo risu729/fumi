@@ -12,6 +12,7 @@ export default defineConfig({
     name: "fumi",
     entrypoint,
     compatibilityDate,
+    domains: ["fumi.risunosu.com"],
     exports: {
       MailProcessing: exports.workflow({
         name: "fumi-mail-processing",
