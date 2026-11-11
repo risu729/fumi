@@ -1,7 +1,11 @@
-// This is an archive-and-forward ingress only. Message content cannot choose actions.
+// Mail content cannot choose actions; HTTP tools require server-resolved grants.
 import { MAX_RAW_BYTES, CAPTURE_TIMEOUT_MS } from "./limits.ts";
 import { reconcileArchive } from "./reconcile.ts";
 import { repairProcessing, requestProcessing } from "./processing-jobs.ts";
+import { handleHttp } from "./http.ts";
+import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.ts";
+import { deliverEvents } from "./event-delivery.ts";
+import { eventRuntime } from "./event-runtime.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
@@ -105,6 +109,20 @@ async function forward(
 }
 
 export default {
+  fetch: handleHttp,
+  async queue(batch, env): Promise<void> {
+    if (batch.queue !== "fumi-delivery-events") throw new Error("Unexpected delivery queue");
+    for (const message of batch.messages) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- Bound receipt processing and ack only persisted events.
+        await applyProviderEvent(env, message.body);
+        message.ack();
+      } catch {
+        message.retry();
+        console.error(JSON.stringify({ event: "delivery_event", status: "deferred" }));
+      }
+    }
+  },
   async scheduled(_controller, env): Promise<void> {
     let failed = false;
     try {
@@ -122,6 +140,13 @@ export default {
       console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
       failed = true;
     }
+    try {
+      await reconcileProviderEvents(env);
+      await deliverEvents(env.MAIL_CATALOG, eventRuntime(env));
+    } catch {
+      console.error(JSON.stringify({ event: "event_delivery", status: "deferred" }));
+      failed = true;
+    }
     if (failed) throw new Error("Archive reconciliation did not complete");
   },
   async email(message, env, ctx): Promise<void> {
@@ -132,6 +157,7 @@ export default {
     const [archive, forwarding] = await Promise.all([
       archiveRaw(message, env.MAIL_ARCHIVE, `${prefix}/raw.eml`, {
         schemaVersion: "1",
+        eventNotifications: "1",
         ingestId,
         receivedAt,
         envelopeFrom: message.from,

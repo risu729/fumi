@@ -26,6 +26,12 @@ export default defineConfig({
         ...(catalogId ? { id: catalogId } : {}),
       }),
       FORWARD_TO: bindings.secret(),
+      EMAIL: bindings.sendEmail(),
+      ACCESS_ISSUER: bindings.secret(),
+      ACCESS_AUDIENCE: bindings.secret(),
+      API_ORIGIN: bindings.secret(),
+      MAIL_GRANTS: bindings.secret(),
+      WEBHOOK_ORIGINS: bindings.secret(),
       MAIL_PROCESSING: bindings.workflow({
         name: "fumi-mail-processing",
         worker: "fumi",
@@ -34,7 +40,15 @@ export default defineConfig({
     },
     workersDev: false,
     previewUrls: false,
-    triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
+    triggers: [
+      triggers.scheduled({ schedule: "*/5 * * * *" }),
+      triggers.queue({
+        name: "fumi-delivery-events",
+        deadLetterQueue: "fumi-delivery-events-dlq",
+        maxBatchSize: 10,
+        maxRetries: 5,
+      }),
+    ],
     observability: {
       enabled: true,
       headSamplingRate: 1,

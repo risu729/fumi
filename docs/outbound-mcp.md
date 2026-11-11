@@ -1,8 +1,10 @@
 # Outbound email through MCP
 
-Status: Cloudflare Email Sending selected on 2026-11-07; implementation is still
-planned. No sending domain, credential, MCP send tool or delivery path has been
-configured or used by this bootstrap.
+Status: the initial implementation is complete with synthetic tests, 2026-11-11.
+See the [agent mail API](agent-mail.md) for the implemented tool contract, limits,
+authentication and activation steps. Production sending and client connectivity
+remain unverified. The sections below preserve the original design rationale;
+the implementation reference takes precedence for current tool names and limits.
 
 ## Provider choice
 
