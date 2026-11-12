@@ -1,16 +1,17 @@
 # ADR 0001: Agent rules in AGENTS.md and decisions in the repository
 
-Status: accepted by the owner on 2026-11-12 22:09 UTC, who asked that "Rules live
-in AGENTS.md only (no CLAUDE.md)" and to "Record every design decision risu makes
-in the repo: an ADR for large ones, otherwise the owning docs/ page. Nothing
-lives only in a thread or memory." Implemented by the PR that adds this ADR.
+Status: accepted. The owner gave the rules on 2026-11-12 22:09 UTC: "Record every
+design decision risu makes in the repo: an ADR for large ones, otherwise the
+owning docs/ page. Nothing lives only in a thread or memory. Rules live in
+AGENTS.md only (no CLAUDE.md)." Implemented in
+[#59](https://github.com/risu729/fumi/pull/59).
 Date: 2026-11-12
 
 ## Context
 
 Fumi is developed mostly by agents across many parallel threads. Before this
-ADR, decisions were spread across feature pages, PR descriptions, private notes
-and thread conversations, and the repository had no ADR directory or
+ADR, decisions were spread across feature pages, PR descriptions and thread
+conversations, and the repository had no ADR directory or
 documentation index. An agent starting a new thread could not tell which owner
 decisions were current, or where to record a new one. The owner's sibling
 repositories, [Pateat](https://github.com/risu729/pateat) and
@@ -29,9 +30,10 @@ repositories, [Pateat](https://github.com/risu729/pateat) and
   owns which kind of fact, and holds the ADR format and list.
 - [The roadmap](../roadmap.md) stays the only work tracker.
 
-The ADR format, the ownership table and the grouping of the page list were
-chosen by an agent from the sibling repositories and are not confirmed by the
-owner.
+The ADR format, the ownership table, the grouping of the page list, the rule
+for documentation-only PRs and the use of UTC without JST inside the repository
+were chosen by an agent from the sibling repositories and are not confirmed by
+the owner.
 
 ## Consequences
 
@@ -49,5 +51,6 @@ owner.
   alternatives and rationale of larger ones and has no single list to review.
 - Backfill every earlier decision as an ADR now: large documentation churn with
   no new information; the owning pages already record them.
-- A chronological decision log: rejected in Pateat and Kogane because it
-  duplicates the owning pages and goes stale.
+- A chronological decision log: Pateat rejects one because it duplicates the
+  owning pages and goes stale; Kogane keeps long chronological records apart in
+  `docs/history/`. Fumi has no such records yet.

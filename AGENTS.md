@@ -2,34 +2,30 @@
 
 Standing rules for any agent working in this repository. This file is the only
 place for agent rules; do not add a `CLAUDE.md` or another agent-specific rules
-file. Each rule points to the document that carries the detail; when this file
-and that document disagree, the document is right and this file is corrected.
+file. Where a rule needs detail, it links to the document that carries it; a
+document never overrides a rule here.
 
 ## Language and writing
 
 - Use English in repository prose, code, commits, issues and pull requests,
   including ADRs, plans and research notes. Agents talk with the owner in
   Japanese outside the repository (chat and threads).
-- Rules, docs and issues say "an agent" and do not name the agent product that
-  does a piece of work. Name a product only where it is the subject, such as a
-  model provider or an MCP client.
 - Show the concrete thing (a data shape, a real example value, a file or code)
   instead of coining a new term for it.
-- Write every PR, issue, commit, workflow run and URL mentioned in PR and issue
-  text and in messages to the owner as a Markdown link, never a bare `#123`,
-  SHA or URL. Use short commit SHAs.
+- Write every PR, issue, commit, workflow run and URL as a clickable Markdown
+  link, never a bare `#123`, SHA or URL, in the repository, in PR and issue
+  text and in messages to the owner. Use short commit SHAs as link text.
 - Write times in UTC. In messages to the owner, add JST in parentheses, for
-  example `09:20 UTC (18:20 JST)`.
+  example `09:20 UTC (18:20 JST)`; repository records use UTC only.
 
 ## Continuing the work
 
 - [The roadmap](docs/roadmap.md) is the work order and the only tracker of
   future work. A merged PR is not a stopping point: continue with the next
-  unchecked item of the current phase, then the next phase.
+  unchecked item of the current phase, then the next phase (owner, 2026-11-12
+  22:09 UTC).
 - Keep one topic per thread or task, and run independent work in parallel. Do
   not hand the owner work an agent can do.
-- A thread that researches something lands its findings in its own docs PR,
-  including the roadmap lines they change.
 - Work in cloud sessions first. Use the owner's own device only for a check
   that cannot be done anywhere else.
 
@@ -57,11 +53,12 @@ and that document disagree, the document is right and this file is corrected.
 - Run `mise run fix` and `mise run ci` before pushing. Use the locked tools.
   State in the PR body which commands ran and what was not run.
 - Have an independent subagent review every PR that changes implementation or
-  tests. Once review findings are resolved and CI passes, the agent that opened
-  the PR merges it without waiting for the owner. Recheck changes made after the
-  review.
-- Never skip, disable or quarantine a test, and never weaken a check, to make
-  CI pass.
+  tests. A documentation-only PR needs passing checks, plus the plan review
+  above when it carries a plan or proposal. Once review findings are resolved
+  and CI passes, the agent that opened the PR merges it without waiting for the
+  owner. Recheck changes made after the review.
+- Never skip, disable or quarantine a test, never weaken a check, and never
+  bypass a failing required check to make CI pass or to merge.
 - Only the owner merges release PRs.
 - Delete branches that are no longer needed, such as a merged PR's head branch,
   without asking.
