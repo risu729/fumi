@@ -7,8 +7,33 @@ import { setTimeout } from "node:timers/promises";
 // Execute the built production bundle with native workerd Email/Cron events and local R2/D1.
 // Miniflare simulates forwarding; this never sends SMTP or uses provisioned storage.
 const output = ".cloudflare/output/v0/workers/default";
+const { encryptedPdf, password: syntheticPdfPassword } = JSON.parse(
+  await readFile(".cloudflare/attachment-fixture.json", "utf8"),
+);
 const config = JSON.parse(await readFile(`${output}/worker.config.json`, "utf8"));
 config.env.FORWARD_TO = { type: "text", value: "synthetic-forward@gmail.com" };
+config.env.PDF_LOADER = { type: "worker-loader" };
+const pdfBytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+const pdfHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", pdfBytes)), (n) =>
+  n.toString(16).padStart(2, "0"),
+).join("");
+config.env.ATTACHMENT_CONVERSION_CONFIG = {
+  type: "text",
+  value: JSON.stringify({
+    version: 1,
+    enabled: true,
+    revision: "synthetic-native-pdf",
+    maxCalls: 1,
+    documents: false,
+    ocr: false,
+    zip: false,
+    pdf: true,
+  }),
+};
+config.env.ATTACHMENT_PASSWORDS = {
+  type: "text",
+  value: JSON.stringify({ [pdfHash]: [syntheticPdfPassword] }),
+};
 config.manifest = {
   mainModule: "index.js",
   modules: {
@@ -196,8 +221,96 @@ try {
     await catalog.prepare("SELECT COUNT(*) AS count FROM mail_events").first(),
     eventsBeforeShadow,
   );
+  // A disabled private artifact still records its control generation. This proves
+  // the post-MIME Workflow hook runs before Cron without creating any external call.
+  await bucket.put(
+    "config/routing-dispatch-v1.json",
+    JSON.stringify({
+      schemaVersion: 1,
+      revision: 1,
+      generation: 1,
+      enabled: false,
+      routing: {
+        configJson: JSON.stringify({
+          schemaVersion: 1,
+          adoptions: [],
+          rules: [],
+          fallback: "unresolved",
+        }),
+        manifests: [],
+      },
+      destination: {
+        id: "synthetic",
+        adapter: { kind: "rpc", serviceRef: "default", timeoutMs: 5000 },
+        offerFields: [],
+      },
+      owners: [],
+    }),
+  );
+  assert.equal(
+    (await catalog.prepare("SELECT COUNT(*) count FROM routing_dispatch_control").first()).count,
+    0,
+  );
+  const pdfMail = `From: sender@example.invalid\r\nTo: header@example.invalid\r\nMessage-ID: <synthetic-pdf@example.invalid>\r\nSubject: Synthetic native encrypted PDF\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="locked"\r\n\r\n--locked\r\nContent-Type: text/plain\r\n\r\nEncrypted fixture attached.\r\n--locked\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename="synthetic.pdf"\r\nContent-Transfer-Encoding: base64\r\n\r\n${encryptedPdf.match(/.{1,76}/g).join("\r\n")}\r\n--locked--\r\n`;
+  const pdfIngest = await runtime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/email?from=envelope@example.invalid&to=bcc@example.invalid&format=json",
+    { method: "POST", body: pdfMail },
+  );
+  assert.equal(pdfIngest.status, 200);
+  assert.equal((await pdfIngest.json()).outcome, "ok");
+  const pdfSource = (await bucket.list()).objects.find(
+    (object) =>
+      object.key.endsWith("/raw.eml") &&
+      object.key !== receipt.archive.key &&
+      object.key !== second.key,
+  );
+  assert.ok(pdfSource);
+  await waitForProcessing(pdfSource.key);
+  assert.deepEqual(
+    await catalog
+      .prepare("SELECT revision,generation,accepting FROM routing_dispatch_control")
+      .first(),
+    { revision: 1, generation: 1, accepting: 0 },
+  );
+  assert.equal(
+    (await catalog.prepare("SELECT COUNT(*) count FROM routing_dispatch_outbox").first()).count,
+    0,
+  );
+  const pdfEvents = await catalog.prepare("SELECT COUNT(*) count FROM mail_events").first();
+  const pdfScan = await runtime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/scheduled?cron=*/5%20*%20*%20*&format=json",
+  );
+  const pdfScanResult = await pdfScan.json();
+  assert.equal(pdfScan.status, 200, JSON.stringify(pdfScanResult));
+  assert.equal(pdfScanResult.outcome, "ok");
+  const converted = await catalog
+    .prepare("SELECT * FROM attachment_conversions WHERE raw_key=?")
+    .bind(pdfSource.key)
+    .first();
+  assert.equal(converted.state, "complete");
+  assert.equal(converted.representation, "local_decrypted_pdf");
+  assert.equal(converted.source_sha256, pdfHash);
+  const clearPdf = new Uint8Array(await (await bucket.get(converted.result_key)).arrayBuffer());
+  const clearHash = Array.from(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", clearPdf)),
+    (n) => n.toString(16).padStart(2, "0"),
+  ).join("");
+  assert.equal(clearHash, converted.result_sha256);
+  assert.equal(new TextDecoder().decode(clearPdf).includes("/Encrypt"), false);
+  assert.deepEqual(
+    new Uint8Array(await (await bucket.get(pdfSource.key)).arrayBuffer()),
+    new TextEncoder().encode(pdfMail),
+  );
+  assert.equal(
+    (await catalog.prepare("SELECT COUNT(*) count FROM attachment_conversion_calls").first()).count,
+    0,
+  );
+  assert.deepEqual(
+    await catalog.prepare("SELECT COUNT(*) count FROM mail_events").first(),
+    pdfEvents,
+  );
   console.log(
-    "Native Email/Cron/Workflow events, MIME derivatives, search, routing shadow, R2/D1 and built artifact: passed",
+    "Native Email/Cron/Workflow events, MIME, search, routing shadow, isolated encrypted PDF, R2/D1 and built artifact: passed",
   );
 } finally {
   await runtime.dispose();

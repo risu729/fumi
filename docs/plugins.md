@@ -1,9 +1,10 @@
 # Owner-maintained integration plugins
 
-Status: the strict owner manifest and administrator adoption contracts have an
-isolated [bounded CEL shadow implementation](routing-shadow.md). Authenticated
-manifest distribution, owner adapters, durable claims and dispatch remain proposals;
-no plugin is called by the live runtime.
+Status: strict owner manifest/adoption contracts have a
+[bounded CEL shadow implementation](routing-shadow.md) and a private-configured
+[durable offer and dispatch runtime](routing-dispatch.md). Production endpoint
+configuration, specialist-owner activation and real acceptance remain separate.
+No plugin is called without explicit private configuration and capability grants.
 
 ## Ownership and adoption
 

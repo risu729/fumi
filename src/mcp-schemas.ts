@@ -47,6 +47,15 @@ export const mailInputEntries = {
 };
 export const mailInputSchema = v.strictObject(mailInputEntries);
 export const toolSchemas = {
+  get_mail_health: v.strictObject({}),
+  search_mail_semantic: v.strictObject({
+    query: v.pipe(v.string(), v.minLength(1), v.maxLength(1000)),
+    mode: v.optional(v.picklist(["semantic", "hybrid"]), "hybrid"),
+    max_results: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(10)), 10),
+    filters: v.optional(shortText),
+    archive_source: archiveSearch.archive_source,
+    label_ids: archiveSearch.label_ids,
+  }),
   search_mail_content: v.strictObject({
     ...page,
     query: v.pipe(v.string(), v.minLength(3), v.maxLength(200)),
@@ -173,6 +182,25 @@ const searchOutput = v.looseObject({
   coverage: v.record(v.string(), v.unknown()),
 });
 export const toolOutputSchemas = {
+  get_mail_health: v.looseObject({
+    observed_at: v.string(),
+    status: v.picklist(["observations_available", "partial_observations"]),
+    archive_completeness: v.literal("unknown"),
+    sections: v.record(v.string(), v.unknown()),
+    coverage: v.record(v.string(), v.unknown()),
+  }),
+  search_mail_semantic: v.looseObject({
+    matches: v.array(
+      v.looseObject({
+        message_id: identifier,
+        excerpt: v.string(),
+        score: v.number(),
+        citation: v.record(v.string(), v.unknown()),
+      }),
+    ),
+    next_page_token: v.null(),
+    coverage: v.record(v.string(), v.unknown()),
+  }),
   search_mail_content: v.looseObject({
     matches: v.array(
       v.looseObject({

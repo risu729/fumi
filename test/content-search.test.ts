@@ -111,7 +111,7 @@ describe("bounded content retrieval", () => {
       "SELECT coverage_json FROM mail_search_documents WHERE raw_key LIKE '%/pdf/%'",
     ).first<{ coverage_json: string }>();
     expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
-      omitted: ["html_only_body", "part_0:unsupported_format"],
+      omitted: ["html_only_body", "part_0:conversion_not_enabled_or_pending"],
     });
   });
   it("retries corrupt or missing derivatives without publishing partial results or starving work", async () => {

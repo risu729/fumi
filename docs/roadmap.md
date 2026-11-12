@@ -1,7 +1,8 @@
 # Roadmap
 
-Status: capture, MIME extraction, agent mail, historical import and routing shadow
-implemented; lexical retrieval verified in production on 2026-11-12.
+Status: capture, agent mail, historical import, attachment conversion/decryption,
+managed retrieval and configurable routing are implemented. Lexical retrieval is
+verified in production; historical backfill is in progress on 2026-11-12.
 Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
@@ -59,24 +60,29 @@ establish production delivery.
       labels, account/thread/date provenance and exact MIME. Trusted admin routes,
       transport account verification and synthetic checks are complete. See
       [historical Gmail import](gmail-import.md).
-- [ ] Provision read-only Gmail OAuth, activate the configured historical scope and
-      verify real-mail migration independently. No Gmail writes are supported.
+- [ ] Complete and independently verify the configured historical scope. Exact
+      copies through the connected Gmail transport are active; optional read-only
+      OAuth remains an alternative. No Gmail writes are supported.
 - [x] Bound request rate/concurrency and advance checkpoints only after durable commits.
       Count unique per-run provider IDs and preserve distinct live/backfill sources even
       when MIME hashes match. Production import acceptance remains separate.
 - [x] Extract bounded MIME parts into versioned derivatives; preserve original bytes.
       Production migration, extraction and attachment-byte acceptance were verified
       on 2026-11-11. See [MIME extraction](mime-extraction.md).
-- [ ] Use managed conversion/OCR for supported attachments where suitable; compare
-      optional visual retrieval without requiring a custom `.txt` for every file.
-      See [attachment representations](attachment-retrieval.md).
+- [x] Implement bounded managed conversion/OCR, durable coverage and original/derived
+      citations, without requiring a custom `.txt` before managed ingestion.
+      Synthetic Workers tests cover local ZIP and isolated PDF decryption; provider
+      activation and real-document acceptance remain separate. See
+      [attachment conversion](attachment-conversion.md).
+- [ ] Compare optional visual retrieval against text/OCR projections.
 - [x] Add authenticated MCP metadata search, message/thread reads and attachment
       resources. See [agent mail](agent-mail.md) for explicit coverage and limits.
 - [x] Build a bounded lexical retrieval baseline over plain-text bodies and supported
       UTF-8 attachments with citations. Authenticated source downloads and citation
       hashes were verified in production on 2026-11-12. See
       [content search](content-search.md).
-- [ ] Add OCR and compare semantic/hybrid retrieval against the lexical baseline.
+- [ ] Activate opted-in OCR and compare semantic/hybrid retrieval against the lexical
+      baseline.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -94,12 +100,15 @@ establish production delivery.
 - [x] Define a plugin manifest and adoption contract. Integration owners publish
       their own rules and handlers; fumi pins and adopts them rather than maintaining
       copies of their business rules. See [plugins](plugins.md).
-- [ ] Add a specialist-owner adapter; Kogane needs a new return-value contract.
-- [ ] Deterministic rules first, bounded Claude/GPT structured classification only
-      for unresolved cases, then allowed webhook dispatch such as a Grok bot.
-- [ ] Route only to the active destination/account, with a lease or generation
-      fence so switching does not wake both old and new destinations.
-- [ ] Implement authenticated dispatch, stable idempotency keys, an outbox,
+- [x] Add strict specialist-owner HTTP/service/RPC adapters and durable receipts.
+      Owner deployment and real acceptance remain separately verified.
+- [x] Deterministic rules first, optional bounded Claude structured classification
+      for unresolved cases, then one administrator-configured generic webhook.
+      Actual classifier credentials and webhook receiver are deferred. Techo owns
+      downstream bot/account selection and its receiving handler.
+- [x] Fence the active generic destination by generation, drain old uncertainty
+      before activation, and preserve stable operation identity across revisions.
+- [x] Implement authenticated dispatch, stable idempotency keys, an outbox,
       bounded retries, a dead-letter path and status reconciliation for ambiguity.
 - [x] Persist deterministic rule/plugin shadow decisions with versioned private
       configuration, provenance fences and bounded repair. Historical mail is
@@ -153,15 +162,20 @@ the low-priority web client is not a prerequisite for retirement.
 
 ## Phase 3: encrypted attachments
 
-- [ ] Detect supported encrypted ZIP/PDF formats and preserve encrypted originals.
-- [ ] Search related authorized messages for password candidates; optionally use
-      an LLM to extract candidates with source references, never as proof of success.
-- [ ] Verify decryption locally with bounded attempts, size/time/expansion limits;
+- [x] Detect password-protected ZIP/PDF and preserve encrypted originals independently
+      from verified derivatives. Isolated PDF processing requires explicit opt-in.
+- [x] Search bounded related archive messages for ephemeral password-shaped hints
+      under namespace/participant/thread-or-subject-or-filename constraints.
+      Actual cryptographic decryption proves success; model extraction is optional
+      future work and is not required for the implemented path.
+- [x] Verify decryption locally with bounded attempts, size/time/expansion limits;
       save a distinct decrypted derivative only on verified success.
-- [ ] Keep passwords out of logs, MCP results and search indexes. Apply separate
-      access controls and retention to the newly readable derivative.
-- [ ] Evaluate pure JS/WASM on the actual Workers runtime. Unsupported or oversized
-      formats remain pending; do not silently require an external compute service.
+- [x] Keep resolved candidate values out of logs, MCP results and new derivative
+      text indexes. Original mail containing passwords is not retroactively redacted.
+      Apply separate access controls and retention to the newly readable derivative.
+- [x] Test zip.js without Web Workers/WASM and LibPDF in an isolated Dynamic Worker
+      on actual local workerd. Unsupported or oversized formats retain explicit
+      coverage; hosted limit enforcement remains an activation acceptance.
 
 ## Phase 4: optional web client (low priority)
 
@@ -176,17 +190,12 @@ the low-priority web client is not a prerequisite for retirement.
 
 ## Decisions still open
 
-Broader CEL language support; retrieval backend; DecisionRAG viability; attachment
-format coverage; classifier SDK/provider/model; plugin distribution and trust mechanism;
-production delivery/recovery policy. A bounded CEL subset and pinned manifest adoption
-are implemented for shadow evaluation only. Cloudflare Email Sending and Valibot are
-selected, with implemented Standard Schema MCP boundaries and a native sending binding
-adapter; production send/reply acceptance was verified on 2026-11-11. The implemented
-runtime covers forwarding, raw archival, catalog reconciliation and versioned Workflows
-for cataloging and bounded MIME extraction, plus the agent mail API described above.
-Production uses MIME extraction, the agent API and the bounded lexical content search
-baseline. Historical import and private deterministic shadow routing are implemented
-and synthetically tested; real Gmail migration and private policy activation remain
-separate. OCR, hybrid retrieval, model classification, owner adapters and dispatch
-remain future work. The configured API target is `fumi.takuk.me`; hostname, Access
-and private-origin activation require their own verified rollout.
+Broader CEL language support, DecisionRAG quality comparison, additional attachment
+formats, actual classifier model/key, plugin distribution and the production webhook
+receiver remain open. Bounded CEL adoption, durable owner offers, generic dispatch,
+optional Claude classification, local ZIP/PDF decryption and managed OCR/hybrid
+retrieval are implemented with private opt-in configuration. Code/tests alone do
+not establish a complete corpus, real model quality or downstream delivery.
+The API target `fumi.takuk.me`, lexical retrieval and outbound send/reply paths have
+separate recorded production acceptance. Gmail backfill remains in progress;
+forwarding retirement and deletion are not implied by implementation completion.

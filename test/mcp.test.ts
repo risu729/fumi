@@ -43,6 +43,15 @@ describe("official MCP HTTP transport", () => {
       const tools = await client.listTools();
       expect(tools.tools.map((t) => t.name)).toContain("read_email");
       expect(tools.tools.map((t) => t.name)).not.toContain("send_email");
+      expect(tools.tools.find((t) => t.name === "get_mail_health")?.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      });
+      const health = await client.callTool({ name: "get_mail_health", arguments: {} });
+      expect(health.isError).not.toBe(true);
+      expect(health.structuredContent).toMatchObject({ archive_completeness: "unknown" });
       expect(
         tools.tools.find((t) => t.name === "read_email")?.inputSchema["additionalProperties"],
       ).toBe(false);

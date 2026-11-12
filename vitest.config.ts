@@ -7,6 +7,7 @@ export default defineConfig({
       config: "./cloudflare.config.ts",
       remoteBindings: false,
       miniflare: {
+        workerLoaders: { PDF_LOADER: {} },
         bindings: {
           FORWARD_TO: "synthetic-forward@gmail.com",
           ACCESS_ISSUER: "https://synthetic.cloudflareaccess.com",

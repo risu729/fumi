@@ -95,6 +95,15 @@ representations. Keep originals and retrieval derivatives distinct.
 
 ## Encrypted attachments
 
+Implementation update, 2026-11-12: `@zip.js/zip.js` 2.24.0 is pinned and tested
+with native streams, AES and ZipCrypto in local workerd, without browser workers
+or WASM. `@libpdf/core` 0.5.3 is pinned only inside a build-time bundled Dynamic
+Worker with no network/bindings, bounded input/output and fixed resource limits.
+It does not execute in the archive isolate. Synthetic compressed AES-256 fixtures,
+authentication failures and structure/resource failures are covered; hosted limit
+acceptance and real-document activation remain separate. See
+[conversion limits and activation](attachment-conversion.md).
+
 | Format                 | Candidate                                                                 | Gate                                                                                                                                |
 | ---------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | ZIP (AES / ZipCrypto)  | [@zip.js/zip.js](https://gildas-lormeau.github.io/zip.js/)                | Disable browser Web Worker assumptions; verify Workers runtime, integrity validation, expansion/path limits and non-ASCII passwords |

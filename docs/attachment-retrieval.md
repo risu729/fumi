@@ -1,9 +1,12 @@
 # Attachment retrieval representations
 
-Status: retrieval representations proposed, checked 2026-11-07. Bounded MIME
-decoding and private attachment storage are implemented and tested locally as of
-2026-11-11; see [MIME extraction](mime-extraction.md). Production activation,
-document conversion, OCR and model inference remain pending.
+Status: bounded MIME decoding and private attachment storage are active. Managed
+document/OCR adapters, durable derivative coverage, lexical citations, local ZIP
+decryption and isolated PDF decryption are implemented with synthetic Workers
+tests as of 2026-11-12; see [conversion and activation](attachment-conversion.md).
+Their provider bindings, private opt-in and real-document acceptance remain
+separate activation steps. Visual/semantic retrieval is not established by these
+text projections.
 
 ## Text is useful, not a universal prerequisite
 
@@ -13,7 +16,7 @@ OCR, image/page embeddings and metadata. Keep immutable original bytes in R2;
 search derivatives do not replace them. A managed service can create its own
 representation from a supported original attachment.
 
-For fumi, start with managed extraction/OCR and text/structure for hybrid search,
+Fumi now uses managed extraction/OCR and text for lexical search,
 retaining original attachment/page access for visual evidence. Add visual
 retrieval when queries need diagrams, layout or information extraction misses.
 Text provides exact identifier/amount matching and inspectable snippets; it is

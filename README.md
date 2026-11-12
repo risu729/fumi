@@ -24,19 +24,26 @@ production on 2026-11-11; the MCP webhook receiver remains deferred. See the
 [content search](docs/content-search.md) baseline was verified in production on
 2026-11-12 with authenticated source downloads and matching hashes. Read-only
 [historical Gmail import](docs/gmail-import.md) now has resumable bounded pages,
-provider provenance, retained labels and account-scoped threads. OAuth provisioning,
-real-mail import and import acceptance remain pending. Private
-[routing shadow](docs/routing-shadow.md) implementation is also available. Routing
-configuration is administrator-owned and absent by default; shadow decisions never
-dispatch notifications. Model classification, live specialist adapters, dispatch and
-OCR/hybrid retrieval remain planned. See the [ingress runbook](docs/ingress.md) for
+provider provenance, retained labels and account-scoped threads. The
+[connected Gmail transport](docs/gmail-connector-import.md) is deployed and real-mail
+backfill is in progress; a completed page does not establish mailbox completeness.
+Private [routing shadow](docs/routing-shadow.md) remains available independently.
+[Durable dispatch](docs/routing-dispatch.md) implements owner offers followed by one
+configurable generic webhook, with
+[optional classification and trusted context](docs/routing-policy.md). Fumi does not
+select Techo bots or accounts. A real webhook receiver and classifier key remain
+deferred. [Managed semantic/hybrid retrieval](docs/managed-mail-search.md) is
+implemented with separate private ingestion/query budgets. Bounded attachment
+conversion/OCR, original/derived citations, local ZIP decryption and isolated
+password-protected PDF processing have
+[synthetic implementations](docs/attachment-conversion.md); private activation and
+real-document acceptance remain separate. See the [ingress runbook](docs/ingress.md) for
 deployment, acceptance and recovery; a deployed Worker alone does not establish
 production delivery.
 
-The requested protected API hostname is `fumi.takuk.me`. The native configuration
-and [activation runbook](docs/mail-activation.md) use this target; changing the
-Worker domain, Access protection and private origin configuration remains a
-separately verified operational step.
+The protected API hostname is `fumi.takuk.me`. Its Worker domain, Access protection
+and authenticated reads were verified on 2026-11-12; see the
+[activation runbook](docs/mail-activation.md).
 
 ## Direction
 
@@ -56,7 +63,7 @@ and [library evaluation](docs/libraries.md). See also the
 
 Selected decisions: Cloudflare Email Sending for outbound mail, Valibot with
 Standard Schema integration boundaries, and a pinned bounded CEL subset for
-shadow rules. Authenticated owner adapters and dispatch remain future work.
+metadata rules, with explicit grants for owner offers and notifications.
 Backfill includes historical Gmail SENT messages;
 ongoing Gmail Sent synchronization is out of scope.
 
