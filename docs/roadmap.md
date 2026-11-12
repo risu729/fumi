@@ -136,8 +136,9 @@ establish production delivery.
       [owner status](plugins.md#kogane-implementation-and-adoption-status).
 - [x] Deterministic rules first, optional bounded Claude structured classification
       for unresolved cases, then one administrator-configured generic webhook.
-      Actual classifier credentials and webhook receiver are deferred. Techo owns
-      downstream bot/account selection and its receiving handler.
+      Actual classifier credentials and webhook receiver are deferred. The Grok Bot
+      side builds its own webhook proxy that selects the active A/B account; fumi
+      sends to that one URL and does not select accounts (owner, 2026-11-12 22:50 UTC).
 - [x] Fence the active generic destination by generation, drain old uncertainty
       before activation, and preserve stable operation identity across revisions.
 - [x] Implement authenticated dispatch, stable idempotency keys, an outbox,
