@@ -1,14 +1,15 @@
 # Mail processing with Cloudflare Workflows
 
-Status: catalog-stage production activation verified on 2026-11-10, including
-synthetic Gmail forwarding, R2 byte comparison, D1 completion and scheduled repair.
-Private rollout evidence is retained outside this public repository.
-The `mime-v1` pipeline adds bounded body and attachment extraction; production
-migration and byte-level acceptance were verified on 2026-11-11. Bounded lexical
-[search](content-search.md) and deterministic [routing shadow](routing-shadow.md)
-are separate scheduled projections. OCR, model classification and live routing
-dispatch remain unimplemented. See [MIME extraction](mime-extraction.md) for limits
-and rollout, and [agent mail](agent-mail.md) for outbound sending and delivery evidence.
+Status: catalog-stage production activation verified on 2026-11-10, including synthetic
+Gmail forwarding, R2 byte comparison, D1 completion and scheduled repair. Private
+rollout evidence is retained outside this public repository. The `mime-v1` pipeline adds
+bounded body and attachment extraction; production migration and byte-level acceptance
+were verified on 2026-11-11. Bounded lexical [search](content-search.md) and
+deterministic [routing shadow](routing-shadow.md) also have bounded scheduled repair.
+Successful MIME processing attempts separate owner dispatch and lexical indexing steps;
+optional OCR and model classification have separately configured pipelines. See
+[MIME extraction](mime-extraction.md) for limits and rollout, and
+[agent mail](agent-mail.md) for outbound sending and delivery evidence.
 
 ## Ownership and identity
 
@@ -56,6 +57,16 @@ MIME/memory/retry bounds, change paid-provider call budgets, or enable optional
 providers. The importer separately overlaps at most three durable-source dispatches
 and retains serial original reads. Its dispatch acknowledgment does not mean the
 Workflow has started or the message is searchable.
+
+Live ingress and historical import share `MAIL_PROCESSING`. Owner offers begin after
+catalog registration and MIME extraction, so Workflow queueing and MIME processing
+consume time before the adapter's timeout starts. Historical backlog can outlast
+Kogane's sixty-second challenge-freshness window. The declared limit of 25 and catalog
+compare-and-swap improvements do not reserve live capacity, prioritize owners or
+guarantee capture-to-claim latency. Keep existing direct Kogane exact routes
+authoritative until separately authorized handled-OTP and latency acceptance verifies
+this path under the expected load. No route cutover or relaxation of freshness checks
+follows from a successful no-code decline probe.
 
 The platform queues instances above available capacity on a best-effort basis.
 Account and Workflow capacity both apply; 25 reserves no slots and cannot raise the
