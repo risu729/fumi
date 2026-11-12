@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { handleRoutingAdmin } from "../src/routing-admin-http.ts";
 import { handleHttp } from "../src/http.ts";
 import { routingRuntime } from "../src/routing-runtime.ts";
+import { DISPATCH_CONFIG_KEY } from "../src/routing-dispatch-config.ts";
 
 beforeAll(async () => {
   await applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS);
@@ -17,7 +18,14 @@ const request = (action: string, method = "POST", body?: BodyInit) =>
   });
 describe("authenticated routing controls", () => {
   it("keeps every operation behind the dedicated operator grant", async () => {
-    for (const action of ["activate", "drain", "reconcile", "receipt", "retry/mail_synthetic"]) {
+    for (const action of [
+      "activate",
+      "drain",
+      "reconcile",
+      "receipt",
+      "retry/mail_synthetic",
+      "owner-manifest",
+    ]) {
       // oxlint-disable-next-line no-await-in-loop -- Verify the authorization boundary for each independent control.
       expect((await handleRoutingAdmin(request(action), env, reader)).status).toBe(403);
     }
@@ -40,6 +48,7 @@ describe("authenticated routing controls", () => {
     expect((await handleRoutingAdmin(request("activate", "GET"), env, operator)).status).toBe(405);
     expect(await (await handleRoutingAdmin(request("activate"), env, operator)).json()).toEqual({
       status: "disabled",
+      mode: "unobserved",
     });
   });
   it("rejects malformed receipt evidence and missing retry sources", async () => {
@@ -58,6 +67,29 @@ describe("authenticated routing controls", () => {
       headers: { origin: "https://untrusted.invalid" },
     });
     expect((await handleHttp(cross, env)).status).toBe(403);
+    expect((await handleHttp(request("owner-manifest", "GET"), env)).status).toBe(401);
+    expect(
+      (
+        await handleHttp(
+          new Request(request("owner-manifest", "GET"), {
+            headers: { origin: "https://untrusted.invalid" },
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(403);
+  });
+  it("rejects owner manifest methods and selectors before reading the binding", async () => {
+    expect((await handleRoutingAdmin(request("owner-manifest"), env, operator)).status).toBe(405);
+    expect(
+      (
+        await handleRoutingAdmin(
+          request("owner-manifest?url=https://untrusted.invalid", "GET"),
+          env,
+          operator,
+        )
+      ).status,
+    ).toBe(400);
   });
   it("connects unresolved classification to a disabled-by-default policy", async () => {
     const source = {
@@ -89,5 +121,39 @@ describe("authenticated routing controls", () => {
         "operation",
       ),
     ).toEqual({ outcome: "hold", evidenceCode: "source_changed" });
+  });
+  it("exposes explicit owner-only mode in activation and status without a placeholder receiver", async () => {
+    await env.MAIL_ARCHIVE.put(
+      DISPATCH_CONFIG_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        revision: 1,
+        generation: 1,
+        enabled: true,
+        routing: {
+          configJson: JSON.stringify({
+            schemaVersion: 1,
+            adoptions: [],
+            rules: [],
+            fallback: "unresolved",
+          }),
+          manifests: [],
+        },
+        destination: null,
+        owners: [],
+      }),
+    );
+    try {
+      expect(await (await handleRoutingAdmin(request("activate"), env, operator)).json()).toEqual({
+        status: "active",
+        mode: "owner_only",
+      });
+      expect(
+        await (await handleRoutingAdmin(request("status", "GET"), env, operator)).json(),
+      ).toMatchObject({ mode: "owner_only", control: { accepting: 1 } });
+    } finally {
+      await env.MAIL_ARCHIVE.delete(DISPATCH_CONFIG_KEY);
+      await env.MAIL_CATALOG.prepare("DELETE FROM routing_dispatch_control").run();
+    }
   });
 });

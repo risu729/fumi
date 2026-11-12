@@ -11,6 +11,7 @@ import {
   dispatchRoutingSource,
 } from "./routing-dispatch.ts";
 import { readDispatchBytes } from "./plugin-offer.ts";
+import { readRoutingOwnerManifest } from "./routing-owner-manifest.ts";
 
 const digest = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
 const receiptSchema = v.strictObject({
@@ -36,6 +37,11 @@ export async function handleRoutingAdmin(
   )
     return handleRoutingPolicy(request, env.MAIL_CATALOG, principal);
   const action = url.pathname.slice("/api/admin/routing/".length);
+  if (action === "owner-manifest") {
+    if (request.method !== "GET") return error("method_not_allowed", 405);
+    if (request.body) return error("invalid_request", 400);
+    return readRoutingOwnerManifest(env.ROUTING_DISPATCH_RPC);
+  }
   if (action === "status") {
     if (request.method !== "GET") return error("method_not_allowed", 405);
     return Response.json(await routingDispatchStatus(env.MAIL_CATALOG));
@@ -73,8 +79,10 @@ export async function handleRoutingAdmin(
     await drainRoutingDispatch(env.MAIL_CATALOG);
     return Response.json({ status: "draining" });
   }
-  if (action === "activate")
-    return Response.json({ status: await activateRoutingDispatch(env, routingRuntime(env)) });
+  if (action === "activate") {
+    const status = await activateRoutingDispatch(env, routingRuntime(env));
+    return Response.json({ status, mode: (await routingDispatchStatus(env.MAIL_CATALOG)).mode });
+  }
   if (action === "reconcile")
     return Response.json(await reconcileRoutingDispatch(env, routingRuntime(env)));
   const source = await env.MAIL_CATALOG.prepare(

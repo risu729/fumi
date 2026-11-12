@@ -73,6 +73,7 @@ export interface OfferTransport {
   auth: Readonly<Record<string, string>>;
   services?: Readonly<Record<string, Pick<Fetcher, "fetch">>>;
   rpcServices?: Readonly<Record<string, RoutingOfferService>>;
+  rpcIdentities?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
 }
 export interface PluginOfferRequest {
