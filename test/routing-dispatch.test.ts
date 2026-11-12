@@ -38,7 +38,7 @@ const rpcAdapter = (ref: string): PluginAdapter => ({
   serviceRef: ref,
   timeoutMs: 5000,
 });
-function artifact(): Artifact {
+function artifact(): Artifact & { destination: NonNullable<Artifact["destination"]> } {
   return {
     schemaVersion: 1,
     revision: 1,
@@ -60,7 +60,11 @@ function artifact(): Artifact {
 async function configure(config: Artifact) {
   await env.MAIL_ARCHIVE.put(DISPATCH_CONFIG_KEY, JSON.stringify(config));
 }
-async function withOwner(config: Artifact, fields: OfferField[] = ["subject"], version = "1.0.0") {
+async function withOwner<T extends Artifact>(
+  config: T,
+  fields: OfferField[] = ["subject"],
+  version = "1.0.0",
+) {
   const manifest = {
     schemaVersion: 1,
     pluginId: "synthetic-owner",
@@ -240,6 +244,201 @@ beforeEach(async () => {
 });
 
 describe("durable routing dispatch in workerd", () => {
+  it.each(["uncertain", "handled"] as const)(
+    "never looks up or re-offers an old %s claim on a changed native RPC target",
+    async (outcome) => {
+      const config: Artifact = await withOwner(artifact());
+      config.destination = null;
+      config.owners[0]!.adapter = rpcAdapter("default");
+      await configure(config);
+      await source();
+      const oldOwner = service(outcome),
+        newOwner = service("not_applicable");
+      newOwner.setStatus("not_found");
+      const run: RoutingDispatchRuntime = {
+        now: () => clock,
+        resolveFallback: vi.fn(),
+        gateNotification: vi.fn(),
+      };
+      const oldEnvironment = {
+        MAIL_ARCHIVE: env.MAIL_ARCHIVE,
+        MAIL_CATALOG: env.MAIL_CATALOG,
+        ROUTING_DISPATCH_RPC: oldOwner.binding,
+        ROUTING_DISPATCH_RPC_IDENTITY: JSON.stringify(["synthetic-old-owner", "Offer"]),
+      };
+      await repairRoutingDispatch(oldEnvironment, run);
+      await advance();
+      await repairRoutingDispatch(
+        {
+          ...oldEnvironment,
+          ROUTING_DISPATCH_RPC: newOwner.binding,
+          ROUTING_DISPATCH_RPC_IDENTITY: JSON.stringify(["synthetic-new-owner", "Offer"]),
+        },
+        run,
+      );
+      expect(oldOwner.requests).toHaveLength(1);
+      expect(oldOwner.lookups).toHaveLength(0);
+      expect(newOwner.lookups).toHaveLength(0);
+      expect(newOwner.requests).toHaveLength(0);
+      expect((await rows()).map((row) => row.state)).toEqual([outcome]);
+      expect(run.resolveFallback).not.toHaveBeenCalled();
+      expect(run.gateNotification).not.toHaveBeenCalled();
+      if (outcome === "uncertain")
+        expect(
+          await env.MAIL_CATALOG.prepare(
+            "SELECT failure_code FROM routing_dispatch_outbox",
+          ).first(),
+        ).toEqual({ failure_code: "credentials_changed" });
+    },
+  );
+  it("maps only the native default RPC capability to an explicitly configured owner", async () => {
+    const config: Artifact = await withOwner(artifact());
+    config.destination = null;
+    config.owners[0]!.adapter = rpcAdapter("default");
+    await configure(config);
+    await source();
+    const owner = service();
+    await repairRoutingDispatch({
+      MAIL_ARCHIVE: env.MAIL_ARCHIVE,
+      MAIL_CATALOG: env.MAIL_CATALOG,
+      ROUTING_DISPATCH_RPC: owner.binding,
+    });
+    expect(owner.requests).toHaveLength(1);
+    expect((await rows()).map((row) => row.state)).toEqual(["handled"]);
+  });
+  it("handles an adopted owner with no destination and never re-offers its durable claim", async () => {
+    const config: Artifact = await withOwner(artifact());
+    config.destination = null;
+    await configure(config);
+    const item = await source();
+    const owner = service();
+    const run = runtime({ owner: owner.binding });
+    run.resolveFallback = vi.fn();
+    run.gateNotification = vi.fn();
+    const fetch = vi.fn();
+    run.transport!.fetch = fetch;
+    expect(await activateRoutingDispatch(env, run)).toBe("active");
+    expect((await routingDispatchStatus(env.MAIL_CATALOG)).mode).toBe("owner_only");
+    await dispatchRoutingSource(env, item.rawKey, run);
+    config.revision = 2;
+    await withOwner(config, ["subject"], "2.0.0");
+    await configure(config);
+    await repairRoutingDispatch(env, run);
+    expect(owner.requests).toHaveLength(1);
+    expect((await rows()).map((row) => row.state)).toEqual(["handled"]);
+    expect(run.resolveFallback).not.toHaveBeenCalled();
+    expect(run.gateNotification).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(["declined", "unmatched"] as const)(
+    "holds %s owner-only mail before classification or webhook work",
+    async (kind) => {
+      const config: Artifact = await withOwner(artifact());
+      config.destination = null;
+      const routing = JSON.parse(config.routing.configJson);
+      routing.rules = [];
+      routing.fallback = "unresolved";
+      config.routing.configJson = JSON.stringify(routing);
+      await configure(config);
+      const item = await source(1, {
+        subject: kind === "declined" ? "合成の確認" : "unrelated message",
+      });
+      const owner = service("not_applicable"),
+        unused = service();
+      const run = runtime({ owner: owner.binding, "active-a": unused.binding });
+      run.resolveFallback = vi.fn();
+      run.gateNotification = vi.fn();
+      run.transport!.fetch = vi.fn();
+      await dispatchRoutingSource(env, item.rawKey, run);
+      await advance();
+      await repairRoutingDispatch(env, run);
+      expect(owner.requests).toHaveLength(kind === "declined" ? 1 : 0);
+      expect(unused.requests).toHaveLength(0);
+      expect(run.resolveFallback).not.toHaveBeenCalled();
+      expect(run.gateNotification).not.toHaveBeenCalled();
+      expect(run.transport!.fetch).not.toHaveBeenCalled();
+      expect((await rows()).every((row) => row.state === "not_applicable")).toBe(true);
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT state,failure_code FROM routing_dispatch_jobs WHERE raw_key=?",
+        )
+          .bind(item.rawKey)
+          .first(),
+      ).toEqual({ state: "held", failure_code: "notification_not_configured" });
+    },
+  );
+  it("keeps an uncertain owner exclusive through an owner-only revision and later handled receipt", async () => {
+    const config: Artifact = await withOwner(artifact());
+    config.destination = null;
+    await configure(config);
+    await source();
+    const owner = service("uncertain"),
+      run = runtime({ owner: owner.binding });
+    await repairRoutingDispatch(env, run);
+    config.revision = 2;
+    await withOwner(config, ["subject"], "2.0.0");
+    await configure(config);
+    await advance();
+    expect((await repairRoutingDispatch(env, run)).status).toBe("draining");
+    expect(owner.requests).toHaveLength(1);
+    expect((await rows())[0]!.state).toBe("uncertain");
+    owner.setStatus("handled");
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(owner.requests).toHaveLength(1);
+    expect((await rows())[0]!.state).toBe("handled");
+    expect((await routingDispatchStatus(env.MAIL_CATALOG)).mode).toBe("owner_only");
+  });
+  it("does not hand a prior uncertain notification to an owner when removing the destination", async () => {
+    const config: Artifact = artifact();
+    await configure(config);
+    await source();
+    const destination = service("uncertain"),
+      owner = service();
+    const run = runtime({ "active-a": destination.binding, owner: owner.binding });
+    await repairRoutingDispatch(env, run);
+    config.destination = null;
+    config.revision = 2;
+    config.generation = 2;
+    await withOwner(config);
+    await configure(config);
+    await advance();
+    expect((await repairRoutingDispatch(env, run)).status).toBe("draining");
+    expect(owner.requests).toHaveLength(0);
+    destination.setStatus("handled");
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(owner.requests).toHaveLength(0);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows())[0]!.state).toBe("handled");
+    expect((await routingDispatchStatus(env.MAIL_CATALOG)).mode).toBe("owner_only");
+  });
+  it("requires a new generation before enabling a previously absent notification destination", async () => {
+    const config: Artifact = await withOwner(artifact());
+    config.destination = null;
+    await configure(config);
+    await source();
+    const owner = service("not_applicable"),
+      destination = service(),
+      run = runtime({ owner: owner.binding, "active-a": destination.binding });
+    await repairRoutingDispatch(env, run);
+    config.destination = artifact().destination;
+    config.revision = 2;
+    await configure(config);
+    expect((await repairRoutingDispatch(env, run)).status).toBe("stale");
+    expect(destination.requests).toHaveLength(0);
+    config.generation = 2;
+    await configure(config);
+    await repairRoutingDispatch(env, run);
+    expect(owner.requests).toHaveLength(1);
+    expect(destination.requests).toHaveLength(1);
+    expect((await routingDispatchStatus(env.MAIL_CATALOG)).mode).toBe("configured_destination");
+  });
+  it("requires an explicit destination field instead of silently choosing owner-only mode", async () => {
+    const { destination: _destination, ...missing } = artifact();
+    await env.MAIL_ARCHIVE.put(DISPATCH_CONFIG_KEY, JSON.stringify(missing));
+    await expect(loadDispatchConfiguration(env.MAIL_ARCHIVE)).rejects.toThrow();
+  });
   it("is absent-config disabled and cannot create or send historical notifications", async () => {
     const destination = service();
     const run = runtime({ "active-a": destination.binding });

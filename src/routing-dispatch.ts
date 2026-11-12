@@ -54,13 +54,13 @@ export interface RoutingDispatchEnvironment {
   MAIL_CATALOG: D1Database;
   ROUTING_DISPATCH_AUTH?: string;
   ROUTING_DISPATCH_SERVICE?: Fetcher;
-  ROUTING_DISPATCH_RPC?: RoutingOfferService;
+  ROUTING_DISPATCH_RPC?: Pick<Fetcher, "fetch"> | RoutingOfferService;
+  ROUTING_DISPATCH_RPC_IDENTITY?: string;
 }
 declare global {
   interface Env {
     ROUTING_DISPATCH_AUTH?: string;
     ROUTING_DISPATCH_SERVICE?: Fetcher;
-    ROUTING_DISPATCH_RPC?: RoutingOfferService;
   }
 }
 interface Control {
@@ -155,10 +155,36 @@ function transportFor(
   } catch {
     /* Missing or malformed credentials fail closed. */
   }
+  // Native external Worker bindings cannot infer the remote entrypoint type.
+  // Read dynamic RPC methods without claiming that a Fetcher implements them.
+  const binding = env.ROUTING_DISPATCH_RPC;
+  let rpc: RoutingOfferService | undefined;
+  if (binding) {
+    try {
+      const offer: unknown = Reflect.get(binding, "offer");
+      const receipt: unknown = Reflect.get(binding, "receipt");
+      if (typeof offer === "function" && typeof receipt === "function")
+        rpc = {
+          async offer(request) {
+            const result: unknown = Reflect.apply(offer, binding, [request]);
+            return await result;
+          },
+          async receipt(request) {
+            const result: unknown = Reflect.apply(receipt, binding, [request]);
+            return await result;
+          },
+        };
+    } catch {
+      /* An unavailable optional capability fails closed in the offer protocol. */
+    }
+  }
   return {
     auth,
     services: env.ROUTING_DISPATCH_SERVICE ? { default: env.ROUTING_DISPATCH_SERVICE } : {},
-    rpcServices: env.ROUTING_DISPATCH_RPC ? { default: env.ROUTING_DISPATCH_RPC } : {},
+    rpcServices: rpc ? { default: rpc } : {},
+    rpcIdentities: env.ROUTING_DISPATCH_RPC_IDENTITY
+      ? { default: env.ROUTING_DISPATCH_RPC_IDENTITY }
+      : {},
   };
 }
 function snapshotRuntime(
@@ -174,6 +200,9 @@ function snapshotRuntime(
       ...(transport.services ? { services: Object.freeze({ ...transport.services }) } : {}),
       ...(transport.rpcServices
         ? { rpcServices: Object.freeze({ ...transport.rpcServices }) }
+        : {}),
+      ...(transport.rpcIdentities
+        ? { rpcIdentities: Object.freeze({ ...transport.rpcIdentities }) }
         : {}),
     },
   };
@@ -197,16 +226,26 @@ async function credentialIdentity(
   adapter: NotificationAdapter,
   transport: OfferTransport,
 ): Promise<string | null> {
-  if (adapter.kind === "rpc") return null;
+  if (adapter.kind === "rpc") {
+    const identity = transport.rpcIdentities?.[adapter.serviceRef];
+    return identity
+      ? dispatchDigest(JSON.stringify(["fumi-routing-rpc-identity-v1", identity]))
+      : null;
+  }
   const secret = transport.auth[adapter.authRef];
   return secret ? dispatchDigest(JSON.stringify(["fumi-routing-credential-v1", secret])) : null;
 }
 async function bindDestinationIdentity(config: DispatchConfiguration, transport: OfferTransport) {
-  if (config.artifact.destination.adapter.kind !== "rpc")
+  const destination = config.artifact.destination;
+  if (
+    destination &&
+    (destination.adapter.kind !== "rpc" ||
+      transport.rpcIdentities?.[destination.adapter.serviceRef])
+  )
     config.destinationSha256 = await dispatchDigest(
       JSON.stringify([
         config.destinationSha256,
-        await credentialIdentity(config.artifact.destination.adapter, transport),
+        await credentialIdentity(destination.adapter, transport),
       ]),
     );
 }
@@ -466,9 +505,30 @@ export async function recordRoutingDispatchReceipt(
 
 export async function routingDispatchStatus(database: D1Database) {
   const db = database.withSession("first-primary");
-  const control = await db
-    .prepare("SELECT revision,generation,accepting,paused FROM routing_dispatch_control WHERE id=1")
-    .first();
+  const observed = await db
+    .prepare(
+      "SELECT revision,generation,accepting,paused,destination_sha256 FROM routing_dispatch_control WHERE id=1",
+    )
+    .first<{
+      revision: number;
+      generation: number;
+      accepting: number;
+      paused: number;
+      destination_sha256: string;
+    }>();
+  const mode = !observed
+    ? "unobserved"
+    : observed.destination_sha256 === (await dispatchDigest("null"))
+      ? "owner_only"
+      : "configured_destination";
+  const control = observed
+    ? {
+        revision: observed.revision,
+        generation: observed.generation,
+        accepting: observed.accepting,
+        paused: observed.paused,
+      }
+    : null;
   const counts = await db
     .prepare("SELECT state,COUNT(*) AS count FROM routing_dispatch_outbox GROUP BY state")
     .all<{ state: string; count: number }>();
@@ -486,6 +546,7 @@ export async function routingDispatchStatus(database: D1Database) {
     )
     .all();
   return {
+    mode,
     control,
     counts: counts.results,
     held: held.results,
@@ -1015,6 +1076,21 @@ async function routeOne(
     );
     return;
   }
+  const destination = config.artifact.destination;
+  if (!destination) {
+    // Owners remain independent of ordinary delivery. Without a destination,
+    // unmatched mail is held before classification, gating, or notification IO.
+    await job(
+      db,
+      item,
+      config.artifact.revision,
+      "held",
+      "notification_not_configured",
+      now,
+      token,
+    );
+    return;
+  }
   let resolution: RoutingFallback =
     decision.fallback.outcome === "review"
       ? {
@@ -1053,9 +1129,9 @@ async function routeOne(
     token,
     item,
     "action",
-    config.artifact.destination.id,
-    config.artifact.destination.adapter,
-    config.artifact.destination.offerFields,
+    destination.id,
+    destination.adapter,
+    destination.offerFields,
     {
       classification: {
         outcome: "review",

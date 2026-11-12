@@ -409,6 +409,19 @@ export async function compileShadowRouter(
   }
 }
 
+/** Validate an owner publication without granting adoption or invoking its handler. */
+export function validateRoutingManifest(json: string) {
+  try {
+    const manifest = v.parse(manifestSchema, boundedJson(json, ROUTING_LIMITS.manifestBytes));
+    unique(manifest.inputFields);
+    unique(manifest.offerInputFields ?? manifest.inputFields);
+    compilePredicate(manifest.match, manifest.inputFields);
+    return manifest;
+  } catch {
+    throw new RoutingConfigError();
+  }
+}
+
 /** Describe exclusive claim precedence without invoking a handler or dispatching. */
 export function shadowClaimState(
   decision: ShadowDecision,

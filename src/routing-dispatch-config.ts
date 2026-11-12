@@ -41,7 +41,9 @@ const artifactSchema = v.strictObject({
       v.maxLength(16),
     ),
   }),
-  destination: v.strictObject({ id, adapter: notificationAdapterSchema, offerFields: grant }),
+  destination: v.nullable(
+    v.strictObject({ id, adapter: notificationAdapterSchema, offerFields: grant }),
+  ),
   owners: v.pipe(
     v.array(v.strictObject({ handlerRef: id, adapter: adapterSchema, offerFields: grant })),
     v.maxLength(16),

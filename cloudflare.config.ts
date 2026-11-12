@@ -2,6 +2,7 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
 import { loadEnv } from "vite";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 import { compatibilityDate } from "./worker-runtime.ts";
+import { routingRpcOptions } from "./routing-rpc-options.ts";
 
 const catalogId = loadEnv("production", ".", "FUMI_CATALOG_DATABASE_ID")[
   "FUMI_CATALOG_DATABASE_ID"
@@ -11,6 +12,7 @@ const pdfParser = optional["FUMI_PDF_PARSER_ENABLED"] === "1";
 const documents = optional["FUMI_DOCUMENT_CONVERSION_ENABLED"] === "1";
 const ocrInstance = optional["FUMI_ATTACHMENT_OCR_INSTANCE"];
 const searchInstance = optional["FUMI_MANAGED_SEARCH_INSTANCE"];
+const routingRpc = routingRpcOptions(optional);
 for (const name of [ocrInstance, searchInstance]) {
   if (name && !/^[a-z0-9_]+(?:-[a-z0-9_]+)*$/.test(name))
     throw new Error("Invalid managed search instance name");
@@ -30,6 +32,14 @@ export default defineConfig({
       }),
     },
     env: {
+      ...(routingRpc
+        ? {
+            ROUTING_DISPATCH_RPC: bindings.worker(routingRpc),
+            ROUTING_DISPATCH_RPC_IDENTITY: bindings.text(
+              JSON.stringify([routingRpc.worker, routingRpc.exportName]),
+            ),
+          }
+        : {}),
       ...(pdfParser ? { PDF_LOADER: bindings.workerLoader() } : {}),
       ...(documents ? { AI: bindings.ai() } : {}),
       ...(ocrInstance ? { ATTACHMENT_OCR: bindings.aiSearch({ name: ocrInstance }) } : {}),

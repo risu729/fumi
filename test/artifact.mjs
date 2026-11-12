@@ -11,6 +11,53 @@ const { encryptedPdf, password: syntheticPdfPassword } = JSON.parse(
   await readFile(".cloudflare/attachment-fixture.json", "utf8"),
 );
 const config = JSON.parse(await readFile(`${output}/worker.config.json`, "utf8"));
+const rpcWorker = process.env["FUMI_ROUTING_RPC_WORKER"];
+const rpcEntrypoint = process.env["FUMI_ROUTING_RPC_ENTRYPOINT"];
+const workers = [{ config }];
+if (rpcWorker && rpcEntrypoint) {
+  assert.deepEqual(config.env.ROUTING_DISPATCH_RPC, {
+    type: "worker",
+    worker: rpcWorker,
+    exportName: rpcEntrypoint,
+  });
+  assert.deepEqual(config.env.ROUTING_DISPATCH_RPC_IDENTITY, {
+    type: "text",
+    value: JSON.stringify([rpcWorker, rpcEntrypoint]),
+  });
+  // Prove the native built binding reaches a named RPC export without contacting
+  // the configured production service. This target exists only in local workerd.
+  workers.push({
+    config: {
+      name: rpcWorker,
+      compatibilityDate: config.compatibilityDate,
+      exports: { [rpcEntrypoint]: { type: "worker" } },
+      manifest: {
+        mainModule: "synthetic-owner.js",
+        modules: {
+          "synthetic-owner.js": {
+            type: "esm",
+            contents: `import {WorkerEntrypoint} from "cloudflare:workers";
+        class SyntheticOwner extends WorkerEntrypoint {
+          async manifest() {
+            const json=JSON.stringify({schemaVersion:1,pluginId:"synthetic-owner",version:"1.0.0",protocol:"fumi-offer-v1",mode:"exclusive",inputFields:["subject"],capabilities:["offer"],match:'subject == "Synthetic"'});
+            const sha256=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(json))),n=>n.toString(16).padStart(2,"0")).join("");
+            return {json,sha256};
+          }
+          async offer(request) {
+            if(request.kind!=="owner"||request.input.envelope.receivedAt!==request.source.receivedAt||request.attempt.expiresAt<=Date.now())throw new Error("Invalid synthetic offer");
+            return {schemaVersion:1,operationId:request.operationId,requestSha256:request.requestSha256,result:"not_applicable"};
+          }
+          async receipt(request) { return {...request,result:"not_found"}; }
+        }
+        export {SyntheticOwner as ${JSON.stringify(rpcEntrypoint)}};`,
+          },
+        },
+      },
+    },
+  });
+} else {
+  assert.equal(config.env.ROUTING_DISPATCH_RPC, undefined);
+}
 config.env.FORWARD_TO = { type: "text", value: "synthetic-forward@gmail.com" };
 config.env.PDF_LOADER = { type: "worker-loader" };
 const pdfBytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
@@ -40,7 +87,7 @@ config.manifest = {
     "index.js": { type: "esm", contents: await readFile(`${output}/bundle/index.js`, "utf8") },
   },
 };
-const runtime = new Miniflare({ workers: [{ config }], unsafeTriggerHandlers: true });
+const runtime = new Miniflare({ workers, unsafeTriggerHandlers: true });
 try {
   const raw = [
     "From: sender@example.invalid",
@@ -108,6 +155,52 @@ try {
   const rows = await catalog.prepare("SELECT COUNT(*) AS count FROM archive_sources").first();
   assert.equal(rows.count, 1);
   const bindings = await runtime.getBindings();
+  if (rpcWorker && rpcEntrypoint) {
+    const identity = {
+      schemaVersion: 1,
+      operationId: "a".repeat(64),
+      requestSha256: "b".repeat(64),
+    };
+    const receivedAt = "2026-01-01T00:00:00.000Z";
+    const ownerRequest = {
+      ...identity,
+      kind: "owner",
+      pluginId: "synthetic-owner",
+      manifestVersion: "1.0.0",
+      manifestSha256: "c".repeat(64),
+      attempt: { generation: 1, expiresAt: Date.now() + 5000 },
+      source: { eventId: "d".repeat(64), rawSha256: "e".repeat(64), receivedAt },
+      input: {
+        subject: "Synthetic",
+        envelope: { from: "sender@example.invalid", to: "receiver@example.invalid", receivedAt },
+        text: "No authentication code in this fixture",
+      },
+    };
+    // Miniflare's Node bridge returns RPC object proxies; await individual fields.
+    const receiptValue = async (value) => ({
+      schemaVersion: await value.schemaVersion,
+      operationId: await value.operationId,
+      requestSha256: await value.requestSha256,
+      result: await value.result,
+    });
+    assert.deepEqual(await receiptValue(await bindings.ROUTING_DISPATCH_RPC.offer(ownerRequest)), {
+      ...identity,
+      result: "not_applicable",
+    });
+    assert.deepEqual(await receiptValue(await bindings.ROUTING_DISPATCH_RPC.receipt(identity)), {
+      ...identity,
+      result: "not_found",
+    });
+    const publication = await bindings.ROUTING_DISPATCH_RPC.manifest();
+    const publicationJson = await publication.json;
+    const actualSha256 = Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(publicationJson)),
+      ),
+      (n) => n.toString(16).padStart(2, "0"),
+    ).join("");
+    assert.equal(await publication.sha256, actualSha256);
+  }
   async function waitForProcessing(rawKey) {
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {

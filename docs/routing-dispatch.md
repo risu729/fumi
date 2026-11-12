@@ -61,7 +61,9 @@ Its strict v1 fields are:
 - `routing: {configJson, manifests}`: the existing strict adopted CEL configuration
   and authenticated owner snapshots. A manifest-origin string is an administrator
   attestation after authenticating the owner channel, not self-authentication.
-- `destination: {id, adapter, offerFields}`: exactly one configured generic endpoint.
+- `destination: {id, adapter, offerFields}` or explicit `null`: one configured
+  generic endpoint, or owner-only dispatch without ordinary notifications. The
+  field remains required; omission is invalid.
 - `owners: [{handlerRef, adapter, offerFields}]`: administrator-provisioned adapters
   for enabled owner adoptions. There are at most sixteen.
 
@@ -70,6 +72,22 @@ a larger revision. A destination change requires a larger generation as well.
 Lower/stale revisions, generation rollback and same-generation destination changes
 are rejected. Missing, disabled, invalid or uncredentialed configuration cannot send.
 Keep private rule sets, real endpoint details and credentials outside Git.
+
+With `destination: null`, adopted owners still receive only their granted inputs.
+An owner claim remains exclusive; declined or unmatched mail is durably held with
+`notification_not_configured`. No classifier, notification gate or ordinary
+webhook is called. This permits owner adoption while a receiver remains deferred,
+without inventing an endpoint or forwarding unmatched mail to the owner.
+Activation and status responses expose the observed `mode`: `owner_only`,
+`configured_destination`, or `unobserved` before a control row exists. This is
+configuration evidence, not proof of delivery or owner readiness.
+
+Adding or removing a destination still requires a newer revision and generation.
+Prior accepted/handled and uncertain operations retain their original identities;
+handoff waits for reconciliation and never re-offers a handled source. Existing
+archive and Gmail-forwarding lanes are unchanged. Deploying this support does not
+create a Service Binding, pin/adopt an owner manifest, activate private policy or
+perform a real OTP/provider operation; each remains a separate operator step.
 
 An adapter is either `{kind: "rpc", serviceRef, timeoutMs}` or
 `{kind: "https" | "service", offerUrl, statusUrl, authRef, serviceRef, timeoutMs}`.
@@ -83,6 +101,23 @@ capability mappings, never mail-selected bindings. A default optional
 `ROUTING_DISPATCH_SERVICE` or `ROUTING_DISPATCH_RPC` binding maps to `serviceRef`
 `default`; injected trusted transports can map separately configured bindings.
 No optional secret/service is declared required by deployment.
+
+Native deployment can opt into that RPC capability with the paired production
+variables `FUMI_ROUTING_RPC_WORKER` (lowercase Worker identifier, at most 63
+characters) and `FUMI_ROUTING_RPC_ENTRYPOINT` (export identifier, at most 128
+characters). Both absent/empty omits the binding; a partial or invalid pair fails
+the build. The locked cf configuration API declares this service binding as
+`bindings.worker({worker, exportName})`. It becomes `ROUTING_DISPATCH_RPC` and maps
+to `serviceRef: "default"`; neither mail nor an owner manifest selects its target.
+The deployment workflow carries both variables so later reviewed deployments
+preserve the same declared capability. There is no default target.
+
+Before owner activation, verify the target deployment and named entrypoint,
+authenticate its manifest distribution, pin the exact manifest bytes/version/hash,
+and explicitly adopt only the required match/offer fields. Then privately configure
+the matching owner adapter and `destination: null` with a reviewed revision and
+generation. The native artifact test can bind a synthetic local named export to
+prove opt-in serialization/RPC wiring; it does not exercise a production owner.
 
 HTTP endpoint credentials are fingerprinted privately without persisting their
 values. The fingerprint participates in active destination generation identity and
@@ -236,3 +271,26 @@ or production Kogane acceptance.
 References: [D1 batches](https://developers.cloudflare.com/d1/worker-api/d1-database/),
 [service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/http/),
 [Workers Request behavior](https://developers.cloudflare.com/workers/runtime-apis/request/).
+
+The authenticated GET /api/admin/routing/owner-manifest control requires the
+mail:routing grant and accepts no query selectors or body. It reads only
+ROUTING_DISPATCH_RPC.manifest() on the default service capability under a shared
+five-second deadline. The owner must return {json, sha256}; Fumi validates the
+bounded 8 KiB UTF-8 JSON publication with the existing manifest/CEL restrictions
+and verifies its exact-byte SHA-256 before returning the unchanged JSON, digest
+and fixed binding attestation. Missing capability is 503; invalid, unavailable or
+timed-out publication is a redacted 502. This read invokes neither offer nor
+receipt and grants no adoption. The binding attestation identifies a private RPC
+capability, not an authenticated public website origin. The administrator still
+reviews the publication, pins its exact bytes/version/hash and supplies the
+explicit adoption origin and field grants before activation.
+
+The native binding also emits its Worker/export identity as deploy metadata.
+Dispatch snapshots and hashes that identity into the existing durable credential
+fence. Changing the bound Worker or export cannot query the new owner's status
+for an old uncertain operation or release it for re-offer/fallback. Previously
+handled claims stay handled. An unresolved old operation requires verified
+reconciliation with its original owner; changing the default binding is not
+evidence of non-delivery. RPC notification destination changes also require a
+generation advance. Custom injected RPC transports may supply `rpcIdentities`
+under their trusted service references for the same protection.

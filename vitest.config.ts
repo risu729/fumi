@@ -8,6 +8,9 @@ export default defineConfig({
       remoteBindings: false,
       miniflare: {
         workerLoaders: { PDF_LOADER: {} },
+        // Never resolve an operator-configured remote owner during unit tests.
+        // Native named-export RPC wiring is exercised by test/artifact.mjs.
+        serviceBindings: { ROUTING_DISPATCH_RPC: async () => new Response(null, { status: 503 }) },
         bindings: {
           FORWARD_TO: "synthetic-forward@gmail.com",
           ACCESS_ISSUER: "https://synthetic.cloudflareaccess.com",
