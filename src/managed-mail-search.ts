@@ -5,6 +5,7 @@ import { managedSourceFence, hasManagedAttachmentSources } from "./managed-mail-
 import {
   bounded,
   managedMailRuntime,
+  managedSourceScope,
   ManagedSearchError,
   readManagedText,
   record,
@@ -91,14 +92,16 @@ export async function searchManagedMail(
   if (!Array.isArray(chunks) || chunks.length > 30)
     throw new ManagedSearchError("invalid_search_provider_response");
   const attachments = await hasManagedAttachmentSources(env);
+  const scope = managedSourceScope(runtime, "d.raw_key");
   const clauses = [
     "d.item_key=?",
     "d.policy_hash=?",
     "d.state='ready'",
     managedSourceFence(attachments, "d"),
+    scope.sql,
     ...parsed.clauses,
   ];
-  const filters: (string | number)[] = [...parsed.values];
+  const filters: (string | number)[] = [...scope.values, ...parsed.values];
   if (source !== "all") {
     clauses.push("s.source_kind=?");
     filters.push(source);
@@ -168,8 +171,15 @@ export async function searchManagedMail(
     // Recheck the current source after asynchronous byte verification; invalidated results are never returned.
     const current =
       await env.MAIL_CATALOG.prepare(`SELECT 1 FROM managed_mail_documents WHERE raw_key=? AND part=? AND manifest_key=?
-      AND text_sha256=? AND policy_hash=? AND state='ready' AND ${managedSourceFence(attachments)}`)
-        .bind(row.raw_key, row.part, row.manifest_key, row.text_sha256, runtime.policy)
+      AND text_sha256=? AND policy_hash=? AND state='ready' AND ${managedSourceScope(runtime).sql} AND ${managedSourceFence(attachments)}`)
+        .bind(
+          row.raw_key,
+          row.part,
+          row.manifest_key,
+          row.text_sha256,
+          runtime.policy,
+          ...scope.values,
+        )
         .first();
     if (!current) {
       omitted++;
@@ -203,9 +213,9 @@ export async function searchManagedMail(
   }
   const coverage = (
     await env.MAIL_CATALOG.prepare(
-      `SELECT state,COUNT(*) AS count FROM managed_mail_documents WHERE policy_hash=? AND ${managedSourceFence(attachments)} GROUP BY state`,
+      `SELECT state,COUNT(*) AS count FROM managed_mail_documents WHERE policy_hash=? AND ${managedSourceScope(runtime).sql} AND ${managedSourceFence(attachments)} GROUP BY state`,
     )
-      .bind(runtime.policy)
+      .bind(runtime.policy, ...scope.values)
       .all<{ state: string; count: number }>()
   ).results;
   return {
@@ -223,6 +233,7 @@ export async function searchManagedMail(
       candidate_limit: Math.min(30, limit * 3),
       postfiltered_top_candidates: true,
       exhaustive: false,
+      source_scope: runtime.config.sourceRawKeys ? "administrator_allowlist" : "archive",
       pagination_supported: false,
       attachment_derivatives_enabled: attachments,
       attachment_limit_per_message: 4,

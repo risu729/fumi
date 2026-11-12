@@ -6,6 +6,7 @@ import { searchManagedMail } from "../src/managed-mail-search.ts";
 import {
   hexDigest,
   readManagedText,
+  managedMailRuntime,
   type ManagedMailEnvironment,
 } from "../src/managed-search-runtime.ts";
 import { readMailResource } from "../src/mail-read.ts";
@@ -31,9 +32,17 @@ async function object(text: string, role: string) {
   await env.MAIL_ARCHIVE.put(key, bytes, { sha256 });
   return { key, sha256, size: bytes.length };
 }
-async function source(id = "one", text = "振込期限は来週の月曜日です。Invoice amount 12,345 yen.") {
+async function source(
+  id = "one",
+  text = "振込期限は来週の月曜日です。Invoice amount 12,345 yen.",
+  rawKey?: string,
+) {
   const raw = await object(`Synthetic original ${id}`, `raw/${id}`),
     body = await object(text, "body-text");
+  if (rawKey) {
+    await env.MAIL_ARCHIVE.put(rawKey, encode(`Synthetic original ${id}`), { sha256: raw.sha256 });
+    raw.key = rawKey;
+  }
   const manifest = await object(
     JSON.stringify({ rawSha256: raw.sha256, body: { text: body } }),
     "manifest",
@@ -58,6 +67,71 @@ async function source(id = "one", text = "振込期限は来週の月曜日で�
     )
     .run();
   return { raw, body, manifest, text };
+}
+const canonical = (number: number, day = "2026-11-12") =>
+  `ingest/${day}/00000000-0000-4000-8000-${number.toString(16).padStart(12, "0")}/raw.eml`;
+async function convertedFixture(original: Awaited<ReturnType<typeof source>>) {
+  const kinds = [
+    ["application/zip", "local_zip_text"],
+    ["application/pdf", "managed_ocr_indexed_text"],
+    [
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "managed_document_text",
+    ],
+    ["image/png", "managed_ocr_indexed_text"],
+  ] as const;
+  const parts = await Promise.all(
+    kinds.map(async ([mimeType, representation], index) => ({
+      index,
+      mimeType,
+      representation,
+      original: await object(
+        `Synthetic original attachment ${index}`,
+        `targeted-original-${index}`,
+      ),
+      derivative: await object(
+        `選択した添付 ${index} Invoice amount 12,345 yen.`,
+        `targeted-text-${index}`,
+      ),
+    })),
+  );
+  const attachments = parts.map((part) => ({
+    index: part.index,
+    ...part.original,
+    mimeType: part.mimeType,
+  }));
+  const manifest = await object(
+    JSON.stringify({ rawSha256: original.raw.sha256, body: { text: original.body }, attachments }),
+    "targeted-manifest",
+  );
+  await env.MAIL_CATALOG.prepare(
+    "UPDATE mail_extractions SET manifest_key=?,attachments_json=?,attachment_count=4 WHERE raw_key=?",
+  )
+    .bind(manifest.key, JSON.stringify(attachments), original.raw.key)
+    .run();
+  await Promise.all(
+    parts.map((part) =>
+      env.MAIL_CATALOG.prepare(`INSERT INTO attachment_conversions(raw_key,mime_sha256,part_index,manifest_key,source_key,source_sha256,source_size,
+    source_mime,policy_hash,state,result_key,result_sha256,result_size,representation,provenance_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'complete',?,?,?,?,'{}',0)`)
+        .bind(
+          original.raw.key,
+          original.raw.sha256,
+          part.index,
+          manifest.key,
+          part.original.key,
+          part.original.sha256,
+          part.original.size,
+          part.mimeType,
+          "synthetic-conversion-v1",
+          part.derivative.key,
+          part.derivative.sha256,
+          part.derivative.size,
+          part.representation,
+        )
+        .run(),
+    ),
+  );
+  return parts;
 }
 function provider() {
   const items = new Map<string, { key: string; bytes: Uint8Array }>();
@@ -521,5 +595,169 @@ describe("optional managed body corpus and semantic retrieval", () => {
     const remote = provider();
     await ready(runtime(remote.binding));
     expect(remote.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it("targets only the approved source before discovery limits and indexes its body plus four converted parts", async () => {
+    await Promise.all(
+      [1, 2, 3].map((index) =>
+        source(`backlog_${index}`, "Unrelated older backlog", canonical(index, "2026-11-11")),
+      ),
+    );
+    const selected = await source("selected", "選択した本文 invoice 12,345 yen.", canonical(4));
+    const parts = await convertedFixture(selected);
+    const remote = provider(),
+      context = runtime(remote.binding, { sourceRawKeys: [selected.raw.key], maxUploads: 5 });
+    const now = Date.now();
+    for (let round = 0; round < 3; round++) {
+      // oxlint-disable-next-line no-await-in-loop -- The existing two-part bounded worker deliberately needs three upload/poll rounds.
+      await ready(context, now + round * 600002);
+    }
+    expect(remote.upload).toHaveBeenCalledTimes(5);
+    expect(
+      (await env.MAIL_CATALOG.prepare("SELECT DISTINCT raw_key FROM managed_mail_documents").all())
+        .results,
+    ).toEqual([{ raw_key: selected.raw.key }]);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM managed_mail_calls WHERE kind='upload'",
+      ).first(),
+    ).toEqual({ count: 5 });
+    const result = await searchManagedMail(
+      context,
+      reader,
+      { query: "請求額", mode: "hybrid" },
+      base,
+    );
+    expect(result.matches).toHaveLength(5);
+    expect(result.coverage).toMatchObject({
+      source_scope: "administrator_allowlist",
+      exhaustive: false,
+    });
+    for (const part of parts) {
+      const match = result.matches.find((item) => item.citation.part === `part_${part.index}`)!;
+      expect(match.message_id).toBe("mail_selected");
+      expect(match.citation).toMatchObject({
+        sha256: part.derivative.sha256,
+        original_sha256: part.original.sha256,
+        raw_sha256: selected.raw.sha256,
+        representation: part.representation,
+      });
+    }
+  });
+
+  it("makes zero uploads or projection rows for a missing approved source", async () => {
+    await source("unrelated", "unrelated", canonical(1));
+    const remote = provider(),
+      context = runtime(remote.binding, { sourceRawKeys: [canonical(9)] });
+    expect(await repairManagedMailCorpus(context)).toMatchObject({ enabled: true, processed: 0 });
+    expect(remote.upload).not.toHaveBeenCalled();
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM managed_mail_documents",
+      ).first(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM managed_mail_calls").first(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("rejects invalid allowlists before provider contact and keeps absent-field hashes compatible and set-order stable", async () => {
+    const remote = provider();
+    expect((await managedMailRuntime(runtime(remote.binding)))!.policy).toBe(
+      await hexDigest(encode(JSON.stringify(config))),
+    );
+    const first = await managedMailRuntime(
+      runtime(remote.binding, { sourceRawKeys: [canonical(2), canonical(1)] }),
+    );
+    const second = await managedMailRuntime(
+      runtime(remote.binding, { sourceRawKeys: [canonical(1), canonical(2)] }),
+    );
+    expect(first!.policy).toBe(second!.policy);
+    expect(first!.policy).not.toBe((await managedMailRuntime(runtime(remote.binding)))!.policy);
+    const variants = [
+      [],
+      [canonical(1), canonical(1)],
+      Array.from({ length: 11 }, (_, index) => canonical(index + 1)),
+      [canonical(1).replace("raw.eml", "receipt.json")],
+      [canonical(1, "2026-02-30")],
+      ["ingest/"],
+      ["https://untrusted.example.invalid/source"],
+      null,
+    ];
+    await Promise.all(
+      variants.map(async (sourceRawKeys) => {
+        await expect(
+          repairManagedMailCorpus(runtime(remote.binding, { sourceRawKeys })),
+        ).rejects.toMatchObject({ code: "invalid_managed_search_configuration" });
+      }),
+    );
+    expect(remote.info).not.toHaveBeenCalled();
+    expect(remote.upload).not.toHaveBeenCalled();
+  });
+
+  it("preserves old-policy ambiguous receipts and never retries their upload when targeting another source", async () => {
+    const old = await source("old_unknown", "Old ambiguous bytes", canonical(1));
+    const remote = provider(),
+      unrestricted = runtime(remote.binding, { maxUploads: 1 });
+    const now = Date.now();
+    remote.upload.mockRejectedValueOnce(new Error("Synthetic unknown submission"));
+    await repairManagedMailCorpus(unrestricted, now);
+    const retained = await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls").all();
+    const selected = await source("new_selected", "New explicit targeted bytes", canonical(2));
+    const restricted = runtime(remote.binding, {
+      maxUploads: 1,
+      sourceRawKeys: [selected.raw.key],
+    });
+    await ready(restricted, now + 300001);
+    await ready(restricted, now + 900003);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    const oldCall = retained.results[0]!;
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls WHERE call_id=?")
+        .bind(oldCall["call_id"])
+        .first(),
+    ).toEqual(oldCall);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM managed_mail_documents WHERE raw_key=?")
+        .bind(old.raw.key)
+        .first("state"),
+    ).toBe("unknown");
+    await repairManagedMailCorpus(unrestricted, now + 1500005);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM managed_mail_documents WHERE raw_key=?")
+        .bind(old.raw.key)
+        .first("state"),
+    ).toBe("unknown");
+  });
+
+  it("postfilters out-of-scope current-policy rows before source reads and coverage even if the provider returns them", async () => {
+    const outside = await source("outside", "Outside the approved source set", canonical(1));
+    const remote = provider();
+    await ready(runtime(remote.binding));
+    const context = runtime(remote.binding, { sourceRawKeys: [canonical(2)] });
+    const policy = (await managedMailRuntime(context))!.policy;
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE managed_mail_documents SET policy_hash=? WHERE raw_key=?",
+    )
+      .bind(policy, outside.raw.key)
+      .run();
+    const reads: string[] = [];
+    const bucket = {
+      get: (key: string) => {
+        reads.push(key);
+        return env.MAIL_ARCHIVE.get(key);
+      },
+    } as unknown as R2Bucket;
+    const result = await searchManagedMail(
+      { ...context, MAIL_ARCHIVE: bucket },
+      reader,
+      { query: "Outside", mode: "semantic" },
+      base,
+    );
+    expect(result.matches).toEqual([]);
+    expect(result.coverage.documents).toEqual([]);
+    expect(result.coverage.omitted_candidates).toBe(1);
+    expect(reads).toEqual([]);
   });
 });

@@ -5,6 +5,7 @@ import {
   bounded,
   hexDigest,
   managedMailRuntime,
+  managedSourceScope,
   ManagedSearchError,
   readManagedText,
   record,
@@ -42,6 +43,7 @@ async function discover(
   attachments: boolean,
   now: number,
 ) {
+  const scope = managedSourceScope(runtime, "e.raw_key");
   const attachmentMissing = attachments
     ? `OR EXISTS(SELECT 1 FROM attachment_conversions a WHERE a.raw_key=e.raw_key AND a.manifest_key=e.manifest_key
     AND a.state='complete' AND a.representation IN ('managed_document_text','managed_ocr_indexed_text','local_zip_text')
@@ -54,10 +56,10 @@ async function discover(
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.raw_sha256,e.body_text_key FROM mail_extractions e
     JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.extractor_version='mime-v1' AND e.status='complete'
-    AND s.raw_state='present' AND s.raw_sha256=e.raw_sha256 AND ((e.body_text_key IS NOT NULL AND NOT EXISTS(
+    AND s.raw_state='present' AND s.raw_sha256=e.raw_sha256 AND ${scope.sql} AND ((e.body_text_key IS NOT NULL AND NOT EXISTS(
       SELECT 1 FROM managed_mail_documents d WHERE d.raw_key=e.raw_key AND d.part='body' AND d.policy_hash=?)) ${attachmentMissing})
     ORDER BY e.raw_key LIMIT 3`)
-      .bind(runtime.policy, ...(attachments ? [runtime.policy] : []))
+      .bind(...scope.values, runtime.policy, ...(attachments ? [runtime.policy] : []))
       .all<{
         raw_key: string;
         manifest_key: string;
@@ -109,7 +111,7 @@ async function discover(
         .first<{ item_id: string | null; submitted_at: number | null }>();
       await env.MAIL_CATALOG.prepare(`INSERT INTO managed_mail_documents(raw_key,part,manifest_key,raw_sha256,text_key,text_sha256,
         original_key,original_sha256,representation,conversion_policy,policy_hash,item_key,state,failure_code,item_id,submitted_at,updated_at)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM mail_extractions WHERE raw_key=? AND status='complete' AND manifest_key=?)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM mail_extractions e WHERE raw_key=? AND status='complete' AND manifest_key=? AND ${scope.sql})
         ON CONFLICT(raw_key,part) DO UPDATE SET manifest_key=excluded.manifest_key,raw_sha256=excluded.raw_sha256,text_key=excluded.text_key,
         text_sha256=excluded.text_sha256,original_key=excluded.original_key,original_sha256=excluded.original_sha256,
         representation=excluded.representation,conversion_policy=excluded.conversion_policy,policy_hash=excluded.policy_hash,
@@ -136,6 +138,7 @@ async function discover(
           now,
           row.raw_key,
           row.manifest_key,
+          ...scope.values,
         )
         .run();
     }
@@ -204,19 +207,24 @@ export async function repairManagedMailCorpus(env: ManagedMailEnvironment, now =
   if (!runtime) return { enabled: false, processed: 0 };
   await verifyManagedInstance(runtime, runtime.config.hybrid);
   const attachments = await hasManagedAttachmentSources(env),
-    fence = managedSourceFence(attachments);
-  await env.MAIL_CATALOG.prepare(`DELETE FROM managed_mail_documents WHERE NOT ${fence}`).run();
+    fence = managedSourceFence(attachments),
+    scope = managedSourceScope(runtime);
+  await env.MAIL_CATALOG.prepare(
+    `DELETE FROM managed_mail_documents WHERE ${scope.sql} AND NOT ${fence}`,
+  )
+    .bind(...scope.values)
+    .run();
   await discover(env, runtime, attachments, now);
   await env.MAIL_CATALOG.prepare(
-    "UPDATE managed_mail_documents SET state='unknown',failure_code='upload_outcome_unknown',lease_token=NULL,lease_until=0 WHERE state='uploading' AND lease_until<=?",
+    `UPDATE managed_mail_documents SET state='unknown',failure_code='upload_outcome_unknown',lease_token=NULL,lease_until=0 WHERE ${scope.sql} AND state='uploading' AND lease_until<=?`,
   )
-    .bind(now)
+    .bind(...scope.values, now)
     .run();
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT * FROM managed_mail_documents WHERE policy_hash=? AND state IN ('pending','submitted')
-    AND next_attempt_at<=? AND lease_until<=? AND ${fence}
+    AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${fence}
     ORDER BY CASE WHEN state='submitted' THEN 0 ELSE 1 END,next_attempt_at,raw_key,part LIMIT 2`)
-      .bind(runtime.policy, now, now)
+      .bind(runtime.policy, now, now, ...scope.values)
       .all<Document>()
   ).results;
   let processed = 0;
@@ -225,7 +233,7 @@ export async function repairManagedMailCorpus(env: ManagedMailEnvironment, now =
       claimTime = Math.max(now, Date.now());
     const claim =
       await env.MAIL_CATALOG.prepare(`UPDATE managed_mail_documents SET lease_token=?,lease_until=? WHERE raw_key=? AND part=? AND policy_hash=?
-      AND state=? AND state IN ('pending','submitted') AND next_attempt_at<=? AND lease_until<=? AND ${fence}`)
+      AND state=? AND state IN ('pending','submitted') AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${fence}`)
         .bind(
           token,
           claimTime + 30000,
@@ -235,6 +243,7 @@ export async function repairManagedMailCorpus(env: ManagedMailEnvironment, now =
           row.state,
           claimTime,
           claimTime,
+          ...scope.values,
         )
         .run();
     if (claim.meta.changes !== 1) continue;
@@ -251,8 +260,10 @@ async function processDocument(
   now: number,
   fence: string,
 ) {
-  const owned = `raw_key=? AND part=? AND policy_hash=? AND lease_token=? AND ${fence}`;
-  const values = [row.raw_key, row.part, runtime.policy, token];
+  if (runtime.config.sourceRawKeys && !runtime.config.sourceRawKeys.includes(row.raw_key)) return;
+  const scope = managedSourceScope(runtime);
+  const owned = `raw_key=? AND part=? AND policy_hash=? AND lease_token=? AND ${scope.sql} AND ${fence}`;
+  const values = [row.raw_key, row.part, runtime.policy, token, ...scope.values];
   const update = (sql: string, ...args: (string | number | null)[]) =>
     env.MAIL_CATALOG.prepare(`UPDATE managed_mail_documents SET ${sql} WHERE ${owned}`)
       .bind(...args, ...values)
@@ -297,7 +308,7 @@ async function processDocument(
       ),
       // The source-fenced reservation and state change share this atomic D1 batch.
       env.MAIL_CATALOG.prepare(`UPDATE managed_mail_documents SET state='uploading',updated_at=?
-        WHERE raw_key=? AND part=? AND policy_hash=? AND lease_token=? AND state='pending'
+        WHERE ${owned} AND state='pending'
         AND EXISTS(SELECT 1 FROM managed_mail_calls WHERE call_id=?)`).bind(now, ...values, token),
     ]);
     if (reserved[0]!.meta.changes !== 1 || reserved[1]!.meta.changes !== 1)
