@@ -69,18 +69,23 @@ not suppress Gmail forwarding or raw archival during the initial phase.
 Gmail forwarding is temporary; after retirement, plugin handling preserves raw
 archival and normal webhook fallback without requiring a Gmail delivery lane.
 
-## Kogane integration gap
+## Kogane implementation and adoption status
 
-The inspected
-[Kogane email handler](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/worker.ts)
-uses a Cloudflare email event and forwards mail itself. Its
-[session object](https://github.com/risu729/kogane/blob/02a915ac67bb28412e1294fe531ea4c4ba121089/services/collector-vpoint/src/session.ts)
-exposes a pending-challenge check and code completion, not the generic offer
-protocol above. The adapter and atomic claim/receipt semantics must be implemented
-in Kogane; they are not existing features. While Gmail forwarding remains enabled,
-designate exactly one forwarding owner to prevent duplicate delivery. Retirement
-must also remove specialist forwarding so adopted routes do not retain a hidden
-Gmail dependency.
+The owner adapter in [Kogane PR #1317](https://github.com/risu729/kogane/pull/1317)
+is implemented and deployed as of 2026-11-12. Its private `FumiOffer` service
+entrypoint publishes a manifest and exposes offer/receipt methods. The owner
+atomically claims the active challenge and stable operation before accepting
+responsibility; the legacy email path shares the claim gate. A durable `handled`
+receipt means the owner accepted responsibility, not that authentication succeeded.
+
+Fumi adoption remains inactive. Activation requires a verified private binding,
+authenticated manifest provenance, pinned bytes and explicit input grants. Real
+end-to-end OTP handling through Fumi has not been demonstrated. The deployed owner
+and synthetic tests do not establish that acceptance.
+
+While Gmail forwarding remains enabled, designate exactly one forwarding owner
+to prevent duplicate delivery. Retirement must also remove specialist forwarding
+so adopted routes do not retain a hidden Gmail dependency.
 
 ## Acceptance cases
 

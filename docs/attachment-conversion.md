@@ -1,9 +1,20 @@
 # Attachment conversion and local ZIP extraction
 
-Status: implementation and synthetic Workers tests, 2026-11-12. Production
-bindings, private configuration, paid processing and real-document acceptance
-remain separate activation steps. The service does not require converting each
-original into a custom `.txt` before managed ingestion.
+Status: implemented with synthetic Workers tests. Controlled production checks
+on 2026-11-12 verified local ZIP extraction, isolated child PDF decryption and
+managed DOCX conversion, plus managed OCR of the decrypted PDF and a PNG, under a
+private source allowlist. All four conversions completed; eleven authenticated
+original/derivative/member downloads passed full hash and provenance checks, and
+the expected text and amounts were present. All four lexical marker queries also
+passed exact original/derivative hash, authenticated URI and supported-excerpt
+checks. Conversion opt-in was then disabled; the three reserved managed calls
+remained complete with no additional submissions. A separate bounded historical
+text-source sample verified lexical, semantic and hybrid retrieval with supported
+excerpts and authenticated text/raw hashes. This does not establish semantic
+coverage of every converted attachment, archive-wide conversion coverage or
+hostile-input CPU/memory limit enforcement.
+Production evidence and exact source identities remain private. The service does
+not require converting each original into a custom `.txt` before managed ingestion.
 
 ## Supported paths
 
@@ -201,9 +212,10 @@ and invalid credentials have explicit results. Local workerd tests prove child
 execution, compressed AES-256 decryption, wrong-password rejection, 101-page
 rejection, malformed compressed input and parent output/resource-failure handling.
 The native built artifact test runs the complete synthetic capture/MIME/scheduled
-decryption/R2 path. Hosted limit enforcement still needs synthetic production
-acceptance after a reviewed opt-in; no CPU or OOM enforcement is claimed from a
-local success. No brittle PDF token filter substitutes for isolation.
+decryption/R2 path. Controlled production acceptance also verified the isolated
+decryption path. Hostile-input limit enforcement still needs separate synthetic
+production acceptance; no CPU or OOM enforcement is claimed from a successful
+decryption. No brittle PDF token filter substitutes for isolation.
 
 Without OCR the decrypted PDF is downloadable and explicitly excluded from text
 indexing. With opted-in OCR, the managed service receives the verified decrypted
