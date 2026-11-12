@@ -89,6 +89,19 @@ pending. No financial login was initiated; handled OTP or completed financial
 authentication has not been demonstrated. The ordinary webhook receiver and
 classifier credentials remain deferred.
 
+The no-code check precedes the owner's challenge-freshness checks. This probe
+establishes safe transport and durable decline, not expiry as the cause of the
+decline or acceptance of a valid OTP. Its first database readback is an observation,
+not a measurement of capture-to-offer latency.
+
+Keep existing direct Kogane exact routes authoritative until separately authorized
+handled-OTP and latency acceptance verifies the Fumi path. Owner offers run after
+MIME processing on the shared archive Workflow; historical backlog can delay them
+beyond the owner's sixty-second freshness window. The declared concurrency cap of 25 and
+catalog compare-and-swap improvements provide no priority or deadline guarantee.
+See [processing capacity](processing-workflows.md#execution-and-repair). This
+guard does not change routes or weaken the owner's freshness checks.
+
 While Gmail forwarding remains enabled, designate exactly one forwarding owner
 to prevent duplicate delivery. Retirement must also remove specialist forwarding
 so adopted routes do not retain a hidden Gmail dependency.
