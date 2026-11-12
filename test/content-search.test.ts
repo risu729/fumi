@@ -125,6 +125,93 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "matching" }, base)).matches,
     ).toHaveLength(1);
   });
+  it("reindexes a live conversion before historical backlog and backfills the remaining slots", async () => {
+    const historical = [];
+    for (let index = 0; index < 4; index++) {
+      // oxlint-disable-next-line no-await-in-loop -- Build a deterministic historical backlog.
+      historical.push(await insert(`a-history-${index}`, "historical searchable content"));
+    }
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET source_kind='gmail',source_namespace='synthetic-account'",
+    ).run();
+    const missing = await insert("a-missing-live", "missing original must not consume a slot");
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?")
+      .bind(missing.raw_key)
+      .run();
+    const live = await insert("z-live", "live body", {
+      text: "synthetic original scanned PDF",
+      mimeType: "application/pdf",
+    });
+    expect(historical.every((row) => row.raw_key < live.raw_key)).toBe(true);
+    await indexMailContent(env, live);
+    const original = JSON.parse(live.attachments_json)[0]!;
+    const converted = await object("new live converted needle");
+    await env.MAIL_CATALOG.prepare(
+      `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,representation,result_key,result_sha256,result_size,provenance_json,updated_at)
+       VALUES(?,0,?,?,?,?,?,?,?,'complete','managed_ocr_indexed_text',?,?,?,'{}',0)`,
+    )
+      .bind(
+        live.raw_key,
+        live.manifest_key,
+        "a".repeat(64),
+        original.key,
+        original.sha256,
+        original.size,
+        original.mimeType,
+        "b".repeat(64),
+        converted.key,
+        converted.sha256,
+        converted.size,
+      )
+      .run();
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_search_documents WHERE raw_key=?")
+        .bind(live.raw_key)
+        .first(),
+    ).toBeNull();
+    expect(await repairContentSearch(env, 100)).toEqual({ indexed: 3, deferred: 0 });
+    expect(
+      (
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key FROM mail_search_documents ORDER BY raw_key",
+        ).all<{ raw_key: string }>()
+      ).results.map((row) => row.raw_key),
+    ).toEqual([historical[0]!.raw_key, historical[1]!.raw_key, live.raw_key]);
+    expect(
+      (await searchMailContent(env, reader, { query: "converted needle" }, base)).matches,
+    ).toMatchObject([
+      {
+        message_id: "mail_z-live",
+        citation: { part: "converted_0", sha256: converted.sha256 },
+      },
+    ]);
+    expect(await repairContentSearch(env, 101)).toEqual({ indexed: 2, deferred: 0 });
+    expect(await repairContentSearch(env, 102)).toEqual({ indexed: 0, deferred: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_search_documents WHERE raw_key=?")
+        .bind(missing.raw_key)
+        .first(),
+    ).toBeNull();
+  });
+  it("defers a live retry until due while historical sources continue to backfill", async () => {
+    for (let index = 0; index < 4; index++) {
+      // oxlint-disable-next-line no-await-in-loop -- Historical work remains available during the retry delay.
+      await insert(`a-history-${index}`, "historical searchable content");
+    }
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET source_kind='gmail',source_namespace='synthetic-account'",
+    ).run();
+    const live = await insert("z-live-retry", "live retry needle");
+    await env.MAIL_ARCHIVE.delete(live.body_text_key!);
+    expect(await repairContentSearch(env, 100)).toEqual({ indexed: 2, deferred: 1 });
+    expect(await repairContentSearch(env, 101)).toEqual({ indexed: 2, deferred: 0 });
+    expect(await repairContentSearch(env, 300099)).toEqual({ indexed: 0, deferred: 0 });
+    await object("live retry needle");
+    expect(await repairContentSearch(env, 300100)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      (await searchMailContent(env, reader, { query: "retry needle" }, base)).matches,
+    ).toMatchObject([{ message_id: "mail_z-live-retry" }]);
+  });
   it("removes obsolete indexed text on extraction invalidation and fences stale publication", async () => {
     const row = await insert("changed", "obsolete needle");
     await repairContentSearch(env);

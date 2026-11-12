@@ -28,6 +28,8 @@ not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains ope
 ## Coverage and resource bounds
 
 The scheduled repair indexes at most three extracted messages per invocation.
+It selects present Email Routing sources before historical Gmail sources, then
+uses remaining capacity for backfill. Retry delays still apply within both groups.
 It processes messages and attachments sequentially. It indexes at most the first
 100,000 characters of the decoded plain-text body and the first 16,000 characters
 of up to eight UTF-8 `text/plain` attachments, each at most 64 KiB. Chunks contain

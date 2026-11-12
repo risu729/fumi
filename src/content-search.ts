@@ -206,9 +206,10 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
 export async function repairContentSearch(env: MailReadEnvironment, now = Date.now()) {
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json
-    FROM mail_extractions e LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
-    WHERE e.status='complete' AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))
-    ORDER BY COALESCE(d.next_attempt_at,0),e.raw_key LIMIT 3`)
+    FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+    WHERE s.raw_state='present' AND e.status='complete' AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))
+    ORDER BY CASE s.source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(d.next_attempt_at,0),e.raw_key LIMIT 3`)
       .bind(now)
       .all<Extraction>()
   ).results;
