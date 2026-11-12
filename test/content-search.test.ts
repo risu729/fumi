@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { repairContentSearch, searchMailContent, indexMailContent } from "../src/content-search.ts";
+import {
+  repairContentSearch,
+  searchMailContent,
+  indexMailContent,
+  indexContentSearchSource,
+} from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import { readMailResource } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
@@ -59,9 +64,117 @@ beforeAll(async () => {
   await applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS);
 });
 beforeEach(async () => {
-  await env.MAIL_CATALOG.exec("DELETE FROM mail_extractions; DELETE FROM archive_sources;");
+  await env.MAIL_CATALOG.exec(
+    "DELETE FROM mail_extractions; DELETE FROM archive_sources; DELETE FROM processing_jobs;",
+  );
 });
+
+async function completedJob(rawKey: string, instanceId: string) {
+  await env.MAIL_CATALOG.prepare("UPDATE mail_extractions SET instance_id=? WHERE raw_key=?")
+    .bind(instanceId, rawKey)
+    .run();
+  await env.MAIL_CATALOG.prepare(`INSERT INTO processing_jobs(raw_key,pipeline_version,instance_id,state,created_at,updated_at,next_check_at,completed_at)
+    VALUES(?,'mime-v1',?,'complete',0,0,0,0)`)
+    .bind(rawKey, instanceId)
+    .run();
+}
 describe("bounded content retrieval", () => {
+  it("fences an immediate projection against an attempt change during R2 reads and missing originals", async () => {
+    const source = await insert("workflow-fenced", "immediate fenced needle");
+    await completedJob(source.raw_key, "synthetic-old-instance");
+    const get = env.MAIL_ARCHIVE.get.bind(env.MAIL_ARCHIVE);
+    const spy = vi.spyOn(env.MAIL_ARCHIVE, "get").mockImplementationOnce(async (...args) => {
+      await env.MAIL_CATALOG.prepare(
+        "UPDATE processing_jobs SET instance_id='synthetic-new-instance',attempt=1 WHERE raw_key=?",
+      )
+        .bind(source.raw_key)
+        .run();
+      return get(...args);
+    });
+    try {
+      expect(await indexContentSearchSource(env, source.raw_key, "synthetic-old-instance")).toEqual(
+        { status: "skipped" },
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_search_chunks").first("n"),
+    ).toBe(0);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET instance_id='synthetic-new-instance' WHERE raw_key=?",
+    )
+      .bind(source.raw_key)
+      .run();
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?")
+      .bind(source.raw_key)
+      .run();
+    expect(await indexContentSearchSource(env, source.raw_key, "synthetic-new-instance")).toEqual({
+      status: "skipped",
+    });
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='present' WHERE raw_key=?")
+      .bind(source.raw_key)
+      .run();
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT e.instance_id extraction_instance,j.instance_id job_instance,j.state,s.raw_state FROM mail_extractions e JOIN processing_jobs j ON j.raw_key=e.raw_key JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.raw_key=?",
+      )
+        .bind(source.raw_key)
+        .first(),
+    ).toEqual({
+      extraction_instance: "synthetic-new-instance",
+      job_instance: "synthetic-new-instance",
+      state: "complete",
+      raw_state: "present",
+    });
+    expect(await indexContentSearchSource(env, source.raw_key, "synthetic-old-instance")).toEqual({
+      status: "skipped",
+    });
+    expect(await indexContentSearchSource(env, source.raw_key, "synthetic-new-instance")).toEqual({
+      status: "ready",
+    });
+    expect(
+      (await searchMailContent(env, reader, { query: "fenced needle" }, base)).matches,
+    ).toHaveLength(1);
+  });
+  it("persists immediate indexing failures for repair without changing successful MIME state", async () => {
+    const source = await insert("workflow-retry", "durable immediate retry needle");
+    await completedJob(source.raw_key, "synthetic-instance");
+    await env.MAIL_ARCHIVE.delete(source.body_text_key!);
+    await expect(
+      indexContentSearchSource(env, source.raw_key, "synthetic-instance", 100),
+    ).rejects.toThrow("Content indexing unavailable");
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM processing_jobs WHERE raw_key=?")
+        .bind(source.raw_key)
+        .first("state"),
+    ).toBe("complete");
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT status,next_attempt_at FROM mail_search_documents WHERE raw_key=?",
+      )
+        .bind(source.raw_key)
+        .first(),
+    ).toEqual({ status: "retry", next_attempt_at: 300100 });
+    await object("durable immediate retry needle");
+    expect(await repairContentSearch(env, 300100)).toEqual({ indexed: 1, deferred: 0 });
+    const first = await env.MAIL_CATALOG.prepare(
+      "SELECT id FROM mail_search_chunks WHERE raw_key=?",
+    )
+      .bind(source.raw_key)
+      .first("id");
+    expect(await indexContentSearchSource(env, source.raw_key, "synthetic-instance")).toEqual({
+      status: "ready",
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT id FROM mail_search_chunks WHERE raw_key=?")
+        .bind(source.raw_key)
+        .first("id"),
+    ).toBe(first);
+    expect(
+      (await searchMailContent(env, reader, { query: "retry needle" }, base)).matches,
+    ).toHaveLength(1);
+  });
   it("finds Japanese phrases and exact numbers with authenticated provenance", async () => {
     await insert("japanese", "今月の請求書は合計12,345円です。");
     expect(await repairContentSearch(env)).toEqual({ indexed: 1, deferred: 0 });

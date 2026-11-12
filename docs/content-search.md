@@ -27,6 +27,13 @@ not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains ope
 
 ## Coverage and resource bounds
 
+Each successful MIME Workflow attempts a separate, retryable lexical index step
+for its own source after MIME completion and immediate routing. It uses the same
+bounded reads, digests and projection transaction, additionally fenced to the
+current processing instance and present original. Replays reuse a ready projection.
+Index failures retain MIME success and a projection retry for scheduled repair;
+they do not emit another lifecycle event or invoke paid conversion/semantic calls.
+
 The scheduled repair indexes at most three extracted messages per invocation.
 It selects present Email Routing sources before historical Gmail sources, then
 uses remaining capacity for backfill. Retry delays still apply within both groups.

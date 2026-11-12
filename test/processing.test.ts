@@ -21,11 +21,12 @@ import {
 import { reconcileArchive, indexArchiveSource } from "../src/reconcile.ts";
 import { commitPage, readCheckpoint } from "../src/catalog.ts";
 import worker from "../src/index.ts";
+import { repairContentSearch, searchMailContent } from "../src/content-search.ts";
 
 const receivedAt = "2026-11-10T00:00:00.000Z";
 const bytes = new TextEncoder().encode("Subject: Synthetic workflow\r\n\r\nBody\r\n");
 
-async function putSource() {
+async function putSource(notifyEvents = false) {
   const id = crypto.randomUUID();
   const prefix = `ingest/2026-11-10/${id}`;
   const key = `${prefix}/raw.eml`;
@@ -42,6 +43,7 @@ async function putSource() {
       sha256,
       envelopeFrom: "sender@example.invalid",
       envelopeTo: "recipient@example.invalid",
+      eventNotifications: notifyEvents ? "1" : "0",
     },
   });
   await env.MAIL_ARCHIVE.put(
@@ -227,6 +229,16 @@ describe("mail processing Workflows in workerd", () => {
       state: "complete",
       pipeline_version: PIPELINE_VERSION,
     });
+    expect(
+      (
+        await searchMailContent(
+          env,
+          { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] },
+          { query: "Body" },
+          "https://mail.example.invalid",
+        )
+      ).matches,
+    ).toHaveLength(1);
     expect(await env.MAIL_CATALOG.prepare("SELECT * FROM archive_scan").first()).toEqual({
       id: 1,
       revision: 1,
@@ -247,6 +259,46 @@ describe("mail processing Workflows in workerd", () => {
     await repairProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING);
     expect(create).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("keeps MIME completion and its single ready event after exhausted lexical indexing retries", async () => {
+    const source = await putSource(true);
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify(async (modifier) => {
+      await modifier.disableRetryDelays();
+      await modifier.mockStepError(
+        { name: "index-content-search-v1" },
+        new Error("Synthetic lexical outage"),
+      );
+    });
+    await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
+    await instance.waitForStatus("complete");
+    expect(await instance.getOutput()).toMatchObject({ status: "extracted" });
+    expect(await job(source.key)).toMatchObject({ state: "complete", failure_code: null });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_extractions WHERE raw_key=?")
+        .bind(source.key)
+        .first("status"),
+    ).toBe("complete");
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_search_documents WHERE raw_key=?")
+        .bind(source.key)
+        .first(),
+    ).toBeNull();
+    expect(await repairContentSearch(env)).toEqual({ indexed: 1, deferred: 0 });
+    expect(await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key)).toBe(
+      "terminal",
+    );
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events WHERE event_id=?")
+        .bind(`ready:${source.instanceId}`)
+        .first("n"),
+    ).toBe(1);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events WHERE event_id=?")
+        .bind(`failed:${source.instanceId}`)
+        .first("n"),
+    ).toBe(0);
   });
 
   it("retries a transient step", async () => {

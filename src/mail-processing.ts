@@ -12,6 +12,7 @@ import { indexArchiveSource } from "./reconcile.ts";
 import { extractArchiveMail } from "./mime-extraction.ts";
 import { dispatchRoutingSource } from "./routing-dispatch.ts";
 import { routingRuntime } from "./routing-runtime.ts";
+import { indexContentSearchSource } from "./content-search.ts";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import type { ProcessingParams } from "./processing-jobs.ts";
 
@@ -106,6 +107,15 @@ export class MailProcessing extends WorkflowEntrypoint<Env, ProcessingParams> {
       );
     } catch {
       console.error(JSON.stringify({ event: "routing_dispatch", status: "deferred" }));
+    }
+    // Lexical indexing owns a separate retry checkpoint and cannot fail MIME completion.
+    // Conversion/semantic provider calls remain in their independently bounded repair paths.
+    try {
+      await step.do("index-content-search-v1", retry, () =>
+        redacted(() => indexContentSearchSource(this.env, params.rawKey, event.instanceId)),
+      );
+    } catch {
+      console.error(JSON.stringify({ event: "content_search_index", status: "deferred" }));
     }
     return extracted;
   }
