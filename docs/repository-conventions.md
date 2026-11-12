@@ -69,7 +69,7 @@ request introduces, whatever its severity or level. A push dismisses earlier app
 It prevents deletion and force-pushes, with the same repository-administrator bypass as
 Pateat and Kogane, which works only through a pull request. As in the reference
 repositories, it does not require an approval count or strict up-to-date status checks.
-Agents must still obtain the independent review that AGENTS.md requires for
+Contributors must still obtain the independent review that AGENTS.md requires for
 implementation and test changes; a zero approval-count policy does not waive it.
 
 Mail route acceptance, Gmail inbox placement and original-byte archival are
