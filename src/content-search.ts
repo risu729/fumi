@@ -67,7 +67,11 @@ function chunks(text: string, part: string, sha256: string): Chunk[] {
 }
 
 /** Bounded rebuild from immutable MIME derivatives; never fetches message URLs. */
-export async function indexMailContent(env: MailReadEnvironment, source: Extraction) {
+export async function indexMailContent(
+  env: MailReadEnvironment,
+  source: Extraction,
+  expectedInstanceId?: string,
+) {
   const entries: Chunk[] = [];
   const omitted: string[] = [];
   if (source.body_text_key) {
@@ -155,10 +159,12 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
     if (text.length > 16_000) omitted.push(`part_${part.index}:truncated`);
   }
   const db = env.MAIL_CATALOG.withSession("first-primary");
-  const guard = `EXISTS (SELECT 1 FROM mail_extractions WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete' AND manifest_key=?) AND (SELECT json_group_array(json_array(part_index,state,result_sha256,policy_hash)) FROM (SELECT part_index,state,result_sha256,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index))=?`;
+  const attempt = processingFence(expectedInstanceId);
+  const guard = `EXISTS (SELECT 1 FROM mail_extractions e WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete' AND manifest_key=?${attempt.sql}) AND (SELECT json_group_array(json_array(part_index,state,result_sha256,policy_hash)) FROM (SELECT part_index,state,result_sha256,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index))=?`;
   const guardValues = [
     source.raw_key,
     source.manifest_key,
+    ...attempt.bindings,
     source.raw_key,
     source.manifest_key,
     conversionSnapshot,
@@ -175,7 +181,7 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
     })),
   });
   // Every mutation uses the same extraction fence. D1 batches commit atomically.
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(`DELETE FROM mail_search_chunks WHERE raw_key=? AND ${guard}`)
       .bind(source.raw_key, ...guardValues),
@@ -201,6 +207,65 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
       ON CONFLICT(raw_key) DO UPDATE SET manifest_key=excluded.manifest_key,status='ready',coverage_json=excluded.coverage_json,next_attempt_at=0`)
       .bind(source.raw_key, source.manifest_key, coverage, ...guardValues),
   ]);
+  return (results.at(-1)?.meta.changes ?? 0) > 0;
+}
+
+function processingFence(expectedInstanceId?: string) {
+  return expectedInstanceId === undefined
+    ? { sql: "", bindings: [] }
+    : {
+        sql: ` AND e.instance_id=? AND EXISTS (SELECT 1 FROM processing_jobs j JOIN archive_sources s ON s.raw_key=j.raw_key WHERE j.raw_key=e.raw_key AND j.pipeline_version='mime-v1' AND j.instance_id=? AND j.state='complete' AND s.raw_state='present')`,
+        bindings: [expectedInstanceId, expectedInstanceId],
+      };
+}
+
+async function deferContentIndex(
+  env: MailReadEnvironment,
+  source: Extraction,
+  now: number,
+  expectedInstanceId?: string,
+) {
+  const attempt = processingFence(expectedInstanceId);
+  await env.MAIL_CATALOG.prepare(`INSERT INTO mail_search_documents(raw_key,manifest_key,status,coverage_json,next_attempt_at)
+    SELECT ?,?,'retry','{}',? WHERE EXISTS (SELECT 1 FROM mail_extractions e WHERE raw_key=? AND status='complete' AND manifest_key=?${attempt.sql})
+    ON CONFLICT(raw_key) DO UPDATE SET next_attempt_at=excluded.next_attempt_at
+    WHERE mail_search_documents.status='retry' AND mail_search_documents.manifest_key=excluded.manifest_key`)
+    .bind(
+      source.raw_key,
+      source.manifest_key,
+      now + 300_000,
+      source.raw_key,
+      source.manifest_key,
+      ...attempt.bindings,
+    )
+    .run();
+}
+
+/** One local projection after MIME completion; paid processing remains separate. */
+export async function indexContentSearchSource(
+  env: MailReadEnvironment,
+  rawKey: string,
+  expectedInstanceId: string,
+  now = Date.now(),
+) {
+  const attempt = processingFence(expectedInstanceId);
+  const source =
+    await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json,d.status AS search_status,d.manifest_key AS search_manifest
+    FROM mail_extractions e LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+    WHERE e.raw_key=? AND e.extractor_version='mime-v1' AND e.status='complete'${attempt.sql}`)
+      .bind(rawKey, ...attempt.bindings)
+      .first<Extraction & { search_status: string | null; search_manifest: string | null }>();
+  if (!source) return { status: "skipped" };
+  if (source.search_status === "ready" && source.search_manifest === source.manifest_key)
+    return { status: "ready" };
+  try {
+    return {
+      status: (await indexMailContent(env, source, expectedInstanceId)) ? "ready" : "skipped",
+    };
+  } catch {
+    await deferContentIndex(env, source, now, expectedInstanceId);
+    throw new Error("Content indexing unavailable");
+  }
 }
 
 export async function repairContentSearch(env: MailReadEnvironment, now = Date.now()) {
@@ -223,12 +288,7 @@ export async function repairContentSearch(env: MailReadEnvironment, now = Date.n
     } catch {
       deferred += 1;
       // oxlint-disable-next-line no-await-in-loop -- Persist a fixed retry outcome before continuing.
-      await env.MAIL_CATALOG.prepare(`INSERT INTO mail_search_documents(raw_key,manifest_key,status,coverage_json,next_attempt_at)
-        SELECT ?,?,'retry','{}',? WHERE EXISTS (SELECT 1 FROM mail_extractions WHERE raw_key=? AND status='complete' AND manifest_key=?)
-        ON CONFLICT(raw_key) DO UPDATE SET next_attempt_at=excluded.next_attempt_at
-        WHERE mail_search_documents.status='retry' AND mail_search_documents.manifest_key=excluded.manifest_key`)
-        .bind(row.raw_key, row.manifest_key, now + 300_000, row.raw_key, row.manifest_key)
-        .run();
+      await deferContentIndex(env, row, now);
     }
   }
   return { indexed, deferred };

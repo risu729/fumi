@@ -29,6 +29,10 @@ HTML is stored as opaque downloadable bytes, without sanitization, rendering or
 remote resource fetching. Consumers must not render it directly. Attached
 `message/rfc822` remains an attachment and is not merged into its parent's body.
 MIME decoding does not open ZIP/PDF files, decrypt, OCR, classify or index them.
+After MIME completion, the Workflow separately attempts the bounded local lexical
+projection. Its retries cannot mark a successful extraction failed. Attachment
+conversion and managed semantic calls remain separately configured repair work;
+completed conversion changes invalidate lexical coverage for the existing repair.
 
 ## Limits and coverage
 

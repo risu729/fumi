@@ -1,15 +1,14 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations } from "cloudflare:test";
+import { applyD1Migrations, introspectWorkflowInstance } from "cloudflare:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startGmailImport, runGmailImportPage } from "../src/gmail-import.ts";
 import { readMail, readMailThread, readMailResource, searchMail } from "../src/mail-read.ts";
-import { extractArchiveMail } from "../src/mime-extraction.ts";
 import { processingInstanceId } from "../src/processing-jobs.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import { handleHttp } from "../src/http.ts";
 import { resolveGrant } from "../src/auth.ts";
-import { repairContentSearch, searchMailContent } from "../src/content-search.ts";
+import { searchMailContent } from "../src/content-search.ts";
 import { repairRoutingShadow, ROUTING_CONFIG_KEY } from "../src/routing-shadow-runtime.ts";
 
 const reader = {
@@ -18,6 +17,18 @@ const reader = {
   fromAddresses: ["sender@example.invalid"],
 };
 const scope = { accountNamespace: "account-a", before: 1_800_000_000, includeSpamTrash: true };
+const pendingImport = {
+  ...env,
+  MAIL_PROCESSING: {
+    createBatch: vi
+      .fn()
+      .mockImplementation(async ({ instances }: { instances: { id: string }[] }) => ({
+        created: instances.map(({ id }) => ({ id })),
+        errors: [],
+      })),
+    get: vi.fn().mockResolvedValue({ status: async () => ({ status: "queued" }) }),
+  },
+};
 async function source(id: string, labels: string[], namespace = "account-a", extract = false) {
   const selected = { ...scope, accountNamespace: namespace };
   const raw = btoa(
@@ -35,7 +46,7 @@ async function source(id: string, labels: string[], namespace = "account-a", ext
   };
   const run = `${namespace}-${id}`;
   await startGmailImport(env, run, selected);
-  await runGmailImportPage(env, transport, run, selected);
+  await runGmailImportPage(extract ? env : pendingImport, transport, run, selected);
   const row = await env.MAIL_CATALOG.prepare(
     "SELECT s.external_id,s.raw_key FROM archive_sources s JOIN gmail_messages g ON g.raw_key=s.raw_key WHERE g.account_namespace=? AND g.message_id=?",
   )
@@ -43,13 +54,11 @@ async function source(id: string, labels: string[], namespace = "account-a", ext
     .first<{ external_id: string; raw_key: string }>();
   if (!row) throw new Error("Synthetic import missing");
   if (extract) {
-    const instance = processingInstanceId(row.raw_key);
-    await env.MAIL_CATALOG.prepare(
-      "INSERT INTO processing_jobs(raw_key,pipeline_version,instance_id,state,created_at,updated_at,next_check_at) VALUES (?,'mime-v1',?,'running',0,0,0)",
-    )
-      .bind(row.raw_key, instance)
-      .run();
-    await extractArchiveMail(env.MAIL_ARCHIVE, env.MAIL_CATALOG, row.raw_key, instance);
+    await using instance = await introspectWorkflowInstance(
+      env.MAIL_PROCESSING,
+      processingInstanceId(row.raw_key),
+    );
+    await instance.waitForStatus("complete");
   }
   return { id: `mail_${row.external_id}`, rawKey: row.raw_key };
 }
@@ -71,7 +80,12 @@ afterEach(() => {
 describe("historical Gmail retrieval integration", () => {
   it("indexes imported MIME with verifiable citations while routing stays historically suppressed", async () => {
     const imported = await source("combined123", ["SENT"], "account-a", true);
-    expect(await repairContentSearch(env)).toEqual({ indexed: 1, deferred: 0 });
+    // Import dispatch and Workflow indexing finish without scheduled repair.
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_search_documents WHERE raw_key=?")
+        .bind(imported.rawKey)
+        .first("status"),
+    ).toBe("ready");
     const found = await searchMailContent(
       env,
       reader,

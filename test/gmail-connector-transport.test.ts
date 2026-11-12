@@ -1,9 +1,23 @@
-import { env } from "cloudflare:workers";
+import { env as runtimeEnv } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnectorGmailTransport } from "../src/gmail-connector-transport.ts";
 import { gmailImportRuntime, handleGmailImport } from "../src/gmail-import-http.ts";
 import { runGmailImportPage, startGmailImport } from "../src/gmail-import.ts";
+
+// These transport fixtures retain durable jobs but do not launch background processing.
+const env = {
+  ...runtimeEnv,
+  MAIL_PROCESSING: {
+    createBatch: vi
+      .fn()
+      .mockImplementation(async ({ instances }: { instances: { id: string }[] }) => ({
+        created: instances.map(({ id }) => ({ id })),
+        errors: [],
+      })),
+    get: vi.fn().mockResolvedValue({ status: async () => ({ status: "queued" }) }),
+  },
+};
 
 const scope = {
   accountNamespace: "synthetic-account",

@@ -63,6 +63,18 @@ date, Gmail message and thread IDs, label IDs and the first import timestamp are
 preserved in private R2 provenance and `gmail_messages`. Header dates, Message-ID,
 thread headers, bodies and original attachment encodings remain in exact raw MIME.
 The normal MIME pipeline produces attachment hashes and versioned derivatives.
+After each source commits, the importer immediately requests its existing durable
+`mime-v1` Workflow, sequentially for at most ten sources per page. Replayed sources
+use the same job identity. A dispatch ambiguity remains in the pending job ledger
+for bounded repair; an error before a durable job can be created retains the
+import's pending page and original for replay. The importer does not wait for MIME
+completion, and its archive checkpoint is not a claim of search completeness.
+Successful extraction separately attempts bounded lexical indexing. Historical
+sources still emit no mail lifecycle events or routing notifications.
+
+Raw import supports originals up to 25 MiB, while the unchanged MIME input limit
+is 4 MiB. Larger originals remain archived with explicit blocked extraction and
+omitted search coverage; immediate dispatch does not make them searchable.
 Gmail internal date is a provider fact; it is not a claimed SMTP receipt date.
 There is no fabricated SMTP envelope or forwarding success for historical sources.
 

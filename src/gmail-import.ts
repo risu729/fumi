@@ -1,4 +1,5 @@
 import { commitSource, readCheckpoint } from "./catalog.ts";
+import { requestProcessing, type ProcessingParams } from "./processing-jobs.ts";
 import {
   gmailId,
   gmailNamespace,
@@ -20,6 +21,7 @@ export interface GmailImportScope {
 export interface GmailImportEnvironment {
   MAIL_CATALOG: D1Database;
   MAIL_ARCHIVE: R2Bucket;
+  MAIL_PROCESSING: Pick<Workflow<ProcessingParams>, "createBatch" | "get">;
 }
 interface ImportRow {
   scope_json: string;
@@ -152,7 +154,7 @@ async function saveMessage(
         Number(provenance.internalDate) >= (scope.after ?? 0) * 1000 &&
         Number(provenance.internalDate) < scope.before * 1000
       )
-        return;
+        return archived.raw_key;
     } else await receipt?.body.cancel();
     throw new GmailImportError("gmail_source_conflict");
   }
@@ -274,7 +276,7 @@ async function saveMessage(
       },
       [],
     );
-    if (result.committed && result.indexed === 1) return;
+    if (result.committed && result.indexed === 1) return rawKey;
   }
   throw new GmailImportError("gmail_catalog_busy");
 }
@@ -341,7 +343,9 @@ export async function runGmailImportPage(
         .run();
       if (!renewed.meta.changes) throw new GmailImportError("import_lease_lost");
       // oxlint-disable-next-line no-await-in-loop -- Exactly one raw message in memory and one Gmail request at a time.
-      await saveMessage(env, transport, scope, id);
+      const rawKey = await saveMessage(env, transport, scope, id);
+      // oxlint-disable-next-line no-await-in-loop -- Dispatch each durable source through its existing idempotent job, at most ten per page.
+      await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, rawKey);
       // oxlint-disable-next-line no-await-in-loop -- Record only durable sources before advancing the bounded page.
       await env.MAIL_CATALOG.prepare(`INSERT INTO gmail_import_items(import_id,message_id,raw_key)
         SELECT ?,message_id,raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?

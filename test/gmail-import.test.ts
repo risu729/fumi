@@ -1,6 +1,6 @@
-import { env } from "cloudflare:workers";
+import { env as runtimeEnv } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runGmailImportPage, startGmailImport } from "../src/gmail-import.ts";
 import {
   createReadonlyGmailTransport,
@@ -12,9 +12,23 @@ import {
   beginProcessing,
   completeProcessing,
   processingInstanceId,
+  repairProcessing,
+  PROCESSING_CHECK_INTERVAL_MS,
 } from "../src/processing-jobs.ts";
 import { extractArchiveMail } from "../src/mime-extraction.ts";
 import { handleGmailImport } from "../src/gmail-import-http.ts";
+
+// Archive/provenance fixtures control dispatch without launching background Workflows.
+const workflow = {
+  createBatch: vi
+    .fn()
+    .mockImplementation(async ({ instances }: { instances: { id: string }[] }) => ({
+      created: instances.map(({ id }) => ({ id })),
+      errors: [],
+    })),
+  get: vi.fn().mockResolvedValue({ status: async () => ({ status: "queued" }) }),
+};
+const env = { ...runtimeEnv, MAIL_PROCESSING: workflow };
 
 async function accountHash() {
   return Array.from(
@@ -61,6 +75,7 @@ beforeAll(async () => {
   await applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS);
 });
 beforeEach(async () => {
+  vi.clearAllMocks();
   for (const table of [
     "gmail_import_items",
     "gmail_imports",
@@ -78,6 +93,7 @@ beforeEach(async () => {
   if (objects.objects.length)
     await env.MAIL_ARCHIVE.delete(objects.objects.map((item) => item.key));
 });
+afterEach(() => vi.restoreAllMocks());
 
 describe("bounded historical Gmail import", () => {
   it("counts duplicate provider IDs only once across pages and pauses deleted uncommitted mail", async () => {
@@ -164,11 +180,11 @@ describe("bounded historical Gmail import", () => {
       await env.MAIL_CATALOG.prepare("SELECT message_id FROM gmail_messages").first("message_id"),
     ).toBe("123");
     const instanceId = processingInstanceId(key);
-    await env.MAIL_CATALOG.prepare(
-      "INSERT INTO processing_jobs(raw_key,pipeline_version,instance_id,state,created_at,updated_at,next_check_at) VALUES (?,'mime-v1',?,'pending',0,0,0)",
-    )
-      .bind(key, instanceId)
-      .run();
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM processing_jobs WHERE raw_key=?")
+        .bind(key)
+        .first("state"),
+    ).toBe("pending");
     const params = { rawKey: key, pipelineVersion: "mime-v1" as const, attempt: 0 };
     await beginProcessing(env.MAIL_CATALOG.withSession("first-primary"), params);
     expect(
@@ -178,6 +194,99 @@ describe("bounded historical Gmail import", () => {
     expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS n FROM mail_events").first("n")).toBe(
       0,
     );
+  });
+
+  it("dispatches all ten committed sources immediately with stable identities across replay", async () => {
+    const ids = Array.from({ length: 10 }, (_, index) => `message${index}`);
+    const client = {
+      list: vi.fn(async () => ({ messages: ids.map((id) => ({ id })) })),
+      getRaw: vi.fn(async (id: string) => message(id)),
+    };
+    await startGmailImport(env, "dispatch", scope);
+    expect(await runGmailImportPage(env, client, "dispatch", scope)).toMatchObject({
+      imported: 10,
+    });
+    const keys = (
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM archive_sources").all<{
+        raw_key: string;
+      }>()
+    ).results.map(({ raw_key }) => raw_key);
+    expect(workflow.createBatch).toHaveBeenCalledTimes(10);
+    expect(
+      new Set(workflow.createBatch.mock.calls.map(([options]) => options.instances[0].id)),
+    ).toEqual(new Set(keys.map((key) => processingInstanceId(key))));
+    await startGmailImport(env, "replay-dispatch", scope);
+    await runGmailImportPage(env, client, "replay-dispatch", scope);
+    expect(workflow.createBatch).toHaveBeenCalledTimes(10);
+    expect(client.getRaw).toHaveBeenCalledTimes(10);
+    expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(0);
+  });
+
+  it("retains a committed original and pending page when the processing ledger is unavailable", async () => {
+    await startGmailImport(env, "dispatch-recovery", scope);
+    const session = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    const spy = vi
+      .spyOn(env.MAIL_CATALOG, "withSession")
+      .mockImplementationOnce(session)
+      .mockImplementationOnce(() => {
+        throw new Error("Synthetic processing ledger unavailable");
+      });
+    const client = transport();
+    await expect(runGmailImportPage(env, client, "dispatch-recovery", scope)).rejects.toThrow(
+      "gmail_import_failed",
+    );
+    spy.mockRestore();
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT pending_json,page_token,imported_count FROM gmail_imports",
+      ).first(),
+    ).toEqual({ pending_json: '["123"]', page_token: null, imported_count: 0 });
+    const key = await env.MAIL_CATALOG.prepare("SELECT raw_key FROM archive_sources").first<string>(
+      "raw_key",
+    );
+    expect(new Uint8Array(await (await env.MAIL_ARCHIVE.get(key!))!.arrayBuffer())).toEqual(raw);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM processing_jobs").first("n"),
+    ).toBe(0);
+    expect(await runGmailImportPage(env, client, "dispatch-recovery", scope)).toEqual({
+      status: "complete",
+      imported: 1,
+    });
+    expect(client.list).toHaveBeenCalledTimes(1);
+    expect(client.getRaw).toHaveBeenCalledTimes(1);
+    expect(workflow.createBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an ambiguous dispatch durable and repairs the same identity without replaying raw mail", async () => {
+    await startGmailImport(env, "dispatch-unknown", scope);
+    workflow.createBatch.mockRejectedValueOnce(new Error("Synthetic lost creation response"));
+    const client = transport();
+    expect(await runGmailImportPage(env, client, "dispatch-unknown", scope)).toEqual({
+      status: "complete",
+      imported: 1,
+    });
+    const job = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_key,instance_id,state,created_at,failure_code FROM processing_jobs",
+    ).first<{
+      raw_key: string;
+      instance_id: string;
+      state: string;
+      created_at: number;
+      failure_code: string;
+    }>();
+    expect(job).toMatchObject({ state: "pending", failure_code: "dispatch_unavailable" });
+    await startGmailImport(env, "dispatch-unknown-replay", scope);
+    await runGmailImportPage(env, client, "dispatch-unknown-replay", scope);
+    expect(workflow.createBatch).toHaveBeenCalledTimes(1);
+    await repairProcessing(
+      env.MAIL_CATALOG,
+      workflow,
+      job!.created_at + PROCESSING_CHECK_INTERVAL_MS + 1,
+    );
+    expect(workflow.createBatch).toHaveBeenCalledTimes(2);
+    expect(workflow.createBatch.mock.calls[1]![0].instances[0].id).toBe(job!.instance_id);
+    expect(client.getRaw).toHaveBeenCalledTimes(1);
+    expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(0);
   });
 
   it("keeps a persisted page after partial failure and advances counts only once after replay", async () => {
