@@ -54,6 +54,21 @@ or rewind the cursor. Transient R2 or D1 errors prevent checkpoint advancement.
 Invalid evidence receives a durable closed issue code so one bad object does
 not permanently block the scan.
 
+Immediate single-source observations use the source's last observation revision
+instead of requiring an unchanged global revision across R2 reads. Unrelated
+imports, Workflows or scan pages therefore do not starve a source's catalog step.
+A newer observation of the same raw key still rejects every stale mutation,
+including issues, Gmail provenance, events and the revision increment. Workflow
+attempt ownership remains required when supplied.
+
+All source mutations and their global revision increment share one atomic D1
+batch. A committed source's `observed_revision` is strictly below the current
+global revision: the batch stamps the current revision, then increments it. Its
+own stamp remains eligible for later statements inside that batch. This orders
+source/page races without weakening a scan page's strict compare-and-swap. Source
+commits never write the scan cursor or pass, including when another page advanced
+them during observation. No migration or automatic retry of failed jobs is implied.
+
 `observed_revision` identifies a source's last committed scan observation.
 Logged `pass` identifies the traversal just processed; a terminal page persists
 the next pass number. `issues` counts issue rows inserted or refreshed in that
