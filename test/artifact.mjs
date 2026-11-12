@@ -11,6 +11,12 @@ const { encryptedPdf, password: syntheticPdfPassword } = JSON.parse(
   await readFile(".cloudflare/attachment-fixture.json", "utf8"),
 );
 const config = JSON.parse(await readFile(`${output}/worker.config.json`, "utf8"));
+assert.deepEqual(config.exports.MailProcessing, {
+  type: "workflow",
+  name: "fumi-mail-processing",
+  concurrency: { limit: 25 },
+  defaultRetention: { successRetention: "3 days", errorRetention: "3 days" },
+});
 const rpcWorker = process.env["FUMI_ROUTING_RPC_WORKER"];
 const rpcEntrypoint = process.env["FUMI_ROUTING_RPC_ENTRYPOINT"];
 const workers = [{ config }];
