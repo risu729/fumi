@@ -78,10 +78,16 @@ atomically claims the active challenge and stable operation before accepting
 responsibility; the legacy email path shares the claim gate. A durable `handled`
 receipt means the owner accepted responsibility, not that authentication succeeded.
 
-Fumi adoption remains inactive. Activation requires a verified private binding,
-authenticated manifest provenance, pinned bytes and explicit input grants. Real
-end-to-end OTP handling through Fumi has not been demonstrated. The deployed owner
-and synthetic tests do not establish that acceptance.
+A private owner-only adoption was activated on 2026-11-12 using a verified native
+RPC binding, authenticated manifest publication, pinned bytes and explicit input
+grants. A controlled incoming synthetic message matched the owner predicate but
+contained no verification code. Its first production readback confirmed one
+durable `not_applicable` receipt with one offer attempt, a held source with
+`notification_not_configured`, and no ordinary action operation. This verifies
+the configured RPC path and durable decline. Repeat-receipt verification remains
+pending. No financial login was initiated; handled OTP or completed financial
+authentication has not been demonstrated. The ordinary webhook receiver and
+classifier credentials remain deferred.
 
 While Gmail forwarding remains enabled, designate exactly one forwarding owner
 to prevent duplicate delivery. Retirement must also remove specialist forwarding

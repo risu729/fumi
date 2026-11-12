@@ -7,12 +7,22 @@ private source allowlist. All four conversions completed; eleven authenticated
 original/derivative/member downloads passed full hash and provenance checks, and
 the expected text and amounts were present. All four lexical marker queries also
 passed exact original/derivative hash, authenticated URI and supported-excerpt
-checks. Conversion opt-in was then disabled; the three reserved managed calls
-remained complete with no additional submissions. A separate bounded historical
-text-source sample verified lexical, semantic and hybrid retrieval with supported
-excerpts and authenticated text/raw hashes. This does not establish semantic
-coverage of every converted attachment, archive-wide conversion coverage or
-hostile-input CPU/memory limit enforcement.
+checks. Conversion opt-in was then disabled; the three reserved conversion calls
+remained complete without further conversion submissions. A separately targeted
+managed corpus then returned all four converted formats in semantic and hybrid
+search. Eight format/mode checks verified derived, original attachment and raw
+MIME hashes, representations, authenticated URIs and exact supported excerpts
+against retained downloads and conversion ledger identities. This is controlled
+fixture acceptance, not archive-wide conversion or retrieval coverage, exhaustive
+search-quality evaluation or hostile-input CPU/memory limit enforcement.
+Retained, byte-verified originals also corroborate related-mail password lookup:
+the attachment message body lacks the key, while a distinct related message has
+the exact password-shaped hint. Participants and normalized subject match, and
+header dates are within thirty days. The activation binding snapshot has no
+manual password dictionary. Independently rechecked hosted ZIP member bytes and
+the decrypted PDF match their saved hashes; the PDF reopens without a key and
+contains the expected visible text. This is corroborating evidence, without
+per-candidate telemetry or an independent replay of catalog eligibility checks.
 Production evidence and exact source identities remain private. The service does
 not require converting each original into a custom `.txt` before managed ingestion.
 
