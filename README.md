@@ -51,6 +51,10 @@ and authenticated reads were verified on 2026-11-12; see the
 
 ## Direction
 
+Optional [standalone ingress](docs/standalone-ingress.md) now supports receiving
+without Gmail forwarding, with explicit storage-failure rejection and compatible
+archive recovery. The default remains forwarding; production cutover is separate.
+
 1. Temporarily preserve existing Gmail forwarding while capturing raw MIME in R2.
 2. In parallel, backfill historical Gmail and build attachment-aware search/MCP;
    build deterministic routing, bounded model classification, and webhook delivery;

@@ -11,6 +11,14 @@ const { encryptedPdf, password: syntheticPdfPassword } = JSON.parse(
   await readFile(".cloudflare/attachment-fixture.json", "utf8"),
 );
 const config = JSON.parse(await readFile(`${output}/worker.config.json`, "utf8"));
+assert.ok(["forward", "archive-only"].includes(config.env.INGRESS_MODE.value));
+if (config.env.INGRESS_MODE.value === "archive-only") {
+  assert.equal(config.env.FORWARD_TO, undefined);
+} else {
+  assert.equal(config.env.FORWARD_TO.type, "secret");
+}
+// Exercise both runtime modes from either actual build variant.
+config.env.INGRESS_MODE = { type: "text", value: "forward" };
 assert.deepEqual(config.exports.MailProcessing, {
   type: "workflow",
   name: "fumi-mail-processing",
@@ -413,4 +421,68 @@ try {
   );
 } finally {
   await runtime.dispose();
+}
+
+// Exercise the same production bundle with no forwarding credential. This local
+// runtime has its own storage; no deployed bindings or SMTP are contacted.
+const standaloneConfig = structuredClone(config);
+standaloneConfig.env.INGRESS_MODE = { type: "text", value: "archive-only" };
+delete standaloneConfig.env.FORWARD_TO;
+const standaloneRuntime = new Miniflare({
+  workers: [{ config: standaloneConfig }, ...workers.slice(1)],
+  unsafeTriggerHandlers: true,
+});
+try {
+  const raw =
+    "From: sender@example.invalid\r\nTo: archive@example.invalid\r\nMessage-ID: <standalone@example.invalid>\r\nSubject: Standalone\r\n\r\nSynthetic standalone body\r\n";
+  const url =
+    "http://localhost/cdn-cgi/local/email?from=sender@example.invalid&to=archive@example.invalid&format=json";
+  const response = await standaloneRuntime.dispatchFetch(url, { method: "POST", body: raw });
+  const result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.forwards.length, 0);
+  const bucket = await standaloneRuntime.getR2Bucket("MAIL_ARCHIVE");
+  const objects = (await bucket.list()).objects;
+  assert.equal(objects.length, 2);
+  const receipt = await (
+    await bucket.get(objects.find((object) => object.key.endsWith("/receipt.json")).key)
+  ).json();
+  assert.equal(receipt.schemaVersion, 2);
+  assert.deepEqual(receipt.forward, { status: "skipped", reason: "archive_only" });
+  assert.equal(await (await bucket.get(receipt.archive.key)).text(), raw);
+  const catalog = await standaloneRuntime.getD1Database("MAIL_CATALOG");
+  for (const migration of await readD1Migrations("migrations")) {
+    // oxlint-disable-next-line no-await-in-loop -- Migrations must run in order.
+    await catalog.batch(migration.queries.map((query) => catalog.prepare(query)));
+  }
+  const scan = await standaloneRuntime.dispatchFetch(
+    "http://localhost/cdn-cgi/local/scheduled?cron=*/5%20*%20*%20*%20*&format=json",
+  );
+  assert.equal((await scan.json()).outcome, "ok");
+  assert.deepEqual(
+    await catalog
+      .prepare("SELECT raw_state,forward_status,receipt_state,notify_events FROM archive_sources")
+      .first(),
+    {
+      raw_state: "present",
+      forward_status: "skipped",
+      receipt_state: "valid",
+      notify_events: 1,
+    },
+  );
+  // An unavailable raw archive must reach the native rejection path, never a
+  // successful no-op or an accidental forwarding fallback.
+  delete standaloneConfig.env.MAIL_ARCHIVE;
+  await standaloneRuntime.setOptions({
+    workers: [{ config: standaloneConfig }, ...workers.slice(1)],
+    unsafeTriggerHandlers: true,
+  });
+  const rejected = await standaloneRuntime.dispatchFetch(url, { method: "POST", body: raw });
+  const rejection = await rejected.json();
+  assert.equal(rejection.forwards.length, 0);
+  assert.equal(rejection.rejectReason, "Message could not be stored");
+  console.log("Native standalone Email capture, catalog recovery and rejection: passed");
+} finally {
+  await standaloneRuntime.dispose();
 }

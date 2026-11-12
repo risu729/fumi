@@ -3,11 +3,13 @@ import { loadEnv } from "vite";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 import { compatibilityDate } from "./worker-runtime.ts";
 import { routingRpcOptions } from "./routing-rpc-options.ts";
+import { ingressMode } from "./ingress-options.ts";
 
 const catalogId = loadEnv("production", ".", "FUMI_CATALOG_DATABASE_ID")[
   "FUMI_CATALOG_DATABASE_ID"
 ];
 const optional = loadEnv("production", ".", "FUMI_");
+const ingress = ingressMode(optional["FUMI_INGRESS_MODE"]);
 const pdfParser = optional["FUMI_PDF_PARSER_ENABLED"] === "1";
 const documents = optional["FUMI_DOCUMENT_CONVERSION_ENABLED"] === "1";
 const ocrInstance = optional["FUMI_ATTACHMENT_OCR_INSTANCE"];
@@ -51,7 +53,10 @@ export default defineConfig({
         name: "fumi-catalog",
         ...(catalogId ? { id: catalogId } : {}),
       }),
-      FORWARD_TO: bindings.secret(),
+      INGRESS_MODE: bindings.text(ingress),
+      // Forwarding retirement requires an explicit build choice. The archive-only
+      // build has no forwarding credential requirement.
+      ...(ingress === "forward" ? { FORWARD_TO: bindings.secret() } : {}),
       EMAIL: bindings.sendEmail(),
       ACCESS_ISSUER: bindings.secret(),
       ACCESS_AUDIENCE: bindings.secret(),

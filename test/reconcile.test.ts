@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { commitPage, readCheckpoint } from "../src/catalog.ts";
 import { MAX_RECEIPT_BYTES, reconcileArchive } from "../src/reconcile.ts";
 import type { SourceObservation } from "../src/catalog.ts";
-import type { ArchiveReceipt } from "../src/receipt-schema.ts";
+import { canonicalReceipt, parseReceipt, type ArchiveReceipt } from "../src/receipt-schema.ts";
 
 const day = "2026-11-08";
 const receivedAt = `${day}T00:00:00.000Z`;
@@ -18,7 +18,7 @@ function prefix(number: number): string {
   return `ingest/${day}/${id(number)}`;
 }
 
-async function putRaw(number: number): Promise<string> {
+async function putRaw(number: number, standalone = false): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const sha256 = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -32,6 +32,7 @@ async function putRaw(number: number): Promise<string> {
       envelopeFrom: "sender@example.invalid",
       envelopeTo: "recipient@example.invalid",
       sha256,
+      ...(standalone ? { ingressMode: "archive-only", eventNotifications: "0" } : {}),
     },
   });
   return sha256;
@@ -61,6 +62,7 @@ interface SourceRow {
   receipt_state: string;
   forward_status: string | null;
   receipt_snapshot: string | null;
+  notify_events: number;
   raw_sha256: string | null;
 }
 
@@ -92,10 +94,139 @@ beforeEach(async () => {
   await env.MAIL_CATALOG.batch([
     env.MAIL_CATALOG.prepare("DELETE FROM archive_sources"),
     env.MAIL_CATALOG.prepare("DELETE FROM archive_issues"),
+    env.MAIL_CATALOG.prepare("DELETE FROM mail_events"),
     env.MAIL_CATALOG.prepare(
       "UPDATE archive_scan SET cursor = NULL, revision = 0, pass = 0 WHERE id = 1",
     ),
   ]);
+});
+
+describe("standalone archive evidence", () => {
+  it("reconciles v1 and v2 together and preserves canonical skipped forwarding", async () => {
+    await putPair(1);
+    const original = receipt(2, await putRaw(2, true));
+    const standalone: ArchiveReceipt = {
+      ...original,
+      schemaVersion: 2,
+      forward: { status: "skipped", reason: "archive_only" },
+    };
+    await env.MAIL_ARCHIVE.put(`${prefix(2)}/receipt.json`, JSON.stringify(standalone));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    const rows = await sources();
+    expect(rows.map((row) => row.forward_status)).toEqual(["forwarded", "skipped"]);
+    expect(rows[1]).toMatchObject({
+      raw_state: "present",
+      receipt_state: "valid",
+      receipt_snapshot: canonicalReceipt(standalone),
+      notify_events: 1,
+    });
+    expect(await issueCodes()).toEqual([]);
+    expect(parseReceipt({ ...standalone, schemaVersion: 1 })).toBeNull();
+    expect(parseReceipt({ ...original, schemaVersion: 2 })).toBeNull();
+    expect(
+      parseReceipt({ ...standalone, forward: { status: "skipped", reason: "user_header" } }),
+    ).toBeNull();
+  });
+
+  it("keeps a rejected standalone capture as missing rather than recovered or forwarded", async () => {
+    const snapshot: ArchiveReceipt = {
+      ...receipt(1, "a".repeat(64)),
+      schemaVersion: 2,
+      archive: { status: "failed", code: "raw_write_failed" },
+      forward: { status: "skipped", reason: "archive_only" },
+    };
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(snapshot));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({
+      raw_state: "missing",
+      receipt_state: "valid",
+      forward_status: "skipped",
+    });
+    expect((await env.MAIL_ARCHIVE.list()).objects).toHaveLength(1);
+    // A timed-out write may commit after rejection. Keep both facts instead of
+    // silently turning the retained failure into confirmed capture or forwarding.
+    await putRaw(1, true);
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({
+      raw_state: "present",
+      forward_status: "skipped",
+      receipt_snapshot: canonicalReceipt(snapshot),
+      notify_events: 0,
+    });
+    expect(await issueCodes()).toContain("evidence_mismatch");
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM mail_events WHERE name='email.received'",
+      ).first("n"),
+    ).toBe(0);
+  });
+
+  it("holds standalone actions while raw is visible before its matching receipt", async () => {
+    const sha256 = await putRaw(1, true);
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({
+      raw_state: "present",
+      receipt_state: "missing",
+      notify_events: 0,
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM mail_events WHERE name='email.received'",
+      ).first("n"),
+    ).toBe(0);
+    const snapshot: ArchiveReceipt = {
+      ...receipt(1, sha256),
+      schemaVersion: 2,
+      forward: { status: "skipped", reason: "archive_only" },
+    };
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(snapshot));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({ notify_events: 1, forward_status: "skipped" });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM mail_events WHERE name='email.received'",
+      ).first("n"),
+    ).toBe(1);
+  });
+
+  it("does not release standalone actions when receipt and raw provenance disagree", async () => {
+    const snapshot: ArchiveReceipt = {
+      ...receipt(1, await putRaw(1, true)),
+      schemaVersion: 2,
+      forward: { status: "skipped", reason: "archive_only" },
+    };
+    snapshot.envelope.to = "mismatch@example.invalid";
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(snapshot));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({ notify_events: 0, forward_status: "skipped" });
+    expect(await issueCodes()).toContain("evidence_mismatch");
+  });
+
+  it("does not override a retained standalone failure when a conflicting success receipt appears", async () => {
+    const success: ArchiveReceipt = {
+      ...receipt(1, await putRaw(1, true)),
+      schemaVersion: 2,
+      forward: { status: "skipped", reason: "archive_only" },
+    };
+    const failure: ArchiveReceipt = {
+      ...success,
+      archive: { status: "failed", code: "raw_write_failed" },
+    };
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(failure));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(success));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({
+      notify_events: 0,
+      receipt_snapshot: canonicalReceipt(failure),
+    });
+    expect(await issueCodes()).toContain("receipt_conflict");
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM mail_events WHERE name='email.received'",
+      ).first("n"),
+    ).toBe(0);
+  });
 });
 
 afterEach(() => {
@@ -175,7 +306,7 @@ describe("bounded R2 catalog reconciliation in workerd", () => {
     await env.MAIL_ARCHIVE.put("ingest/not-an-ingest/private", "unexpected");
     await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, "not json");
     await env.MAIL_ARCHIVE.put(`${prefix(2)}/receipt.json`, "x".repeat(MAX_RECEIPT_BYTES + 1));
-    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 2 }));
+    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 3 }));
     const crossKey = receipt(4, "0".repeat(64));
     crossKey.archive = {
       status: "stored",
