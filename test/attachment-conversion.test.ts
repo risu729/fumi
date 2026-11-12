@@ -65,7 +65,9 @@ async function source(
 const runtime = (
   extra: Partial<AttachmentConversionEnvironment> = {},
 ): AttachmentConversionEnvironment => ({
-  ...env,
+  // Provider capabilities belong to each fixture, independently of deployment build flags.
+  MAIL_ARCHIVE: env.MAIL_ARCHIVE,
+  MAIL_CATALOG: env.MAIL_CATALOG,
   ATTACHMENT_CONVERSION_CONFIG: JSON.stringify(policy),
   ...extra,
 });
