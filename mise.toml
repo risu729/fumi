@@ -44,14 +44,29 @@ run = "tsc --noEmit"
 
 [tasks.types]
 description = "Generate binding and runtime types from native Cloudflare configuration."
+depends = ["build:attachment-parser"]
 run = "cf workers types"
+
+[tasks."build:attachment-parser"]
+description = "Bundle the pinned PDF parser for an isolated, network-disabled Dynamic Worker."
+sources = ["bun.lock", "mise.toml", "src/attachment-conversion-pdf-worker.ts"]
+outputs = [".cloudflare/attachment-parser.js"]
+run = "bun build src/attachment-conversion-pdf-worker.ts --target browser --external cloudflare:workers --drop console --minify --outfile .cloudflare/attachment-parser.js"
+
+[tasks."build:attachment-fixtures"]
+description = "Generate bounded synthetic encrypted PDF fixtures with ephemeral test keys."
+sources = ["bun.lock", "test/fixtures/generate-encrypted-pdf.mjs"]
+outputs = [".cloudflare/attachment-fixture.json"]
+run = "node test/fixtures/generate-encrypted-pdf.mjs"
 
 [tasks.build]
 description = "Build the Worker using the pinned Cloudflare toolchain."
+depends = ["build:attachment-parser"]
 run = "cf build --mode production"
 
 [tasks.test]
 description = "Run synthetic Email/R2/D1 tests inside the local Workers runtime."
+depends = ["build:attachment-parser", "build:attachment-fixtures"]
 run = "vitest run"
 
 [tasks."check:output"]
@@ -61,7 +76,7 @@ run = "cf workers versions create --prebuilt --mode production --worker fumi --d
 
 [tasks."test:artifact"]
 description = "Run native synthetic Email/Cron events against the built bundle and local R2/D1."
-depends = ["build"]
+depends = ["build", "build:attachment-fixtures"]
 run = "node test/artifact.mjs"
 
 [tasks."deploy:bootstrap"]

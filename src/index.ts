@@ -7,7 +7,12 @@ import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.t
 import { deliverEvents } from "./event-delivery.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { repairContentSearch } from "./content-search.ts";
+import { repairAttachmentConversions } from "./attachment-conversion.ts";
+import { resolveAttachmentPasswords } from "./attachment-passwords.ts";
 import { repairRoutingShadow } from "./routing-shadow-runtime.ts";
+import { repairRoutingDispatch } from "./routing-dispatch.ts";
+import { routingRuntime } from "./routing-runtime.ts";
+import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
@@ -143,10 +148,27 @@ export default {
       failed = true;
     }
     try {
+      const conversions = await repairAttachmentConversions({
+        ...env,
+        resolveAttachmentPasswords: (input) => resolveAttachmentPasswords(env, input),
+      });
+      console.log(JSON.stringify({ event: "attachment_conversion_repair", ...conversions }));
+    } catch {
+      console.error(JSON.stringify({ event: "attachment_conversion_repair", status: "deferred" }));
+      failed = true;
+    }
+    try {
       const search = await repairContentSearch(env);
       console.log(JSON.stringify({ event: "content_search_repair", ...search }));
     } catch {
       console.error(JSON.stringify({ event: "content_search_repair", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const corpus = await repairManagedMailCorpus(env);
+      console.log(JSON.stringify({ event: "managed_mail_corpus", ...corpus }));
+    } catch {
+      console.error(JSON.stringify({ event: "managed_mail_corpus", status: "deferred" }));
       failed = true;
     }
     try {
@@ -163,6 +185,14 @@ export default {
       }
     } catch {
       console.error(JSON.stringify({ event: "routing_shadow", status: "unavailable" }));
+      failed = true;
+    }
+    try {
+      const routing = await repairRoutingDispatch(env, routingRuntime(env));
+      if (["invalid_config", "stale", "draining"].includes(routing.status)) failed = true;
+      console.log(JSON.stringify({ event: "routing_dispatch", ...routing }));
+    } catch {
+      console.error(JSON.stringify({ event: "routing_dispatch", status: "deferred" }));
       failed = true;
     }
     try {

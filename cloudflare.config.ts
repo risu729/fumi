@@ -6,6 +6,15 @@ import { compatibilityDate } from "./worker-runtime.ts";
 const catalogId = loadEnv("production", ".", "FUMI_CATALOG_DATABASE_ID")[
   "FUMI_CATALOG_DATABASE_ID"
 ];
+const optional = loadEnv("production", ".", "FUMI_");
+const pdfParser = optional["FUMI_PDF_PARSER_ENABLED"] === "1";
+const documents = optional["FUMI_DOCUMENT_CONVERSION_ENABLED"] === "1";
+const ocrInstance = optional["FUMI_ATTACHMENT_OCR_INSTANCE"];
+const searchInstance = optional["FUMI_MANAGED_SEARCH_INSTANCE"];
+for (const name of [ocrInstance, searchInstance]) {
+  if (name && !/^[a-z0-9_]+(?:-[a-z0-9_]+)*$/.test(name))
+    throw new Error("Invalid managed search instance name");
+}
 
 export default defineConfig({
   worker: {
@@ -21,6 +30,12 @@ export default defineConfig({
       }),
     },
     env: {
+      ...(pdfParser ? { PDF_LOADER: bindings.workerLoader() } : {}),
+      ...(documents ? { AI: bindings.ai() } : {}),
+      ...(ocrInstance ? { ATTACHMENT_OCR: bindings.aiSearch({ name: ocrInstance }) } : {}),
+      ...(searchInstance
+        ? { MANAGED_MAIL_SEARCH: bindings.aiSearch({ name: searchInstance }) }
+        : {}),
       MAIL_ARCHIVE: bindings.r2({ name: "fumi-mail" }),
       MAIL_CATALOG: bindings.d1({
         name: "fumi-catalog",

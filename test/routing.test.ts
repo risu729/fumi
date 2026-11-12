@@ -73,6 +73,53 @@ async function adopted(
 }
 
 describe("bounded shadow CEL routing in workerd", () => {
+  it("supports explicit generic review categories and urgency without changing legacy defaults", async () => {
+    const legacy = await compileShadowRouter(JSON.stringify(baseConfig), []);
+    expect(legacy.evaluate(mail, "live").fallback).toEqual({
+      outcome: "review",
+      ruleId: "synthetic-review",
+    });
+    const router = await compileShadowRouter(
+      JSON.stringify({
+        ...baseConfig,
+        rules: [{ ...baseConfig.rules[0], category: "security", urgent: true }],
+      }),
+      [],
+    );
+    expect(router.evaluate(mail, "live").fallback).toEqual({
+      outcome: "review",
+      ruleId: "synthetic-review",
+      category: "security",
+      urgent: true,
+    });
+  });
+  it.each([
+    { outcome: "ignore", category: "action_required" },
+    { outcome: "unresolved", urgent: true },
+    { outcome: "ignore", urgent: false },
+  ])("rejects notification category/urgency on non-review rules %#", async (overrides) => {
+    await expect(
+      compileShadowRouter(
+        JSON.stringify({ ...baseConfig, rules: [{ ...baseConfig.rules[0], ...overrides }] }),
+        [],
+      ),
+    ).rejects.toThrow();
+  });
+  it.each([
+    { category: "https://notification.example.com/offer" },
+    { category: "a".repeat(65) },
+    { target: "desk" },
+  ])(
+    "rejects destinations and legacy bot targets as classification evidence %#",
+    async (overrides) => {
+      await expect(
+        compileShadowRouter(
+          JSON.stringify({ ...baseConfig, rules: [{ ...baseConfig.rules[0], ...overrides }] }),
+          [],
+        ),
+      ).rejects.toThrow();
+    },
+  );
   it.each([
     'subject == "お支払い確認 12345"',
     'subject != "unrelated" && hasAttachments == true',

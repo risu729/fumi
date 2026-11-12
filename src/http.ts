@@ -1,8 +1,10 @@
 import { apiOrigin, authenticate, HttpError } from "./auth.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { handleMailResource, handleMcp } from "./mcp.ts";
-import { MailReadError } from "./mail-read.ts";
+import { MailReadError, readAttachmentConversion } from "./mail-read.ts";
 import { gmailImportRuntime, handleGmailImport } from "./gmail-import-http.ts";
+import { handleRoutingAdmin } from "./routing-admin-http.ts";
+import { handleArchiveRepair } from "./archive-repair-http.ts";
 
 function secured(response: Response): Response {
   const result = new Response(response.body, response);
@@ -15,7 +17,15 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
   try {
     const url = new URL(request.url);
     const gmailImport = url.pathname.startsWith("/api/admin/gmail-import/");
-    if (url.pathname !== "/mcp" && !url.pathname.startsWith("/api/mail/") && !gmailImport)
+    const routingAdmin = url.pathname.startsWith("/api/admin/routing/");
+    const archiveRepair = url.pathname === "/api/admin/archive/repair";
+    if (
+      url.pathname !== "/mcp" &&
+      !url.pathname.startsWith("/api/mail/") &&
+      !gmailImport &&
+      !routingAdmin &&
+      !archiveRepair
+    )
       throw new HttpError(404, "not_found");
     const origin = apiOrigin(env);
     if (
@@ -24,6 +34,8 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
     )
       throw new HttpError(403, "origin_not_allowed");
     const principal = await authenticate(request, env);
+    if (archiveRepair) return secured(await handleArchiveRepair(request, env, principal));
+    if (routingAdmin) return secured(await handleRoutingAdmin(request, env, principal));
     if (gmailImport) {
       if (!principal.scopes.includes("mail:import")) throw new HttpError(403, "forbidden");
       return secured(await handleGmailImport(request, env, principal, gmailImportRuntime(env)));
@@ -36,6 +48,24 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
       );
     }
     if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
+    const conversion =
+      /^\/api\/mail\/([^/]+)\/conversions\/(part_\d+)\/([a-f0-9]{64})(?:\/members\/([0-7])\/([a-f0-9]{64}))?$/.exec(
+        url.pathname,
+      );
+    if (conversion)
+      return secured(
+        await readAttachmentConversion(
+          request,
+          env,
+          principal,
+          conversion[1]!,
+          conversion[2]!,
+          conversion[3]!,
+          conversion[4] === undefined
+            ? undefined
+            : { index: Number(conversion[4]), sha: conversion[5]! },
+        ),
+      );
     const match = /^\/api\/mail\/([^/]+)\/(raw|body|text|attachments\/([^/]+))$/.exec(url.pathname);
     if (!match) throw new HttpError(404, "not_found");
     return secured(

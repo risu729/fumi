@@ -1,4 +1,5 @@
 import { hasScope, type MailPrincipal } from "./principal.ts";
+import { readVerified } from "./attachment-conversion-io.ts";
 
 export interface MailReadEnvironment {
   MAIL_CATALOG: D1Database;
@@ -143,8 +144,20 @@ export async function readMail(
     sha256: a.sha256,
     read_attachment_supported: true,
   }));
+  const conversionRows = await attachmentConversionCoverage(env, row.raw_key, id, base);
+  const attachmentsWithCoverage = attachments.map((a) => ({
+    ...a,
+    conversion: conversionRows.find((c) => c.attachment_id === a.attachment_id) ?? {
+      state: "not_enabled_or_pending",
+    },
+  }));
   if (row.status !== "complete" || !row.body_json_key)
-    return { ...data, attachments, content: null, content_truncated: false };
+    return {
+      ...data,
+      attachments: attachmentsWithCoverage,
+      content: null,
+      content_truncated: false,
+    };
   const object = await env.MAIL_ARCHIVE.get(row.body_json_key);
   if (!object) throw new MailReadError("content_unavailable");
   if (object.size > 8 * 1024 * 1024) {
@@ -159,7 +172,7 @@ export async function readMail(
   const truncated = (body.text?.length ?? 0) > LIMIT || (body.html?.length ?? 0) > LIMIT;
   return {
     ...data,
-    attachments,
+    attachments: attachmentsWithCoverage,
     content,
     content_truncated: truncated,
     ...(truncated ? { extraction_file_uri: resourceUri(base, id, "body") } : {}),
@@ -183,6 +196,9 @@ export async function readMailAttachment(
   if (matches.length !== 1)
     throw new MailReadError(matches.length ? "ambiguous_filename" : "attachment_not_found");
   const item = matches[0]!;
+  const conversion = (
+    await attachmentConversionCoverage(env, row.raw_key, args.message_id, base)
+  ).find((c) => c.attachment_id === `part_${item.index}`) ?? { state: "not_enabled_or_pending" };
   return {
     message_id: args.message_id,
     attachment_id: `part_${item.index}`,
@@ -192,7 +208,132 @@ export async function readMailAttachment(
     sha256: item.sha256,
     file_uri: resourceUri(base, args.message_id, `attachments/part_${item.index}`),
     content_truncated: false,
+    conversion,
   };
+}
+
+async function attachmentConversionCoverage(
+  env: MailReadEnvironment,
+  rawKey: string,
+  id: string,
+  base: string,
+) {
+  const rows = (
+    await env.MAIL_CATALOG.prepare(
+      `SELECT a.part_index,a.state,a.failure_code,a.representation,a.result_sha256,a.result_size,a.provenance_json FROM attachment_conversions a JOIN mail_extractions e ON e.raw_key=a.raw_key AND e.manifest_key=a.manifest_key AND e.status='complete' WHERE a.raw_key=? ORDER BY a.part_index`,
+    )
+      .bind(rawKey)
+      .all<{
+        part_index: number;
+        state: string;
+        failure_code: string | null;
+        representation: string | null;
+        result_sha256: string | null;
+        result_size: number | null;
+        provenance_json: string | null;
+      }>()
+  ).results;
+  return rows.map((row) => ({
+    attachment_id: `part_${row.part_index}`,
+    state: row.state,
+    failure_code: row.failure_code,
+    representation: row.representation,
+    ...(row.state === "complete"
+      ? {
+          sha256: row.result_sha256,
+          size: row.result_size,
+          file_uri: resourceUri(
+            base,
+            id,
+            `conversions/part_${row.part_index}/${row.result_sha256}`,
+          ),
+          members: conversionMembers(row.provenance_json).map((member) => ({
+            index: member.index,
+            filename: member.filename ?? null,
+            sha256: member.sha256,
+            size: member.size,
+            status: member.status,
+            file_uri: resourceUri(
+              base,
+              id,
+              `conversions/part_${row.part_index}/${row.result_sha256}/members/${member.index}/${member.sha256}`,
+            ),
+          })),
+        }
+      : {}),
+  }));
+}
+interface ConversionMember {
+  index: number;
+  filename?: string;
+  key: string;
+  sha256: string;
+  size: number;
+  status: string;
+}
+function conversionMembers(json: string | null): ConversionMember[] {
+  return json ? ((JSON.parse(json) as { members?: ConversionMember[] }).members ?? []) : [];
+}
+
+export async function readAttachmentConversion(
+  request: Request,
+  env: MailReadEnvironment,
+  principal: MailPrincipal,
+  id: string,
+  part: string,
+  sha: string,
+  member?: { index: number; sha: string },
+) {
+  requireRead(principal);
+  if (request.method !== "GET") throw new MailReadError("method_not_allowed");
+  if (!/^part_(?:[0-9]|[12][0-9]|3[01])$/.test(part) || !/^[a-f0-9]{64}$/.test(sha))
+    throw new MailReadError("content_unavailable");
+  const source = await mailRow(env, id);
+  const row = await env.MAIL_CATALOG.prepare(
+    `SELECT a.result_key,a.result_size,a.source_sha256,a.provenance_json FROM attachment_conversions a JOIN mail_extractions e ON e.raw_key=a.raw_key AND e.manifest_key=a.manifest_key AND e.status='complete' WHERE a.raw_key=? AND a.part_index=? AND a.state='complete' AND a.result_sha256=?`,
+  )
+    .bind(source.raw_key, Number(part.slice(5)), sha)
+    .first<{
+      result_key: string;
+      result_size: number;
+      source_sha256: string;
+      provenance_json: string;
+    }>();
+  const original = (JSON.parse(source.attachments_json ?? "[]") as Attachment[]).find(
+    (a) => `part_${a.index}` === part,
+  );
+  if (!row || !original || original.sha256 !== row.source_sha256)
+    throw new MailReadError("content_unavailable");
+  const selected = member
+    ? conversionMembers(row.provenance_json).find(
+        (entry) => entry.index === member.index && entry.sha256 === member.sha,
+      )
+    : { key: row.result_key, sha256: sha, size: row.result_size };
+  if (!selected) throw new MailReadError("content_unavailable");
+  let bytes;
+  try {
+    bytes = await readVerified(
+      env.MAIL_ARCHIVE,
+      selected.key,
+      selected.sha256,
+      2 * 1024 * 1024,
+      selected.size,
+    );
+  } catch {
+    throw new MailReadError("content_unavailable");
+  }
+  return new Response(bytes, {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": "attachment",
+      "Content-Length": String(bytes.length),
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "X-Fumi-Representation": "derived",
+      "X-Fumi-Original-SHA256": original.sha256,
+    },
+  });
 }
 
 export async function readMailResource(

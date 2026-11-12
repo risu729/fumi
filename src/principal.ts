@@ -12,6 +12,7 @@ export const MAIL_SCOPES = [
   "mail:send",
   "mail:events",
   "mail:import",
+  "mail:routing",
 ] as const;
 
 export function hasScope(principal: MailPrincipal, scope: string): boolean {

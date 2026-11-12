@@ -1,7 +1,7 @@
 import { MailReadError, parseMailSearch, type MailReadEnvironment } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 
-const VERSION = "text-v1";
+const VERSION = "text-v2";
 const CHUNK = 3500;
 const OVERLAP = 200;
 interface Extraction {
@@ -23,6 +23,19 @@ interface Chunk {
   ordinal: number;
   text: string;
   sha256: string;
+  original_sha256?: string;
+  representation?: string;
+  source_part?: string;
+}
+interface Conversion {
+  part_index: number;
+  state: string;
+  failure_code: string | null;
+  result_key: string | null;
+  result_sha256: string | null;
+  source_sha256: string;
+  representation: string | null;
+  policy_hash: string;
 }
 class UnsupportedEncoding extends Error {}
 
@@ -69,10 +82,59 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
     if (text.length > 100_000) omitted.push("body_truncated");
   } else if (source.body_html_key) omitted.push("html_only_body");
   const attachments = JSON.parse(source.attachments_json) as Part[];
+  const conversions = (
+    await env.MAIL_CATALOG.prepare(
+      "SELECT part_index,state,failure_code,result_key,result_sha256,source_sha256,representation,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index",
+    )
+      .bind(source.raw_key, source.manifest_key)
+      .all<Conversion>()
+  ).results;
+  const conversionSnapshot = JSON.stringify(
+    conversions.map((c) => [c.part_index, c.state, c.result_sha256, c.policy_hash]),
+  );
   let selected = 0;
+  let derivedSelected = 0;
+  let derivedCharacters = 0;
   for (const part of attachments) {
     if (part.mimeType !== "text/plain") {
-      omitted.push(`part_${part.index}:unsupported_format`);
+      const converted = conversions.find(
+        (c) => c.part_index === part.index && c.source_sha256 === part.sha256,
+      );
+      if (converted?.state === "complete" && converted.result_key && converted.result_sha256) {
+        if (
+          ["local_zip_manifest", "local_decrypted_pdf"].includes(converted.representation ?? "")
+        ) {
+          omitted.push(`part_${part.index}:derivative_available_without_searchable_text`);
+          continue;
+        }
+        if (derivedSelected >= 4 || derivedCharacters >= 64000) {
+          omitted.push(`part_${part.index}:derivative_search_count_or_character_limit`);
+          continue;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- At most four immutable, bounded derivative objects per message.
+        const text = await verifiedText(
+          env.MAIL_ARCHIVE,
+          converted.result_key,
+          converted.result_sha256,
+          256 * 1024,
+        );
+        const projected = text.slice(0, 64000 - derivedCharacters);
+        entries.push(
+          ...chunks(projected, `converted_${part.index}`, converted.result_sha256).map((chunk) => ({
+            ...chunk,
+            original_sha256: part.sha256,
+            representation: converted.representation ?? "derived_text",
+            source_part: `part_${part.index}`,
+          })),
+        );
+        derivedSelected++;
+        derivedCharacters += projected.length;
+        if (projected.length < text.length)
+          omitted.push(`part_${part.index}:derivative_search_truncated`);
+      } else
+        omitted.push(
+          `part_${part.index}:${converted?.failure_code ?? converted?.state ?? "conversion_not_enabled_or_pending"}`,
+        );
       continue;
     }
     if (part.size > 64 * 1024 || selected >= 8) {
@@ -93,9 +155,25 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
     if (text.length > 16_000) omitted.push(`part_${part.index}:truncated`);
   }
   const db = env.MAIL_CATALOG.withSession("first-primary");
-  const guard = `EXISTS (SELECT 1 FROM mail_extractions WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete' AND manifest_key=?)`;
-  const guardValues = [source.raw_key, source.manifest_key];
-  const coverage = JSON.stringify({ version: VERSION, omitted, chunks: entries.length });
+  const guard = `EXISTS (SELECT 1 FROM mail_extractions WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete' AND manifest_key=?) AND (SELECT json_group_array(json_array(part_index,state,result_sha256,policy_hash)) FROM (SELECT part_index,state,result_sha256,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index))=?`;
+  const guardValues = [
+    source.raw_key,
+    source.manifest_key,
+    source.raw_key,
+    source.manifest_key,
+    conversionSnapshot,
+  ];
+  const coverage = JSON.stringify({
+    version: VERSION,
+    omitted,
+    chunks: entries.length,
+    conversions: conversions.map((c) => ({
+      part: `part_${c.part_index}`,
+      state: c.state,
+      failure_code: c.failure_code,
+      representation: c.representation,
+    })),
+  });
   // Every mutation uses the same extraction fence. D1 batches commit atomically.
   await db.batch([
     db
@@ -104,9 +182,19 @@ export async function indexMailContent(env: MailReadEnvironment, source: Extract
     ...entries.map((entry) =>
       db
         .prepare(
-          `INSERT INTO mail_search_chunks(raw_key,part,ordinal,text,sha256) SELECT ?,?,?,?,? WHERE ${guard}`,
+          `INSERT INTO mail_search_chunks(raw_key,part,ordinal,text,sha256,original_sha256,representation,source_part) SELECT ?,?,?,?,?,?,?,? WHERE ${guard}`,
         )
-        .bind(source.raw_key, entry.part, entry.ordinal, entry.text, entry.sha256, ...guardValues),
+        .bind(
+          source.raw_key,
+          entry.part,
+          entry.ordinal,
+          entry.text,
+          entry.sha256,
+          entry.original_sha256 ?? entry.sha256,
+          entry.representation ?? "original_text",
+          entry.source_part ?? entry.part,
+          ...guardValues,
+        ),
     ),
     db
       .prepare(`INSERT INTO mail_search_documents(raw_key,manifest_key,status,coverage_json,next_attempt_at) SELECT ?,?,'ready',?,0 WHERE ${guard}
@@ -194,7 +282,7 @@ export async function searchMailContent(
     }
   }
   const rows = (
-    await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,
+    await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,c.original_sha256,c.representation,c.source_part,
     snippet(mail_search_fts,0,'','','…',48) AS excerpt,d.coverage_json
     FROM mail_search_fts JOIN mail_search_chunks c ON c.id=mail_search_fts.rowid
     JOIN mail_search_documents d ON d.raw_key=c.raw_key AND d.status='ready'
@@ -209,6 +297,9 @@ export async function searchMailContent(
         part: string;
         ordinal: number;
         sha256: string;
+        original_sha256: string | null;
+        representation: string | null;
+        source_part: string | null;
         text: string;
         excerpt: string;
         coverage_json: string;
@@ -228,8 +319,14 @@ export async function searchMailContent(
         part: row.part,
         chunk: row.ordinal,
         sha256: row.sha256,
+        representation: row.representation ?? "original_text",
+        original_sha256: row.original_sha256 ?? row.sha256,
+        original_file_uri: new URL(
+          `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part === "body" ? "text" : `attachments/${row.source_part ?? row.part}`}`,
+          base,
+        ).href,
         file_uri: new URL(
-          `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part === "body" ? "text" : `attachments/${row.part}`}`,
+          `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part.startsWith("converted_") ? `conversions/${row.source_part}/${row.sha256}` : row.part === "body" ? "text" : `attachments/${row.part}`}`,
           base,
         ).href,
       },
@@ -246,7 +343,7 @@ export async function searchMailContent(
     coverage: {
       version: VERSION,
       ...coverage,
-      searches: "bounded_plain_text_and_utf8_text_attachments",
+      searches: "bounded_plain_text_utf8_attachments_and_completed_derivatives",
       pending_and_unsupported_content_excluded: true,
       semantic_search: false,
     },

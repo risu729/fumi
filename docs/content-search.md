@@ -5,6 +5,9 @@ including authenticated source downloads and citation SHA-256 comparisons. Priva
 acceptance evidence is retained outside this repository. New environments require
 the additive `0007_content_search.sql` migration and a reviewed Worker deployment.
 No embedding service, model call or new Cloudflare resource is required.
+An optional [attachment conversion](attachment-conversion.md) pipeline now adds
+completed managed document/OCR text and verified local ZIP text. Its separate
+private activation can use paid services; the lexical baseline remains local.
 
 `search_mail_content` requires `mail:read` and returns matching chunks with the
 Fumi message ID, an untrusted excerpt and an authenticated source citation. The
@@ -32,8 +35,12 @@ of up to eight UTF-8 `text/plain` attachments, each at most 64 KiB. Chunks conta
 chunk boundaries. One source can produce multiple hits. Results are ordered by
 index entry, not relevance, with at most 50 chunks per page.
 
-HTML-only bodies, PDF/office/image OCR, encrypted files and non-UTF-8 attachments
-are not searched. Per-message coverage lists unsupported or truncated content.
+Completed searchable conversion derivatives add at most four attachments and
+64,000 characters per message. Derived citations expose both derivative and
+original hashes/URLs, with the representation explicitly labeled. Decrypted PDF
+binaries, ZIP extraction manifests, HTML-only bodies and non-UTF-8 text are not
+silently treated as text. Unsupported, pending or blocked conversion is excluded.
+Per-message coverage lists conversion state and omitted or truncated content.
 Aggregate coverage reports indexed versus extracted messages; pending/blocked
 MIME extraction is excluded from this denominator. A zero-hit search is not proof
 that a phrase is absent from every original or attachment. Metadata search and
@@ -47,7 +54,8 @@ content, paths or exception details are emitted in scheduled logs.
 ## Consistency and recovery
 
 D1 atomically replaces one message's chunks and coverage under an extraction
-manifest fence. Extraction removal or manifest replacement removes its old
+manifest and conversion-state snapshot fence. Conversion changes invalidate its
+projection. Extraction removal or manifest replacement removes its old
 projection through triggers. Stale workers cannot publish against an invalidated
 manifest. Index rows use monotonic IDs; continuation tokens bind the query and
 filters and move backwards through those IDs. New or rebuilt entries do not

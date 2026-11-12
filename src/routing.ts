@@ -18,6 +18,10 @@ type Field = v.InferOutput<typeof fieldSchema>;
 const idSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,63}$/));
 const versionSchema = v.pipe(v.string(), v.regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/));
 const fieldsSchema = v.pipe(v.array(fieldSchema), v.maxLength(4));
+const offerFieldsSchema = v.pipe(
+  v.array(v.picklist(["subject", "from", "to", "hasAttachments", "envelope", "text"])),
+  v.maxLength(6),
+);
 const prioritySchema = v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(1000));
 const matchSchema = v.pipe(v.string(), v.maxLength(ROUTING_LIMITS.expressionBytes));
 const outcomeSchema = v.picklist(["review", "ignore", "unresolved"]);
@@ -29,6 +33,7 @@ const manifestSchema = v.strictObject({
   protocol: v.literal("fumi-offer-v1"),
   mode: v.picklist(["exclusive", "observer"]),
   inputFields: fieldsSchema,
+  offerInputFields: v.optional(offerFieldsSchema),
   capabilities: v.tuple([v.literal("offer")]),
   match: matchSchema,
 });
@@ -40,6 +45,7 @@ const adoptionSchema = v.strictObject({
   enabled: v.boolean(),
   priority: prioritySchema,
   inputFields: fieldsSchema,
+  offerInputFields: v.optional(offerFieldsSchema),
   capabilities: v.tuple([v.literal("offer")]),
   handlerRef: idSchema,
   timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(5000)),
@@ -50,6 +56,8 @@ const ruleSchema = v.strictObject({
   priority: prioritySchema,
   match: matchSchema,
   outcome: outcomeSchema,
+  category: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_-]{0,63}$/))),
+  urgent: v.optional(v.boolean()),
 });
 const configSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -246,7 +254,12 @@ export interface ShadowDecision {
   dispatchAllowed: false;
   status: "shadow" | "historical_suppressed" | "invalid_metadata" | "evaluation_error";
   candidates: ShadowCandidate[];
-  fallback: { outcome: Outcome; ruleId: string | null };
+  fallback: {
+    outcome: Outcome;
+    ruleId: string | null;
+    category?: string;
+    urgent?: boolean;
+  };
 }
 
 export interface ShadowRouter {
@@ -313,6 +326,12 @@ export async function compileShadowRouter(
         throw new RoutingConfigError();
       const manifest = bundle.manifest;
       unique(manifest.inputFields);
+      const requestedOffer = manifest.offerInputFields ?? manifest.inputFields;
+      const grantedOffer = adoption.offerInputFields ?? adoption.inputFields;
+      unique(requestedOffer);
+      unique(grantedOffer);
+      if (requestedOffer.some((field) => !grantedOffer.some((allowed) => allowed === field)))
+        throw new RoutingConfigError();
       if (manifest.inputFields.some((field) => !adoption.inputFields.includes(field)))
         throw new RoutingConfigError();
       plugins.push({
@@ -328,6 +347,13 @@ export async function compileShadowRouter(
       });
     }
     plugins.sort(order);
+    if (
+      config.rules.some(
+        (rule) =>
+          rule.outcome !== "review" && (rule.category !== undefined || rule.urgent !== undefined),
+      )
+    )
+      throw new RoutingConfigError();
     const rules = config.rules
       .map((rule) => ({
         ...rule,
@@ -365,7 +391,13 @@ export async function compileShadowRouter(
             .filter((plugin) => plugin.matches(parsed.output))
             .map((plugin) => ({ ...plugin.candidate }));
           const rule = rules.find((item) => item.matches(parsed.output));
-          if (rule) decision.fallback = { outcome: rule.outcome, ruleId: rule.id };
+          if (rule)
+            decision.fallback = {
+              outcome: rule.outcome,
+              ruleId: rule.id,
+              ...(rule.category !== undefined ? { category: rule.category } : {}),
+              ...(rule.urgent !== undefined ? { urgent: rule.urgent } : {}),
+            };
           return decision;
         } catch {
           return { ...decision, status: "evaluation_error", candidates: [] };

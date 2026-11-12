@@ -26,6 +26,10 @@ jobs:
     environment: production
     env:
       FUMI_CATALOG_DATABASE_ID: ${{ vars.FUMI_CATALOG_DATABASE_ID }}
+      FUMI_PDF_PARSER_ENABLED: ${{ vars.FUMI_PDF_PARSER_ENABLED }}
+      FUMI_DOCUMENT_CONVERSION_ENABLED: ${{ vars.FUMI_DOCUMENT_CONVERSION_ENABLED }}
+      FUMI_ATTACHMENT_OCR_INSTANCE: ${{ vars.FUMI_ATTACHMENT_OCR_INSTANCE }}
+      FUMI_MANAGED_SEARCH_INSTANCE: ${{ vars.FUMI_MANAGED_SEARCH_INSTANCE }}
     steps:
       - name: Checkout the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
