@@ -1,5 +1,6 @@
 import * as v from "valibot";
 import { MailReadError, type MailReadEnvironment } from "./mail-read.ts";
+import { archiveCandidate } from "./archive-key.ts";
 
 export interface ManagedMailBinding {
   info(): Promise<unknown>;
@@ -29,6 +30,22 @@ const configurationSchema = v.strictObject({
   maxUploads: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(10000)),
   maxQueries: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(10000)),
   hybrid: v.boolean(),
+  sourceRawKeys: v.optional(
+    v.pipe(
+      v.array(
+        v.pipe(
+          v.string(),
+          v.check((key) => {
+            const candidate = archiveCandidate(key);
+            return candidate !== null && key === `${candidate.prefix}/raw.eml`;
+          }),
+        ),
+      ),
+      v.minLength(1),
+      v.maxLength(10),
+      v.check((keys) => new Set(keys).size === keys.length),
+    ),
+  ),
 });
 export class ManagedSearchError extends MailReadError {}
 export const BODY_LIMIT = 1024 * 1024;
@@ -43,6 +60,8 @@ export async function managedMailRuntime(env: ManagedMailEnvironment) {
     if (input && typeof input === "object" && "enabled" in input && input.enabled === false)
       return null;
     const config = v.parse(configurationSchema, input);
+    // A source set has no ordering semantics; reordering it must not reset budgets.
+    config.sourceRawKeys?.sort();
     if (!env.MANAGED_MAIL_SEARCH) return null;
     const policy = await hexDigest(new TextEncoder().encode(JSON.stringify(config)));
     return { config, policy, binding: env.MANAGED_MAIL_SEARCH };
@@ -51,6 +70,14 @@ export async function managedMailRuntime(env: ManagedMailEnvironment) {
   }
 }
 export type ManagedMailRuntime = NonNullable<Awaited<ReturnType<typeof managedMailRuntime>>>;
+export function managedSourceScope(runtime: ManagedMailRuntime, column = "raw_key") {
+  return runtime.config.sourceRawKeys
+    ? {
+        sql: `${column} IN (${runtime.config.sourceRawKeys.map(() => "?").join(",")})`,
+        values: runtime.config.sourceRawKeys,
+      }
+    : { sql: "1", values: [] };
+}
 export const record = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new ManagedSearchError("invalid_search_provider_response");

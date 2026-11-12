@@ -11,6 +11,13 @@ Implementation and synthetic tests do not establish a production corpus, search
 quality, account configuration or paid processing. No resources or credentials are
 created by this code.
 
+A bounded production body-source sample on 2026-11-12 verified that lexical,
+semantic and hybrid retrieval returned the same historical source. Authenticated
+text/raw downloads matched their SHA-256 citations, provider excerpts were
+supported by verified local text, and raw provenance matched. The two managed
+queries used no rewriting or answer generation. This is source/citation
+acceptance, not exhaustive search-quality evaluation or complete archive coverage.
+
 ## Activation and scope
 
 Apply migration `0013_managed_mail_search.sql`. An administrator must separately
@@ -28,6 +35,32 @@ finite upload/query caps (1–10,000 each), and the hybrid flag. The binding's `
 must match the configured ID and report vector indexing; hybrid retrieval also
 requires keyword indexing. The application never changes instance configuration.
 Bindings and configuration are operator capabilities, never mail/MCP arguments.
+
+The optional private `sourceRawKeys` field restricts discovery, uploads, polling
+and returned evidence to one through ten distinct exact canonical originals:
+`ingest/YYYY-MM-DD/<UUID-v4>/raw.eml`. Receipt keys, prefixes, invalid dates,
+duplicates, URLs and empty lists are rejected. Both live and imported originals
+use this layout. Select keys from trusted catalog observations; message content,
+provider results and MCP requests cannot choose them. An absent field retains
+archive-wide discovery; a finite call cap alone does not restrict sources.
+
+Filtering happens before discovery's three-source limit and throughout lease,
+reservation and publication guards. Body text and up to four already completed
+attachment text/OCR conversions for each selected original remain eligible. This
+does not enable attachment conversion, bypass current MIME/part provenance, or
+upload raw attachments. Search also filters provider candidates and coverage
+counts to the current source set before reading/returning local text, and reports
+`source_scope: administrator_allowlist` without exposing the configured keys.
+
+Source keys are sorted before policy hashing: reordering the same set does not
+create new reservations, and configurations without the field retain their old
+hash semantics. Adding, removing or changing the source set deliberately creates
+a new policy and finite upload/query budgets. That can upload the selected bytes
+again under the new policy, so retain the previous configuration and review costs
+before changing it. Previous upload/query reservations and unknown outcomes remain
+in the durable call ledger. Targeting does not clear an old unknown receipt,
+automatically bump a revision, or automatically retry its upload. The existing
+per-policy reservation caps and two-part processing bound remain unchanged.
 
 Mount `repairManagedMailCorpus(env)` after MIME extraction repair in the scheduled
 handler. It discovers at most three current bodies and processes at most two
