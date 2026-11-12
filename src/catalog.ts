@@ -83,6 +83,7 @@ export async function commitSource(
     checkpoint.cursor,
     false,
     instanceId,
+    observation.rawKey,
   );
 }
 
@@ -96,14 +97,29 @@ async function commitObservations(
   nextCursor: string | null,
   completedPass: boolean,
   instanceId?: string,
+  sourceRawKey?: string,
 ): Promise<PageCommit> {
   const attemptFence =
     instanceId === undefined
       ? ""
       : " AND EXISTS (SELECT 1 FROM processing_jobs WHERE instance_id = ? AND state = 'running')";
-  const fence = `EXISTS (SELECT 1 FROM archive_scan WHERE id = 1 AND revision = ?)${attemptFence}`;
-  const fenceArgs =
-    instanceId === undefined ? [checkpoint.revision] : [checkpoint.revision, instanceId];
+  // Every committed observation is stamped with the scan revision BEFORE its
+  // atomic increment. Thus committed source revisions are strictly below the
+  // current scan revision. A source at the current revision is our own upsert
+  // inside this batch, not a competing commit; it must keep later Gmail/event
+  // statements eligible. Same-key observations since our read are rejected.
+  const observationFence =
+    sourceRawKey === undefined
+      ? "EXISTS (SELECT 1 FROM archive_scan WHERE id = 1 AND revision = ?)"
+      : `EXISTS (SELECT 1 FROM archive_scan c WHERE c.id = 1 AND c.revision >= ?
+        AND NOT EXISTS (SELECT 1 FROM archive_sources s WHERE s.raw_key = ?
+          AND s.observed_revision >= ? AND s.observed_revision != c.revision))`;
+  const fence = `${observationFence}${attemptFence}`;
+  const fenceArgs: (string | number)[] =
+    sourceRawKey === undefined
+      ? [checkpoint.revision]
+      : [checkpoint.revision, sourceRawKey, checkpoint.revision];
+  if (instanceId !== undefined) fenceArgs.push(instanceId);
   const statements: D1PreparedStatement[] = [];
   const sourceStatements: number[] = [];
   const issueStatements: number[] = [];
@@ -158,7 +174,7 @@ async function commitObservations(
              source_kind, source_namespace, external_id, raw_key, receipt_key,
              received_at, receipt_snapshot, forward_status, raw_state,
              receipt_state, raw_size, raw_sha256, observed_pass, observed_revision, notify_events
-           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${sourceRawKey === undefined ? "?" : "(SELECT revision FROM archive_scan WHERE id = 1)"}, ?
              WHERE ${fence}
            ON CONFLICT (source_kind, source_namespace, external_id) DO UPDATE SET
              received_at = CASE WHEN archive_sources.receipt_snapshot IS NULL
@@ -189,7 +205,7 @@ async function commitObservations(
           observation.rawSize,
           observation.rawSha256,
           checkpoint.pass,
-          checkpoint.revision,
+          ...(sourceRawKey === undefined ? [checkpoint.revision] : []),
           observation.notifyEvents ? 1 : 0,
           ...fenceArgs,
         ),
@@ -249,12 +265,18 @@ async function commitObservations(
     );
   }
   statements.push(
-    db
-      .prepare(
-        `UPDATE archive_scan SET cursor = ?, revision = revision + 1,
+    sourceRawKey === undefined
+      ? db
+          .prepare(
+            `UPDATE archive_scan SET cursor = ?, revision = revision + 1,
          pass = pass + ? WHERE id = 1 AND revision = ?${attemptFence}`,
-      )
-      .bind(nextCursor, completedPass ? 1 : 0, ...fenceArgs),
+          )
+          .bind(nextCursor, completedPass ? 1 : 0, ...fenceArgs)
+      : // Never restore a captured cursor/pass after an unrelated page advances it.
+        // Incrementing the current revision still invalidates every older page read.
+        db
+          .prepare(`UPDATE archive_scan SET revision = revision + 1 WHERE id = 1 AND ${fence}`)
+          .bind(...fenceArgs),
   );
   const results = await db.batch(statements);
   const committed = results.at(-1)?.meta.changes === 1;
