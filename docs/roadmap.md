@@ -182,14 +182,19 @@ historical SENT messages. Future fumi sends stay in fumi's own sent archive.
 
 - [ ] Verify historical import completeness and fumi's independent receive/store,
       retrieval/MCP, routing/notification and send/reply paths.
-- [ ] Define and test durable capture, failure reporting and retry/recovery behavior
-      without a Gmail copy. R2/D1 reconciliation cannot recreate an original that
-      was never stored; do not assume SMTP retries after an invocation failure.
+- [x] Implement and synthetically test optional standalone capture, explicit
+      rejection when raw storage is unconfirmed, bounded writes, v2 receipts and
+      catalog/processing recovery. See [standalone ingress](standalone-ingress.md).
+      R2/D1 reconciliation cannot recreate an original that was never stored;
+      permanent SMTP rejection does not request automatic retries.
+- [ ] Verify standalone failure handling and alert response in production before
+      retiring the Gmail copy; synthetic tests do not establish SMTP behavior.
 - [ ] Disable Gmail forwarding in fumi and adopted specialist routes through a
       separately authorized cutover; remove forwarding-only configuration when
       no longer needed and verify mail handling without Gmail delivery.
 
-This is a future runtime and routing change. Current forwarding remains enabled;
+The optional runtime is implemented; production cutover remains separate.
+Current forwarding remains enabled;
 the low-priority web client is not a prerequisite for retirement.
 
 ## Phase 3: encrypted attachments

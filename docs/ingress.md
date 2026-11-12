@@ -1,9 +1,10 @@
-# Initial email capture
+# Email capture
 
-This slice preserves Gmail forwarding and stores private original MIME in R2.
-It does not parse mail, extract attachments, run CEL or models, dispatch plugins,
-backfill Gmail, or send new mail. Encrypted attachments remain in their original
-MIME representation. Revisit CEL before implementing routing.
+The default receive mode preserves Gmail forwarding and stores private original
+MIME in R2. Downstream processing handles parsing, extraction, indexing and
+routing independently. The optional [standalone mode](standalone-ingress.md)
+requires confirmed raw storage and skips forwarding; production activation is
+separate. Encrypted attachments remain intact in their original MIME.
 
 Gmail forwarding is temporary. The
 [roadmap](roadmap.md#phase-2d-retire-gmail-forwarding) includes its retirement after
@@ -31,8 +32,9 @@ schema version and hash for recovery if the receipt write fails. The original an
 receipt are separate R2 writes. A stored original with a missing receipt is an orphan to
 reconcile, not proof that forwarding failed. A receipt with a missing original is an
 archive gap. R2 outage and invocation termination can prevent both records. Payload-free
-logs can identify failed attempts but cannot reconstruct missing MIME bytes. The future
-capture/recovery design must work without Gmail before forwarding is retired. The
+logs can identify failed attempts but cannot reconstruct missing MIME bytes. The
+standalone mode rejects unconfirmed raw storage; its live failure behavior must
+be accepted before forwarding is retired. The
 separate [catalog reconciler](archive-catalog.md) can repair D1 metadata from remaining
 R2 evidence. The new [Workflows stage](processing-workflows.md) also indexes immediately
 and repairs missing starts; production activation was verified on 2026-11-10.
@@ -132,8 +134,9 @@ current email handler. Archive before handing off; distinguish `handled`,
 through normal action routing; timeouts must not silently duplicate actions or lose
 mail. Revisit the CEL evaluator before implementing this routing layer. Test
 pending-request matches, non-matches, retries and ambiguous outcomes before
-migrating a specialist route. The current handler always forwards to Gmail and
-does not yet implement this protocol or the future webhook pipeline.
+migrating a specialist route. The default handler continues forwarding to Gmail;
+the implemented owner/dispatch protocol and current acceptance are described in
+[plugins](plugins.md) and [routing dispatch](routing-dispatch.md).
 
 ## Staged production acceptance: 2026-11-07
 

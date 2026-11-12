@@ -114,7 +114,10 @@ export async function getMailHealth(
         ["archive_sources"],
         `${catalogWindow}, evidence AS (
         SELECT *,CASE WHEN receipt_snapshot IS NOT NULL AND length(receipt_snapshot)<=65536 AND json_valid(receipt_snapshot)
-        THEN CASE WHEN json_extract(receipt_snapshot,'$.schemaVersion')=1
+        THEN CASE WHEN (
+          (json_extract(receipt_snapshot,'$.schemaVersion')=1 AND forward_status IN ('forwarded','failed'))
+          OR (json_extract(receipt_snapshot,'$.schemaVersion')=2 AND forward_status='skipped'
+            AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only'))
           AND json_extract(receipt_snapshot,'$.ingestId')=external_id
           AND json_extract(receipt_snapshot,'$.archive.status') IN ('stored','failed')
           AND json_extract(receipt_snapshot,'$.forward.status')=forward_status THEN 1 ELSE 0 END ELSE 0 END AS known_receipt FROM sample)
@@ -123,6 +126,7 @@ export async function getMailHealth(
         COALESCE(SUM(known_receipt),0) AS known_ingress_snapshots,
         COALESCE(SUM(CASE WHEN known_receipt THEN json_extract(receipt_snapshot,'$.archive.status')='failed' ELSE 0 END),0) AS receipt_archive_failures,
         COALESCE(SUM(CASE WHEN known_receipt THEN forward_status='failed' ELSE 0 END),0) AS receipt_forward_failures,
+        COALESCE(SUM(CASE WHEN known_receipt THEN forward_status='skipped' ELSE 0 END),0) AS receipt_forward_skipped,
         COALESCE(SUM(source_kind='email_routing' AND known_receipt=0),0) AS ingress_snapshot_unknown,
         COALESCE(SUM(receipt_state='missing'),0) AS current_receipt_missing,
         COALESCE(SUM(receipt_state='invalid'),0) AS current_receipt_invalid,
@@ -134,6 +138,7 @@ export async function getMailHealth(
           "known_ingress_snapshots",
           "receipt_archive_failures",
           "receipt_forward_failures",
+          "receipt_forward_skipped",
           "ingress_snapshot_unknown",
           "current_receipt_missing",
           "current_receipt_invalid",

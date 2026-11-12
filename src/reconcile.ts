@@ -109,7 +109,8 @@ async function readReceipt(bucket: R2Bucket, candidate: Candidate): Promise<Rece
     typeof value === "object" &&
     value !== null &&
     "schemaVersion" in value &&
-    value.schemaVersion !== 1
+    value.schemaVersion !== 1 &&
+    value.schemaVersion !== 2
   ) {
     return { state: "invalid", code: "unsupported_receipt" };
   }
@@ -202,7 +203,7 @@ async function observe(
   if (receipt?.archive.status === "stored" && !raw) {
     issues.push({ key: rawKey, code: "missing_raw" });
   }
-  if (
+  const evidenceMismatch = Boolean(
     receipt &&
     evidence &&
     (receipt.archive.status !== "stored" ||
@@ -210,10 +211,20 @@ async function observe(
       receipt.archive.sha256 !== evidence.sha256 ||
       receipt.receivedAt !== evidence.receivedAt ||
       receipt.envelope.from !== evidence.from ||
-      receipt.envelope.to !== evidence.to)
-  ) {
+      receipt.envelope.to !== evidence.to),
+  );
+  if (evidenceMismatch) {
     issues.push({ key: receiptKey, code: "evidence_mismatch" });
   }
+  const standalone = raw?.customMetadata?.["ingressMode"] === "archive-only";
+  // Standalone originals may become visible before their write returns or even
+  // after SMTP rejection. Only matching confirmed capture evidence releases
+  // lifecycle events and owner/generic actions. Orphans remain readable but held.
+  const notifyEvents =
+    evidence !== null &&
+    (standalone
+      ? receipt?.schemaVersion === 2 && receipt.archive.status === "stored" && !evidenceMismatch
+      : receipt?.schemaVersion !== 2 && raw?.customMetadata?.["eventNotifications"] === "1");
   return {
     observation: {
       ingestId: candidate.ingestId,
@@ -226,7 +237,7 @@ async function observe(
       receiptState: receiptRead.state,
       rawSize: evidence?.size ?? null,
       rawSha256: evidence?.sha256 ?? null,
-      notifyEvents: evidence !== null && raw?.customMetadata?.["eventNotifications"] === "1",
+      notifyEvents,
     },
     issues,
   };
