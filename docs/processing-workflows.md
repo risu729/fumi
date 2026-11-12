@@ -88,14 +88,34 @@ investigation. No automatic alert delivery is implemented yet.
 
 ## Operator retry
 
-The internal `retryFailedProcessing` primitive requires a failed ledger row, the
-expected attempt, and a confirmed `errored` or `terminated` Workflow. A conditional
-update advances the attempt once and gives it a new instance ID. Unknown or
-expired instances fail closed; investigate their original outcomes. No public
-retry endpoint or CLI is added here. Direct dashboard restart is unsupported:
-it bypasses the attempt ledger. Resolve the cause and invoke an authorized
-operator integration when one is implemented. Do not reset terminal ledger rows
-or restore an old ledger backup against live instances without reconciliation.
+An authenticated operator with `mail:import` can request a retry of one existing
+canonical source through `POST /api/admin/archive/retry/mail_<uuid>`. Send an
+explicit `Origin` equal to the configured API origin, `Content-Type:
+application/json`, and the strict body `{"expectedAttempt":0}` using the verified
+current failed attempt. No query parameters, extra properties, raw object keys,
+bulk selection or pipeline override are accepted. The JSON is limited to 128
+bytes with a one-second read deadline; authorization precedes body reads.
+
+The route calls `retryFailedProcessing`, which requires a failed `mime-v1` ledger
+row, the expected attempt, and a confirmed `errored` or `terminated` Workflow. A
+conditional update advances the attempt once and gives it a new instance ID.
+Concurrent requests and replays of the old expected attempt cannot create another
+retry. Pending, running, complete, stale-attempt and unresolved-status cases remain
+held. Historical source provenance and notification suppression are unchanged.
+
+A `202` response with `{"status":"accepted","attempt":1}` acknowledges the durable
+new attempt, not Workflow execution, MIME completion or search availability. An
+unavailable start remains pending for bounded scheduled repair. A `409
+retry_conflict` means the requested transition was not accepted; `503
+processing_retry_unavailable` leaves the request outcome unresolved. A lost or
+unavailable response can follow a committed transition: inspect the authenticated
+message extraction view and authorized processing evidence before choosing a new
+expected attempt; never increment it blindly. Unknown or expired Workflow status
+fails closed and requires investigation.
+
+Resolve the failure cause before requesting a retry. Direct dashboard restart is
+unsupported because it bypasses the attempt ledger. Do not reset terminal ledger
+rows or restore an old ledger backup against live instances without reconciliation.
 
 ## Production rollout
 

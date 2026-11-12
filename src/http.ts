@@ -6,6 +6,7 @@ import { gmailImportRuntime, handleGmailImport } from "./gmail-import-http.ts";
 import { CONNECTOR_STAGE_PATH, handleConnectorStage } from "./gmail-connector-stage.ts";
 import { handleRoutingAdmin } from "./routing-admin-http.ts";
 import { handleArchiveRepair } from "./archive-repair-http.ts";
+import { handleProcessingRetry } from "./processing-retry-http.ts";
 
 function secured(response: Response): Response {
   const result = new Response(response.body, response);
@@ -20,12 +21,14 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
     const gmailImport = url.pathname.startsWith("/api/admin/gmail-import/");
     const routingAdmin = url.pathname.startsWith("/api/admin/routing/");
     const archiveRepair = url.pathname === "/api/admin/archive/repair";
+    const processingRetry = url.pathname.startsWith("/api/admin/archive/retry/");
     if (
       url.pathname !== "/mcp" &&
       !url.pathname.startsWith("/api/mail/") &&
       !gmailImport &&
       !routingAdmin &&
-      !archiveRepair
+      !archiveRepair &&
+      !processingRetry
     )
       throw new HttpError(404, "not_found");
     const origin = apiOrigin(env);
@@ -35,6 +38,7 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
     )
       throw new HttpError(403, "origin_not_allowed");
     const principal = await authenticate(request, env);
+    if (processingRetry) return secured(await handleProcessingRetry(request, env, principal));
     if (archiveRepair) return secured(await handleArchiveRepair(request, env, principal));
     if (routingAdmin) return secured(await handleRoutingAdmin(request, env, principal));
     if (gmailImport) {
