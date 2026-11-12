@@ -4,7 +4,7 @@ min_version = "2026.11.3"
 
 [tools]
 bun = "1.4.4"
-node = "26.13.0"
+node = "26.13.1"
 hk = "2.12.0"
 "npm:oxlint" = "1.93.0"
 oxfmt = "0.75.0"
