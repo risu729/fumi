@@ -29,7 +29,7 @@ export interface SourceObservation {
   receiptKey: string;
   receivedAt: string | null;
   snapshot: string | null;
-  forward: "forwarded" | "failed" | null;
+  forward: "forwarded" | "failed" | "skipped" | null;
   rawState: "present" | "missing" | "invalid";
   receiptState: "valid" | "missing" | "invalid";
   rawSize: number | null;
@@ -186,7 +186,11 @@ async function commitObservations(
              receipt_state = excluded.receipt_state,
              raw_size = excluded.raw_size,
              raw_sha256 = excluded.raw_sha256,
-             notify_events = MAX(archive_sources.notify_events, excluded.notify_events),
+             notify_events = MAX(archive_sources.notify_events,
+               CASE WHEN archive_sources.receipt_snapshot IS NULL
+                 OR excluded.receipt_snapshot IS NULL
+                 OR archive_sources.receipt_snapshot = excluded.receipt_snapshot
+               THEN excluded.notify_events ELSE 0 END),
              observed_pass = excluded.observed_pass,
              observed_revision = excluded.observed_revision
            WHERE archive_sources.raw_key = excluded.raw_key`,

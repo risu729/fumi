@@ -6,7 +6,8 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
-import { CAPTURE_TIMEOUT_MS, MAX_RAW_BYTES } from "../src/limits.ts";
+import { CAPTURE_TIMEOUT_MS, MAX_RAW_BYTES, ARCHIVE_WRITE_TIMEOUT_MS } from "../src/limits.ts";
+import { parseReceipt } from "../src/receipt-schema.ts";
 import type { Receipt } from "../src/index.ts";
 
 const mime = new TextEncoder().encode(
@@ -95,6 +96,102 @@ afterEach(() => {
 });
 
 describe("archive and forward ingress in workerd", () => {
+  it("archives without a forwarding destination only in explicit archive-only mode", async () => {
+    const incoming = message();
+    const bindings: Env = { ...env, INGRESS_MODE: "archive-only" };
+    delete bindings.FORWARD_TO;
+    await run(incoming, bindings);
+    expect(incoming.forward).not.toHaveBeenCalled();
+    expect(incoming.setReject).not.toHaveBeenCalled();
+    const receipt = (await receipts())[0]!;
+    expect(receipt).toMatchObject({
+      schemaVersion: 2,
+      archive: { status: "stored" },
+      forward: { status: "skipped", reason: "archive_only" },
+    });
+    expect(parseReceipt(receipt)).toEqual(receipt);
+    if (receipt.archive.status !== "stored") throw new Error("Missing synthetic raw");
+    const raw = await env.MAIL_ARCHIVE.get(receipt.archive.key);
+    expect(raw?.customMetadata).toMatchObject({
+      ingressMode: "archive-only",
+      eventNotifications: "0",
+    });
+    expect(new Uint8Array(await raw!.arrayBuffer())).toEqual(mime);
+  });
+
+  it("rejects missing original bytes even when all R2 writes fail and keeps diagnostics private", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(env.MAIL_ARCHIVE, "put").mockRejectedValue(new Error("private storage diagnostic"));
+    const incoming = message();
+    await run(incoming, { ...env, INGRESS_MODE: "archive-only" });
+    expect(incoming.setReject).toHaveBeenCalledExactlyOnceWith("Message could not be stored");
+    expect(incoming.forward).not.toHaveBeenCalled();
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      archive: "failed",
+      forward: "skipped",
+      receipt: "failed",
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private storage|example.invalid|gmail.com/);
+  });
+
+  it("keeps a stored original accepted when its receipt write fails", async () => {
+    const put = env.MAIL_ARCHIVE.put.bind(env.MAIL_ARCHIVE);
+    vi.spyOn(env.MAIL_ARCHIVE, "put").mockImplementation((key, value, options) =>
+      key.endsWith("/receipt.json")
+        ? Promise.reject(new Error("synthetic outage"))
+        : put(key, value, options),
+    );
+    const incoming = message();
+    await run(incoming, { ...env, INGRESS_MODE: "archive-only" });
+    expect(incoming.setReject).not.toHaveBeenCalled();
+    expect(incoming.forward).not.toHaveBeenCalled();
+    expect((await objects()).map((object) => object.key)).toHaveLength(1);
+  });
+
+  it.each(["raw.eml", "receipt.json"])(
+    "bounds a stalled %s write without claiming it did not commit",
+    async (suffix) => {
+      vi.useFakeTimers();
+      const put = env.MAIL_ARCHIVE.put.bind(env.MAIL_ARCHIVE);
+      vi.spyOn(env.MAIL_ARCHIVE, "put").mockImplementation((key, value, options) =>
+        key.endsWith(suffix) ? new Promise(() => undefined) : put(key, value, options),
+      );
+      const incoming = message();
+      const completed = run(incoming, { ...env, INGRESS_MODE: "archive-only" });
+      await vi.advanceTimersByTimeAsync(CAPTURE_TIMEOUT_MS + ARCHIVE_WRITE_TIMEOUT_MS * 2 + 1);
+      await completed;
+      expect(incoming.setReject).toHaveBeenCalledTimes(suffix === "raw.eml" ? 1 : 0);
+      expect(incoming.forward).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([Number.NaN, -1, MAX_RAW_BYTES + 1, mime.byteLength - 1, mime.byteLength + 1])(
+    "rejects an unarchivable size %s without forwarding",
+    async (size) => {
+      const incoming = message(mime, size);
+      await run(incoming, { ...env, INGRESS_MODE: "archive-only" });
+      expect(incoming.setReject).toHaveBeenCalledWith("Message could not be stored");
+      expect(incoming.forward).not.toHaveBeenCalled();
+      expect((await receipts())[0]?.archive.status).toBe("failed");
+    },
+  );
+
+  it("ignores mail-controlled ingress mode headers", async () => {
+    const incoming = message();
+    incoming.headers.set("FUMI_INGRESS_MODE", "archive-only");
+    await run(incoming);
+    expect(incoming.forward).toHaveBeenCalledOnce();
+    expect((await receipts())[0]?.schemaVersion).toBe(1);
+  });
+
+  it("rejects invalid runtime mode instead of silently accepting or forwarding", async () => {
+    const incoming = message();
+    // @ts-expect-error Exercise a malformed deployed binding rather than trusted build output.
+    await run(incoming, { ...env, INGRESS_MODE: "disabled" });
+    expect(incoming.setReject).toHaveBeenCalledWith("Mail receiver configuration is invalid");
+    expect(incoming.forward).not.toHaveBeenCalled();
+    expect(await objects()).toEqual([]);
+  });
   it("keeps catalog failures out of delivery and redacts scheduled failure diagnostics", async () => {
     const database = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation(() => {
       throw new Error("private database diagnostic with recipient and key");
@@ -144,6 +241,7 @@ describe("archive and forward ingress in workerd", () => {
       ingestId: receipt.ingestId,
       sha256: receipt.archive.sha256,
     });
+    expect(raw!.customMetadata).not.toHaveProperty("ingressMode");
     expect(incoming.forward).toHaveBeenCalledExactlyOnceWith(env.FORWARD_TO, expect.any(Headers));
     expect(incoming.forward.mock.calls[0]?.[1]?.get("X-Fumi-Ingest-ID")).toBe(receipt.ingestId);
   });
@@ -184,6 +282,34 @@ describe("archive and forward ingress in workerd", () => {
     expect(raw?.customMetadata?.["envelopeTo"]).toBe(incoming.to);
     expect(incoming.forward).toHaveBeenCalledOnce();
   });
+
+  it.each(["raw.eml", "receipt.json"])(
+    "keeps awaiting a slow %s write past the standalone deadline in forwarding mode",
+    async (suffix) => {
+      vi.useFakeTimers();
+      const put = env.MAIL_ARCHIVE.put.bind(env.MAIL_ARCHIVE);
+      vi.spyOn(env.MAIL_ARCHIVE, "put").mockImplementation(async (key, value, options) => {
+        if (key.endsWith(suffix)) {
+          await new Promise((resolve) => setTimeout(resolve, ARCHIVE_WRITE_TIMEOUT_MS * 2));
+        }
+        return put(key, value, options);
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const incoming = message();
+      const completed = run(incoming);
+      await vi.advanceTimersByTimeAsync(ARCHIVE_WRITE_TIMEOUT_MS * 2 + 1);
+      await completed;
+      // The ingest outcome must not report an abandoned archive write.
+      expect(errors.mock.calls.flat().filter((line) => String(line).includes('"ingest"'))).toEqual(
+        [],
+      );
+      const stored = await receipts();
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.archive.status).toBe("stored");
+      expect(incoming.setReject).not.toHaveBeenCalled();
+      expect(incoming.forward).toHaveBeenCalledOnce();
+    },
+  );
 
   it("surfaces forwarding failure after preserving the raw mail and failed outcome", async () => {
     const incoming = message();
@@ -295,7 +421,7 @@ describe("archive and forward ingress in workerd", () => {
 
   it("rejects forwarding directly to the envelope recipient", async () => {
     const incoming = message();
-    incoming.to = env.FORWARD_TO.toUpperCase();
+    incoming.to = env.FORWARD_TO!.toUpperCase();
     await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
     expect(incoming.forward).not.toHaveBeenCalled();
   });

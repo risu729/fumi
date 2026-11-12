@@ -13,7 +13,9 @@ matches its saved hash. A later bounded archive reconciliation can change these
 observations. The report never claims a live bucket inventory or a complete archive.
 
 Retained validated ingress snapshots report known archive-capture and Gmail
-forwarding failures separately. A failure remains known when a later scan finds
+forwarding failures separately. V2 standalone receipts count intentional forwarding
+omission as `receipt_forward_skipped`; it is neither successful forwarding nor a
+forwarding failure. A failure remains known when a later scan finds
 the receipt object missing. Missing, malformed or absent snapshots are unknown;
 they do not prove successful capture or forwarding. Gmail imports have no SMTP
 forwarding receipt and are not counted as failed ingress snapshots. Recipient

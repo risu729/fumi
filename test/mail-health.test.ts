@@ -56,6 +56,30 @@ beforeEach(async () => {
 });
 
 describe("bounded read-only archival health evidence", () => {
+  it("counts v2 skipped forwarding separately from failures and unknown snapshots", async () => {
+    await source(
+      "standalone",
+      "missing",
+      JSON.stringify({
+        ...JSON.parse(failedReceipt("standalone")),
+        schemaVersion: 2,
+        forward: { status: "skipped", reason: "archive_only" },
+      }),
+    );
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET forward_status='skipped' WHERE external_id='standalone'",
+    ).run();
+    const result = await getMailHealth(env, reader, now);
+    expect(counts(result.sections.catalog)).toMatchObject({
+      known_ingress_snapshots: 1,
+      receipt_forward_skipped: 1,
+      receipt_forward_failures: 0,
+      receipt_archive_failures: 1,
+      ingress_snapshot_unknown: 0,
+      missing: 1,
+    });
+    expect(result.archive_completeness).toBe("unknown");
+  });
   it("requires mail:read before inspecting catalog state", async () => {
     const prepare = vi.fn();
     await expect(

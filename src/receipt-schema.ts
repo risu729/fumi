@@ -23,22 +23,33 @@ const archive = v.variant("status", [
   }),
 ]);
 
-export const receiptSchema = v.strictObject({
-  schemaVersion: v.literal(1),
+const common = {
   ingestId: v.string(),
   receivedAt: v.string(),
   envelope: v.strictObject({ from: v.string(), to: v.string() }),
   // Failed captures preserve negative and oversized declarations in v1.
   reportedRawSize: v.nullable(safeInteger),
   archive,
-  forward: v.variant("status", [
-    v.strictObject({ status: v.literal("forwarded") }),
-    v.strictObject({
-      status: v.literal("failed"),
-      code: v.picklist(["invalid_target", "forward_failed"]),
-    }),
-  ]),
-});
+};
+
+export const receiptSchema = v.variant("schemaVersion", [
+  v.strictObject({
+    schemaVersion: v.literal(1),
+    ...common,
+    forward: v.variant("status", [
+      v.strictObject({ status: v.literal("forwarded") }),
+      v.strictObject({
+        status: v.literal("failed"),
+        code: v.picklist(["invalid_target", "forward_failed"]),
+      }),
+    ]),
+  }),
+  v.strictObject({
+    schemaVersion: v.literal(2),
+    ...common,
+    forward: v.strictObject({ status: v.literal("skipped"), reason: v.literal("archive_only") }),
+  }),
+]);
 
 export type ArchiveReceipt = v.InferOutput<typeof receiptSchema>;
 
@@ -65,8 +76,10 @@ export function canonicalReceipt(receipt: ArchiveReceipt): string {
           }
         : { status: "failed", code: receipt.archive.code },
     forward:
-      receipt.forward.status === "forwarded"
-        ? { status: "forwarded" }
-        : { status: "failed", code: receipt.forward.code },
+      receipt.forward.status === "failed"
+        ? { status: "failed", code: receipt.forward.code }
+        : receipt.forward.status === "skipped"
+          ? { status: "skipped", reason: "archive_only" }
+          : { status: "forwarded" },
   });
 }

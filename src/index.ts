@@ -1,5 +1,6 @@
 // Mail content cannot choose actions; HTTP tools require server-resolved grants.
-import { MAX_RAW_BYTES, CAPTURE_TIMEOUT_MS } from "./limits.ts";
+import { MAX_RAW_BYTES, CAPTURE_TIMEOUT_MS, ARCHIVE_WRITE_TIMEOUT_MS } from "./limits.ts";
+import { ingressMode } from "../ingress-options.ts";
 import { reconcileArchive } from "./reconcile.ts";
 import { repairProcessing, requestProcessing } from "./processing-jobs.ts";
 import { handleHttp } from "./http.ts";
@@ -21,6 +22,27 @@ export type Receipt = ArchiveReceipt;
 type ArchiveOutcome = Receipt["archive"];
 type ArchiveFailure = Extract<ArchiveOutcome, { status: "failed" }>["code"];
 type ForwardOutcome = Receipt["forward"];
+
+// Standalone mode must decide acceptance before the email event ends, so it
+// bounds R2 writes. Forwarding mode keeps awaiting the write as before: a slow
+// write there still captures the original instead of being abandoned.
+async function boundedWrite<T>(write: () => Promise<T>, bounded: boolean): Promise<T> {
+  if (!bounded) return write();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      write(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Archive write deadline")),
+          ARCHIVE_WRITE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 class CaptureError extends Error {
   readonly code: ArchiveFailure;
@@ -70,6 +92,7 @@ async function archiveRaw(
   bucket: R2Bucket,
   key: string,
   metadata: Record<string, string>,
+  bounded: boolean,
 ): Promise<ArchiveOutcome> {
   let bytes: Uint8Array<ArrayBuffer>;
   try {
@@ -83,11 +106,16 @@ async function archiveRaw(
       byte.toString(16).padStart(2, "0"),
     ).join("");
     // Typed-array uploads have a fixed known length. R2 validates this checksum.
-    await bucket.put(key, bytes, {
-      sha256: digest,
-      httpMetadata: { contentType: "message/rfc822" },
-      customMetadata: { ...metadata, sha256 },
-    });
+    const stored = await boundedWrite(
+      () =>
+        bucket.put(key, bytes, {
+          sha256: digest,
+          httpMetadata: { contentType: "message/rfc822" },
+          customMetadata: { ...metadata, sha256 },
+        }),
+      bounded,
+    );
+    if (!stored) return { status: "failed", code: "raw_write_failed" };
     return { status: "stored", key, size: bytes.byteLength, sha256 };
   } catch {
     return { status: "failed", code: "raw_write_failed" };
@@ -96,12 +124,13 @@ async function archiveRaw(
 
 async function forward(
   message: ForwardableEmailMessage,
-  target: string,
+  target: string | undefined,
   ingestId: string,
-): Promise<ForwardOutcome> {
+): Promise<Exclude<ForwardOutcome, { status: "skipped" }>> {
   // A single private, verified Gmail destination is the only first-phase route.
   // Incoming X-Fumi-Ingest-ID values never control forwarding.
   if (
+    !target ||
     !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(gmail\.com|googlemail\.com)$/i.test(target) ||
     target.toLowerCase() === message.to.toLowerCase()
   ) {
@@ -205,35 +234,63 @@ export default {
     if (failed) throw new Error("Archive reconciliation did not complete");
   },
   async email(message, env, ctx): Promise<void> {
+    let mode: ReturnType<typeof ingressMode>;
+    try {
+      mode = ingressMode(env.INGRESS_MODE);
+    } catch {
+      console.error(JSON.stringify({ event: "ingest", status: "invalid_config" }));
+      message.setReject("Mail receiver configuration is invalid");
+      return;
+    }
     const ingestId = crypto.randomUUID();
     const receivedAt = new Date().toISOString();
     const prefix = `ingest/${receivedAt.slice(0, 10)}/${ingestId}`;
     // Neither outcome gates the other. Both stay in the email event's awaited lifetime.
     const [archive, forwarding] = await Promise.all([
-      archiveRaw(message, env.MAIL_ARCHIVE, `${prefix}/raw.eml`, {
-        schemaVersion: "1",
-        eventNotifications: "1",
-        ingestId,
-        receivedAt,
-        envelopeFrom: message.from,
-        envelopeTo: message.to,
-      }),
-      forward(message, env.FORWARD_TO, ingestId),
+      archiveRaw(
+        message,
+        env.MAIL_ARCHIVE,
+        `${prefix}/raw.eml`,
+        {
+          schemaVersion: "1",
+          // A late raw write is not acceptance in standalone mode. The matching
+          // successful receipt must authorize events/actions during reconciliation.
+          eventNotifications: mode === "forward" ? "1" : "0",
+          ...(mode === "archive-only" ? { ingressMode: mode } : {}),
+          ingestId,
+          receivedAt,
+          envelopeFrom: message.from,
+          envelopeTo: message.to,
+        },
+        mode === "archive-only",
+      ),
+      mode === "forward" ? forward(message, env.FORWARD_TO, ingestId) : undefined,
     ]);
     const receipt: Receipt = {
-      schemaVersion: 1,
       ingestId,
       receivedAt,
       envelope: { from: message.from, to: message.to },
       reportedRawSize: Number.isSafeInteger(message.rawSize) ? message.rawSize : null,
       archive,
-      forward: forwarding,
+      ...(forwarding
+        ? ({ schemaVersion: 1, forward: forwarding } as const)
+        : ({ schemaVersion: 2, forward: { status: "skipped", reason: "archive_only" } } as const)),
     };
+    // setReject is permanent, not a request for SMTP retry. Do this before the
+    // best-effort receipt write so its failure cannot hide missing raw bytes.
+    if (mode === "archive-only" && archive.status === "failed") {
+      message.setReject("Message could not be stored");
+    }
     let receiptStatus: "stored" | "failed" = "stored";
     try {
-      await env.MAIL_ARCHIVE.put(`${prefix}/receipt.json`, JSON.stringify(receipt), {
-        httpMetadata: { contentType: "application/json" },
-      });
+      const stored = await boundedWrite(
+        () =>
+          env.MAIL_ARCHIVE.put(`${prefix}/receipt.json`, JSON.stringify(receipt), {
+            httpMetadata: { contentType: "application/json" },
+          }),
+        mode === "archive-only",
+      );
+      if (!stored) receiptStatus = "failed";
     } catch {
       receiptStatus = "failed";
     }
@@ -242,12 +299,12 @@ export default {
       event: "ingest",
       ingestId,
       archive: archive.status,
-      forward: forwarding.status,
+      forward: receipt.forward.status,
       receipt: receiptStatus,
     };
     if (
       archive.status === "failed" ||
-      forwarding.status === "failed" ||
+      forwarding?.status === "failed" ||
       receiptStatus === "failed"
     ) {
       console.error(JSON.stringify(outcome));
@@ -267,6 +324,6 @@ export default {
     }
     // Preserve successful forwarding across R2 failures. Surface forwarding failure
     // to Email Routing only after saving whatever recovery evidence was possible.
-    if (forwarding.status === "failed") throw new Error("Forwarding did not complete");
+    if (forwarding?.status === "failed") throw new Error("Forwarding did not complete");
   },
 } satisfies ExportedHandler<Env>;
