@@ -1,8 +1,9 @@
 # Roadmap
 
 Status: capture, agent mail, historical import, attachment conversion/decryption,
-managed retrieval and configurable routing are implemented. Lexical retrieval is
-verified in production; historical backfill is in progress on 2026-11-12.
+managed retrieval and configurable routing are implemented. Lexical retrieval and
+a bounded semantic/hybrid source-citation sample are verified in production;
+historical backfill is in progress on 2026-11-12.
 Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
@@ -29,8 +30,10 @@ of live archive gaps from Gmail, and Gmail inbox management are out of scope.
       durable ingest status and forwarding outcome independently.
 - [x] Specify duplicate handling and partial R2/receipt/forwarding failure recovery.
       Processing start failures now have a D1 ledger and bounded repair path.
-- [ ] Monitor archival failures using fumi's ingestion outcomes and R2/D1 evidence;
-      report missing originals without relying on Gmail for recovery.
+- [x] Expose bounded read-only archive health using ingestion outcomes and retained
+      R2/D1 catalog evidence, including known missing originals and explicit unknown
+      coverage. This does not recover missing originals or prove that all ingress
+      was observed. See [archive health](archive-health.md).
 - [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler.
       This repairs the
       catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
@@ -65,14 +68,25 @@ establish production delivery.
       OAuth remains an alternative. No Gmail writes are supported.
 - [x] Bound request rate/concurrency and advance checkpoints only after durable commits.
       Count unique per-run provider IDs and preserve distinct live/backfill sources even
-      when MIME hashes match. Production import acceptance remains separate.
+      when MIME hashes match. Controlled hosted native small-original staging
+      verified exact bytes/hash; a throughput improvement has not been established.
+      See [native staging](gmail-connector-stage.md). Complete-scope import acceptance
+      remains separate.
 - [x] Extract bounded MIME parts into versioned derivatives; preserve original bytes.
       Production migration, extraction and attachment-byte acceptance were verified
-      on 2026-11-11. See [MIME extraction](mime-extraction.md).
+      on 2026-11-11. Imported sources now start the same durable processing path;
+      completed MIME immediately attempts separately checkpointed routing and
+      lexical indexing, with bounded repair after failures. Historical
+      notifications remain suppressed. See
+      [MIME extraction](mime-extraction.md).
 - [x] Implement bounded managed conversion/OCR, durable coverage and original/derived
       citations, without requiring a custom `.txt` before managed ingestion.
-      Synthetic Workers tests cover local ZIP and isolated PDF decryption; provider
-      activation and real-document acceptance remain separate. See
+      Controlled production checks verified local ZIP extraction, isolated child
+      PDF decryption, managed DOCX conversion and PDF/PNG OCR on 2026-11-12.
+      Eleven authenticated resource downloads passed full hash and provenance
+      checks, and all four lexical marker queries verified exact original/derived
+      citation hashes, authenticated URIs and supported excerpts. Broader
+      real-document acceptance remains separate. See
       [attachment conversion](attachment-conversion.md).
 - [ ] Compare optional visual retrieval against text/OCR projections.
 - [x] Add authenticated MCP metadata search, message/thread reads and attachment
@@ -81,8 +95,14 @@ establish production delivery.
       UTF-8 attachments with citations. Authenticated source downloads and citation
       hashes were verified in production on 2026-11-12. See
       [content search](content-search.md).
-- [ ] Activate opted-in OCR and compare semantic/hybrid retrieval against the lexical
-      baseline.
+- [x] Verify opted-in OCR on controlled PDF/PNG production fixtures.
+- [x] Verify converted-attachment lexical citations against authenticated downloads.
+- [x] Verify a bounded production semantic/hybrid sample against lexical retrieval:
+      all three returned the same historical source, with supported excerpts,
+      authenticated text/raw hashes and matching raw provenance. Two managed
+      queries were used with rewriting and answer generation disabled. This is
+      source/citation acceptance, not exhaustive retrieval-quality evaluation or
+      complete corpus coverage. See [managed retrieval](managed-mail-search.md).
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -95,13 +115,19 @@ establish production delivery.
 - [x] Pin a Workers-compatible CEL evaluator and test a structurally bounded
       subset. See [routing shadow](routing-shadow.md) for the deliberately narrow
       language, input grants and synthetic runtime evidence.
-- [ ] Port private inbox policy as private configuration; retain rule precedence,
-      thread deduplication, acknowledgements/case-state checks and urgent escalation.
+- [x] Prepare a private deterministic policy candidate with 27 bounded rules and
+      51 synthetic fixtures, retaining dated exception precedence and holding
+      unresolved cases. The candidate is reviewed but inactive; its contents and
+      provenance stay outside this repository.
+- [ ] Activate the reviewed private policy and verify notification behavior with
+      trusted acknowledgement/case context and an explicitly configured receiver.
 - [x] Define a plugin manifest and adoption contract. Integration owners publish
       their own rules and handlers; fumi pins and adopts them rather than maintaining
       copies of their business rules. See [plugins](plugins.md).
-- [x] Add strict specialist-owner HTTP/service/RPC adapters and durable receipts.
-      Owner deployment and real acceptance remain separately verified.
+- [x] Add strict specialist-owner HTTP/service/RPC adapters and durable receipts. The
+      Kogane owner adapter is deployed; Fumi adoption and real end-to-end OTP acceptance
+      remain unverified. See
+      [owner status](plugins.md#kogane-implementation-and-adoption-status).
 - [x] Deterministic rules first, optional bounded Claude structured classification
       for unresolved cases, then one administrator-configured generic webhook.
       Actual classifier credentials and webhook receiver are deferred. Techo owns
@@ -175,7 +201,8 @@ the low-priority web client is not a prerequisite for retirement.
       Apply separate access controls and retention to the newly readable derivative.
 - [x] Test zip.js without Web Workers/WASM and LibPDF in an isolated Dynamic Worker
       on actual local workerd. Unsupported or oversized formats retain explicit
-      coverage; hosted limit enforcement remains an activation acceptance.
+      coverage. Controlled production PDF decryption is verified; hostile-input
+      CPU/memory limit enforcement remains a separate acceptance.
 
 ## Phase 4: optional web client (low priority)
 
