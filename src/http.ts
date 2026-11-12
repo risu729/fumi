@@ -3,6 +3,7 @@ import { eventRuntime } from "./event-runtime.ts";
 import { handleMailResource, handleMcp } from "./mcp.ts";
 import { MailReadError, readAttachmentConversion } from "./mail-read.ts";
 import { gmailImportRuntime, handleGmailImport } from "./gmail-import-http.ts";
+import { CONNECTOR_STAGE_PATH, handleConnectorStage } from "./gmail-connector-stage.ts";
 import { handleRoutingAdmin } from "./routing-admin-http.ts";
 import { handleArchiveRepair } from "./archive-repair-http.ts";
 
@@ -38,6 +39,8 @@ export async function handleHttp(request: Request, env: Env): Promise<Response> 
     if (routingAdmin) return secured(await handleRoutingAdmin(request, env, principal));
     if (gmailImport) {
       if (!principal.scopes.includes("mail:import")) throw new HttpError(403, "forbidden");
+      if (url.pathname === CONNECTOR_STAGE_PATH)
+        return secured(await handleConnectorStage(request, env, principal));
       return secured(await handleGmailImport(request, env, principal, gmailImportRuntime(env)));
     }
     if (url.pathname === "/mcp") {
