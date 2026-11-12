@@ -64,7 +64,8 @@ archive recovery. The default remains forwarding; production cutover is separate
    historical Gmail backfill remains part of migration.
 4. Add password-protected attachment processing, then a low-priority web client.
 
-See [the roadmap](docs/roadmap.md), [architecture proposal](docs/architecture.md),
+See the [documentation index](docs/README.md), [the roadmap](docs/roadmap.md),
+[architecture proposal](docs/architecture.md),
 and [library evaluation](docs/libraries.md). See also the
 [existing Cloudflare mail projects](docs/existing-projects.md) and
 [outbound MCP proposal](docs/outbound-mcp.md).
