@@ -33,6 +33,7 @@ interface ImportRow {
   revision: number;
 }
 const PAGE_SIZE = 10;
+const DISPATCH_CONCURRENCY = 3;
 const LEASE_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 const hex = (bytes: ArrayBuffer) =>
@@ -281,7 +282,7 @@ async function saveMessage(
   throw new GmailImportError("gmail_catalog_busy");
 }
 
-/** Trusted operator API. One persisted page, one concurrent message, no Gmail writes or notifications. */
+/** One persisted page, one raw message in memory and at most three durable-source dispatches. */
 export async function runGmailImportPage(
   env: GmailImportEnvironment,
   transport: GmailTransport,
@@ -334,25 +335,49 @@ export async function runGmailImportPage(
       row = { ...row, pending_json: JSON.stringify(listed.ids), next_page_token: listed.next };
     }
     const ids = JSON.parse(row.pending_json ?? "[]") as string[];
-    for (const id of ids) {
-      // oxlint-disable-next-line no-await-in-loop -- Renew the account lease before each sequential message.
-      const renewed = await env.MAIL_CATALOG.prepare(
-        "UPDATE gmail_imports SET lease_until=? WHERE import_id=? AND lease_token=? AND lease_until>?",
-      )
-        .bind(Date.now() + LEASE_MS, importId, lease, Date.now())
-        .run();
-      if (!renewed.meta.changes) throw new GmailImportError("import_lease_lost");
-      // oxlint-disable-next-line no-await-in-loop -- Exactly one raw message in memory and one Gmail request at a time.
-      const rawKey = await saveMessage(env, transport, scope, id);
-      // oxlint-disable-next-line no-await-in-loop -- Dispatch each durable source through its existing idempotent job, at most ten per page.
+    // Only source identities cross this boundary; raw buffers stay in saveMessage.
+    // Capture each rejection immediately, then drain before checkpoint/lease release.
+    const pending: Promise<boolean>[] = [];
+    const drain = async () => {
+      const results = await Promise.all(pending.splice(0));
+      if (results.some((successful) => !successful))
+        throw new GmailImportError("gmail_import_failed");
+    };
+    const dispatchAndRecord = async (rawKey: string, id: string) => {
       await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, rawKey);
-      // oxlint-disable-next-line no-await-in-loop -- Record only durable sources before advancing the bounded page.
       await env.MAIL_CATALOG.prepare(`INSERT INTO gmail_import_items(import_id,message_id,raw_key)
         SELECT ?,message_id,raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?
         AND EXISTS(SELECT 1 FROM gmail_imports WHERE import_id=? AND lease_token=? AND lease_until>?)
         ON CONFLICT(import_id,message_id) DO NOTHING`)
         .bind(importId, scope.accountNamespace, id, importId, lease, Date.now())
         .run();
+    };
+    try {
+      for (const id of ids) {
+        // oxlint-disable-next-line no-await-in-loop -- Renew the account lease before each sequential message.
+        const renewed = await env.MAIL_CATALOG.prepare(
+          "UPDATE gmail_imports SET lease_until=? WHERE import_id=? AND lease_token=? AND lease_until>?",
+        )
+          .bind(Date.now() + LEASE_MS, importId, lease, Date.now())
+          .run();
+        if (!renewed.meta.changes) throw new GmailImportError("import_lease_lost");
+        // oxlint-disable-next-line no-await-in-loop -- Exactly one raw message in memory and one Gmail request at a time.
+        const rawKey = await saveMessage(env, transport, scope, id);
+        pending.push(
+          dispatchAndRecord(rawKey, id).then(
+            () => true,
+            () => false,
+          ),
+        );
+        // oxlint-disable-next-line no-await-in-loop -- Three bounded dispatches overlap, with no additional raw buffers retained.
+        if (pending.length === DISPATCH_CONCURRENCY) await drain();
+      }
+      await drain();
+    } catch (error) {
+      // A later raw/lease failure must not abandon already committed sources.
+      // Preserve its original fixed diagnostic after every launched task settles.
+      await drain().catch(() => undefined);
+      throw error;
     }
     const done =
       await env.MAIL_CATALOG.prepare(`UPDATE gmail_imports SET page_token=next_page_token,

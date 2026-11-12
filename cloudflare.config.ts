@@ -27,7 +27,7 @@ export default defineConfig({
     exports: {
       MailProcessing: exports.workflow({
         name: "fumi-mail-processing",
-        concurrency: { limit: 5 },
+        concurrency: { limit: 25 },
         defaultRetention: { successRetention: "3 days", errorRetention: "3 days" },
       }),
     },

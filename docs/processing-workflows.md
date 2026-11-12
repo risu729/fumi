@@ -49,12 +49,23 @@ observations advance the revision without advancing the sweep cursor or pass.
 They fence stale scans; superseded attempts cannot write stale observations.
 Retries are idempotent, including completion writes repeated after a lost response.
 
-The repository configures a Workflow concurrency limit of five. The platform queues
-excess instances, reducing concurrent catalog writes during repair bursts without
-delaying the SMTP forwarding path. This conservative initial limit is not a throughput
-measurement or a live/backfill priority mechanism; bulk import still needs its own
-scheduling policy. Apply changes to this limit through the Workflow resource
-configuration, not just a Worker version upload.
+The repository declares a per-Workflow concurrency limit of 25, increased from the
+initial five so an authorized archive backlog can use more bounded processing slots.
+This caps running instances; it does not create additional jobs, increase per-instance
+MIME/memory/retry bounds, change paid-provider call budgets, or enable optional
+providers. The importer separately overlaps at most three durable-source dispatches
+and retains serial original reads. Its dispatch acknowledgment does not mean the
+Workflow has started or the message is searchable.
+
+The platform queues instances above available capacity on a best-effort basis.
+Account and Workflow capacity both apply; 25 reserves no slots and cannot raise the
+account limit. This is not a live/backfill priority mechanism or measured throughput
+claim. Verify queue age, completion rate and catalog failures after an authorized
+rollout. Local development does not enforce concurrency limits: the artifact check
+asserts that the native build emits the exact Workflow identity, limit and retention,
+not that local scheduling reproduces production capacity. Apply changes through the
+Workflow resource configuration, not just a Worker version upload, and read back
+the applied limit; a successful version deployment alone does not establish 25.
 
 States are `pending`, `running`, `complete`, and `failed`. A catalog operation may
 complete while recording missing or invalid R2 evidence: inspect catalog issues
@@ -124,5 +135,6 @@ No real mail is sent and no provisioned resource is accessed by these tests.
 
 - [Workflows Workers API](https://developers.cloudflare.com/workflows/build/workers-api/)
 - [Workflow execution rules](https://developers.cloudflare.com/workflows/build/rules-of-workflows/)
+- [Workflow concurrency limits](https://developers.cloudflare.com/workflows/build/concurrency-limits/)
 - [Workers test APIs](https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/)
 - [Native Cloudflare configuration](https://developers.cloudflare.com/cf/projects/cloudflare-config/)

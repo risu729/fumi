@@ -64,13 +64,22 @@ preserved in private R2 provenance and `gmail_messages`. Header dates, Message-I
 thread headers, bodies and original attachment encodings remain in exact raw MIME.
 The normal MIME pipeline produces attachment hashes and versioned derivatives.
 After each source commits, the importer immediately requests its existing durable
-`mime-v1` Workflow, sequentially for at most ten sources per page. Replayed sources
+`mime-v1` Workflow, overlapping at most three dispatch-and-item-record tasks for
+the at most ten sources per page. Raw reads and archive/catalog commits remain
+sequential, retaining only one bounded original in memory. Every launched task
+settles before checkpoint advancement or account-lease release, including when a
+later raw read or ledger operation fails. Replayed sources
 use the same job identity. A dispatch ambiguity remains in the pending job ledger
 for bounded repair; an error before a durable job can be created retains the
 import's pending page and original for replay. The importer does not wait for MIME
 completion, and its archive checkpoint is not a claim of search completeness.
 Successful extraction separately attempts bounded lexical indexing. Historical
 sources still emit no mail lifecycle events or routing notifications.
+
+The three-dispatch bound is independent of the declared 25-instance
+[Workflow concurrency cap](processing-workflows.md). A dispatch can be queued for
+capacity after acknowledgment; archive progress is not a processing-start or
+search-completion measurement.
 
 Raw import supports originals up to 25 MiB, while the unchanged MIME input limit
 is 4 MiB. Larger originals remain archived with explicit blocked extraction and
@@ -86,13 +95,13 @@ hashes never collapse live SMTP deliveries or different Gmail messages/accounts.
 Existing Gmail source bytes and the first label/thread snapshot are immutable.
 Retries verify existing R2 checksums and provenance rather than replacing evidence.
 
-The runner persists the current list of IDs and next token before retrieving mail.
-It processes one message at a time; the client spaces requests by at least 250 ms
-and retries transient network failures, HTTP 429 and server failures up to four
-attempts. Numeric Retry-After values up to thirty seconds are honored; longer or
-unsupported retry dates stop cleanly for later operator retry. HTTP 401/403/404
-stop without discarding IDs or advancing the page. In particular, a message deleted
-from Gmail after listing remains an unresolved coverage gap unless already archived.
+The runner persists the current list of IDs and next token before retrieving mail. It
+retrieves and archives one original at a time; the client spaces Gmail requests by at
+least 250 ms and retries transient network failures, HTTP 429 and server failures up to
+four attempts. Numeric Retry-After values up to thirty seconds are honored; longer or
+unsupported retry dates stop cleanly for later operator retry. HTTP 401/403/404 stop
+without discarding IDs or advancing the page. In particular, a message deleted from
+Gmail after listing remains an unresolved coverage gap unless already archived.
 
 Raw R2 and provenance writes precede an atomic catalog/provider-provenance D1 commit.
 Only then is the import item recorded. The page token and unique-message count move

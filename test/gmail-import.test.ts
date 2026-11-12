@@ -222,6 +222,214 @@ describe("bounded historical Gmail import", () => {
     expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(0);
   });
 
+  it("overlaps at most three durable-source dispatches while reading only one raw original", async () => {
+    const ids = Array.from({ length: 10 }, (_, index) => `bounded${index}`);
+    const gates: ReturnType<typeof Promise.withResolvers<void>>[] = [];
+    const original = workflow.createBatch.getMockImplementation()!;
+    let dispatching = 0,
+      maxDispatching = 0,
+      reading = 0,
+      maxReading = 0,
+      cleanup = false;
+    workflow.createBatch.mockImplementation(async (options) => {
+      dispatching++;
+      maxDispatching = Math.max(maxDispatching, dispatching);
+      const gate = Promise.withResolvers<void>();
+      gates.push(gate);
+      if (!cleanup) await gate.promise;
+      dispatching--;
+      return original(options);
+    });
+    const client = {
+      list: vi.fn(async () => ({ messages: ids.map((id) => ({ id })) })),
+      getRaw: vi.fn(async (id: string) => {
+        reading++;
+        maxReading = Math.max(maxReading, reading);
+        await Promise.resolve();
+        reading--;
+        return message(id);
+      }),
+    };
+    await startGmailImport(env, "bounded-dispatch", scope);
+    let settled = false;
+    const running = runGmailImportPage(env, client, "bounded-dispatch", scope).finally(() => {
+      settled = true;
+    });
+    try {
+      for (const total of [3, 6, 9, 10]) {
+        // oxlint-disable-next-line no-await-in-loop -- Release each real provider gate only after the bounded group reaches it.
+        await vi.waitFor(() => expect(gates).toHaveLength(total));
+        expect(client.getRaw).toHaveBeenCalledTimes(total);
+        expect(settled).toBe(false);
+        // oxlint-disable-next-line no-await-in-loop -- Observe the real checkpoint before releasing this provider group.
+        const checkpoint = await env.MAIL_CATALOG.prepare(
+          "SELECT revision,imported_count FROM gmail_imports WHERE import_id='bounded-dispatch'",
+        ).first();
+        expect(checkpoint).toEqual({ revision: 0, imported_count: 0 });
+        for (const gate of gates) gate.resolve();
+      }
+      expect(await running).toEqual({ status: "complete", imported: 10 });
+      expect(maxDispatching).toBe(3);
+      expect(maxReading).toBe(1);
+      await startGmailImport(env, "bounded-replay", scope);
+      await runGmailImportPage(env, client, "bounded-replay", scope);
+      expect(workflow.createBatch).toHaveBeenCalledTimes(10);
+      expect(client.getRaw).toHaveBeenCalledTimes(10);
+      expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(
+        0,
+      );
+    } finally {
+      cleanup = true;
+      for (const gate of gates) gate.resolve();
+      await running.catch(() => undefined);
+      workflow.createBatch.mockImplementation(original);
+    }
+  });
+
+  it("drains committed dispatches before releasing the lease after a later raw read fails", async () => {
+    const gate = Promise.withResolvers<void>();
+    workflow.createBatch.mockImplementationOnce(
+      async ({ instances }: { instances: { id: string }[] }) => {
+        await gate.promise;
+        return { created: instances.map(({ id }) => ({ id })), errors: [] };
+      },
+    );
+    let failRaw = true,
+      settled = false;
+    const client = {
+      list: vi.fn(async () => ({ messages: [{ id: "drain0" }, { id: "drain1" }] })),
+      getRaw: vi.fn(async (id: string) => {
+        if (id === "drain1" && failRaw) throw new GmailImportError("gmail_http_404");
+        return message(id);
+      }),
+    };
+    await startGmailImport(env, "raw-failure-drain", scope);
+    const running = runGmailImportPage(env, client, "raw-failure-drain", scope).then(
+      () => {
+        settled = true;
+        return null;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(client.getRaw).toHaveBeenCalledTimes(2));
+      expect(settled).toBe(false);
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT revision,imported_count,lease_token IS NOT NULL AS leased FROM gmail_imports",
+        ).first(),
+      ).toEqual({ revision: 0, imported_count: 0, leased: 1 });
+      gate.resolve();
+      expect(await running).toMatchObject({ code: "gmail_http_404" });
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT revision,imported_count,lease_token,complete FROM gmail_imports",
+        ).first(),
+      ).toEqual({ revision: 0, imported_count: 0, lease_token: null, complete: 0 });
+      expect(
+        await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM gmail_import_items").first("n"),
+      ).toBe(1);
+      const key = await env.MAIL_CATALOG.prepare(
+        "SELECT raw_key FROM archive_sources",
+      ).first<string>("raw_key");
+      expect(new Uint8Array(await (await env.MAIL_ARCHIVE.get(key!))!.arrayBuffer())).toEqual(raw);
+      failRaw = false;
+      expect(await runGmailImportPage(env, client, "raw-failure-drain", scope)).toEqual({
+        status: "complete",
+        imported: 2,
+      });
+      expect(workflow.createBatch).toHaveBeenCalledTimes(2);
+      expect(client.list).toHaveBeenCalledTimes(1);
+      expect(client.getRaw).toHaveBeenCalledTimes(3);
+      expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(
+        0,
+      );
+    } finally {
+      gate.resolve();
+      await running;
+    }
+  });
+
+  it("settles other dispatches after one ledger failure and replays the same page without inflated counts", async () => {
+    const session = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    vi.spyOn(env.MAIL_CATALOG, "withSession")
+      .mockImplementationOnce(session)
+      .mockImplementationOnce(() => {
+        throw new Error("Synthetic processing ledger unavailable");
+      });
+    const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    for (const gate of gates)
+      workflow.createBatch.mockImplementationOnce(
+        async ({ instances }: { instances: { id: string }[] }) => {
+          await gate.promise;
+          return { created: instances.map(({ id }) => ({ id })), errors: [] };
+        },
+      );
+    const client = {
+      list: vi.fn(async () => ({
+        messages: [{ id: "ledger0" }, { id: "ledger1" }, { id: "ledger2" }],
+      })),
+      getRaw: vi.fn(async (id: string) => message(id)),
+    };
+    await startGmailImport(env, "ledger-failure-drain", scope);
+    let settled = false;
+    const running = runGmailImportPage(env, client, "ledger-failure-drain", scope).then(
+      () => {
+        settled = true;
+        return null;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(workflow.createBatch).toHaveBeenCalledTimes(2));
+      expect(settled).toBe(false);
+      expect(
+        await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM archive_sources").first("n"),
+      ).toBe(3);
+      gates[0]!.resolve();
+      await vi.waitFor(async () =>
+        expect(
+          await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM gmail_import_items").first("n"),
+        ).toBe(1),
+      );
+      expect(settled).toBe(false);
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT revision,lease_token IS NOT NULL AS leased FROM gmail_imports",
+        ).first(),
+      ).toEqual({ revision: 0, leased: 1 });
+      gates[1]!.resolve();
+      expect(await running).toMatchObject({ code: "gmail_import_failed" });
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT revision,imported_count,lease_token FROM gmail_imports",
+        ).first(),
+      ).toEqual({ revision: 0, imported_count: 0, lease_token: null });
+      expect(await runGmailImportPage(env, client, "ledger-failure-drain", scope)).toEqual({
+        status: "complete",
+        imported: 3,
+      });
+      expect(client.list).toHaveBeenCalledTimes(1);
+      expect(client.getRaw).toHaveBeenCalledTimes(3);
+      expect(workflow.createBatch).toHaveBeenCalledTimes(3);
+      expect(
+        await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM gmail_import_items").first("n"),
+      ).toBe(3);
+      expect(await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events").first("n")).toBe(
+        0,
+      );
+    } finally {
+      for (const gate of gates) gate.resolve();
+      await running;
+    }
+  });
+
   it("retains a committed original and pending page when the processing ledger is unavailable", async () => {
     await startGmailImport(env, "dispatch-recovery", scope);
     const session = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
