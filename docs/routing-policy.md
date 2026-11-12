@@ -15,7 +15,8 @@ implementation does not select a paid model or provision credentials implicitly.
 
 Fumi forwards review decisions to one administrator-configured generic webhook or
 adapter. Descriptive categories do not choose a bot, account or endpoint. Downstream
-routing, including Techo bot selection and account switching, belongs to the receiver.
+routing, including Grok Bot account selection, belongs to the receiver: a webhook
+proxy built on the Grok Bot side (see [routing dispatch](routing-dispatch.md)).
 
 The API origin is fixed to Anthropic. Requests have no tools, no URL fetches and
 no ability to select credentials or notification endpoints. Administrator policy

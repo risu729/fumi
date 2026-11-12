@@ -148,8 +148,17 @@ is required to reconcile uncertainty, which blocks destination handoff meanwhile
 Manual `not_found` or `retryable_error` cannot reset a generic webhook. Actual
 endpoint, authentication and input semantics require separate verification before
 activation. No real receiver endpoint is configured here. Fumi owns this configurable
-outbound handler only; Techo owns later bot routing and any active bot-account choice.
-No Techo receiver is implemented by this change.
+outbound handler only.
+
+Decision (owner, 2026-11-12 22:50 UTC): the receiver for Grok Bot notifications is a
+webhook proxy that the Grok Bot side builds and operates. The proxy, not fumi, chooses
+the active Grok Bot account (A or B) and holds the per-account webhook URLs and
+secrets. Fumi configures the proxy as its single generic `webhook` destination and
+has no account selection, account-switch API or per-account targets. This replaces
+the earlier note that Techo owns the account choice: Techo is a notes repository
+without a runtime. A proxy URL or credential change still uses the revision,
+generation and drain handoff above; an A/B switch inside the proxy does not touch
+fumi configuration.
 
 ## Input disclosure and source integrity
 
