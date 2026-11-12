@@ -187,6 +187,9 @@ historical SENT messages. Future fumi sends stay in fumi's own sent archive.
       catalog/processing recovery. See [standalone ingress](standalone-ingress.md).
       R2/D1 reconciliation cannot recreate an original that was never stored;
       permanent SMTP rejection does not request automatic retries.
+- [ ] Get owner confirmation of the standalone failure policy (permanent SMTP
+      rejection, archive-only write deadline); see
+      [standalone ingress](standalone-ingress.md#capture-and-failure-behavior).
 - [ ] Verify standalone failure handling and alert response in production before
       retiring the Gmail copy; synthetic tests do not establish SMTP behavior.
 - [ ] Disable Gmail forwarding in fumi and adopted specialist routes through a

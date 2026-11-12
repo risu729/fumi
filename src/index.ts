@@ -23,7 +23,11 @@ type ArchiveOutcome = Receipt["archive"];
 type ArchiveFailure = Extract<ArchiveOutcome, { status: "failed" }>["code"];
 type ForwardOutcome = Receipt["forward"];
 
-async function boundedWrite<T>(write: () => Promise<T>): Promise<T> {
+// Standalone mode must decide acceptance before the email event ends, so it
+// bounds R2 writes. Forwarding mode keeps awaiting the write as before: a slow
+// write there still captures the original instead of being abandoned.
+async function boundedWrite<T>(write: () => Promise<T>, bounded: boolean): Promise<T> {
+  if (!bounded) return write();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -88,6 +92,7 @@ async function archiveRaw(
   bucket: R2Bucket,
   key: string,
   metadata: Record<string, string>,
+  bounded: boolean,
 ): Promise<ArchiveOutcome> {
   let bytes: Uint8Array<ArrayBuffer>;
   try {
@@ -101,12 +106,14 @@ async function archiveRaw(
       byte.toString(16).padStart(2, "0"),
     ).join("");
     // Typed-array uploads have a fixed known length. R2 validates this checksum.
-    const stored = await boundedWrite(() =>
-      bucket.put(key, bytes, {
-        sha256: digest,
-        httpMetadata: { contentType: "message/rfc822" },
-        customMetadata: { ...metadata, sha256 },
-      }),
+    const stored = await boundedWrite(
+      () =>
+        bucket.put(key, bytes, {
+          sha256: digest,
+          httpMetadata: { contentType: "message/rfc822" },
+          customMetadata: { ...metadata, sha256 },
+        }),
+      bounded,
     );
     if (!stored) return { status: "failed", code: "raw_write_failed" };
     return { status: "stored", key, size: bytes.byteLength, sha256 };
@@ -240,17 +247,23 @@ export default {
     const prefix = `ingest/${receivedAt.slice(0, 10)}/${ingestId}`;
     // Neither outcome gates the other. Both stay in the email event's awaited lifetime.
     const [archive, forwarding] = await Promise.all([
-      archiveRaw(message, env.MAIL_ARCHIVE, `${prefix}/raw.eml`, {
-        schemaVersion: "1",
-        // A late raw write is not acceptance in standalone mode. The matching
-        // successful receipt must authorize events/actions during reconciliation.
-        eventNotifications: mode === "forward" ? "1" : "0",
-        ingressMode: mode,
-        ingestId,
-        receivedAt,
-        envelopeFrom: message.from,
-        envelopeTo: message.to,
-      }),
+      archiveRaw(
+        message,
+        env.MAIL_ARCHIVE,
+        `${prefix}/raw.eml`,
+        {
+          schemaVersion: "1",
+          // A late raw write is not acceptance in standalone mode. The matching
+          // successful receipt must authorize events/actions during reconciliation.
+          eventNotifications: mode === "forward" ? "1" : "0",
+          ...(mode === "archive-only" ? { ingressMode: mode } : {}),
+          ingestId,
+          receivedAt,
+          envelopeFrom: message.from,
+          envelopeTo: message.to,
+        },
+        mode === "archive-only",
+      ),
       mode === "forward" ? forward(message, env.FORWARD_TO, ingestId) : undefined,
     ]);
     const receipt: Receipt = {
@@ -270,10 +283,12 @@ export default {
     }
     let receiptStatus: "stored" | "failed" = "stored";
     try {
-      const stored = await boundedWrite(() =>
-        env.MAIL_ARCHIVE.put(`${prefix}/receipt.json`, JSON.stringify(receipt), {
-          httpMetadata: { contentType: "application/json" },
-        }),
+      const stored = await boundedWrite(
+        () =>
+          env.MAIL_ARCHIVE.put(`${prefix}/receipt.json`, JSON.stringify(receipt), {
+            httpMetadata: { contentType: "application/json" },
+          }),
+        mode === "archive-only",
       );
       if (!stored) receiptStatus = "failed";
     } catch {

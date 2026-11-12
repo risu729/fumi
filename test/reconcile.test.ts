@@ -18,7 +18,11 @@ function prefix(number: number): string {
   return `ingest/${day}/${id(number)}`;
 }
 
-async function putRaw(number: number, standalone = false): Promise<string> {
+async function putRaw(
+  number: number,
+  standalone = false,
+  extra: Record<string, string> = {},
+): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const sha256 = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -33,6 +37,7 @@ async function putRaw(number: number, standalone = false): Promise<string> {
       envelopeTo: "recipient@example.invalid",
       sha256,
       ...(standalone ? { ingressMode: "archive-only", eventNotifications: "0" } : {}),
+      ...extra,
     },
   });
   return sha256;
@@ -200,6 +205,22 @@ describe("standalone archive evidence", () => {
     await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
     expect((await sources())[0]).toMatchObject({ notify_events: 0, forward_status: "skipped" });
     expect(await issueCodes()).toContain("evidence_mismatch");
+  });
+
+  it("keeps forwarding-mode release when a later scan sees the raw object without its receipt", async () => {
+    const snapshot = receipt(1, "a".repeat(64));
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(snapshot));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({ raw_state: "missing", notify_events: 0 });
+    await putRaw(1, false, { eventNotifications: "1" });
+    await env.MAIL_ARCHIVE.delete(`${prefix(1)}/receipt.json`);
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources())[0]).toMatchObject({
+      raw_state: "present",
+      receipt_state: "missing",
+      receipt_snapshot: canonicalReceipt(snapshot),
+      notify_events: 1,
+    });
   });
 
   it("does not override a retained standalone failure when a conflicting success receipt appears", async () => {

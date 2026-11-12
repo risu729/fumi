@@ -29,7 +29,9 @@ explicitly updated before using it for an archive-only release.
 
 The handler reads the exact bounded MIME stream, validates the declared length,
 and awaits an R2 write with a SHA-256 checksum. The raw read has a ten-second
-deadline; each raw/receipt write has a five-second deadline. No MIME decoding or
+deadline. In archive-only mode each raw/receipt write has a five-second deadline
+so the handler can decide acceptance; forwarding mode keeps awaiting both writes
+without a deadline, as before this mode existed. No MIME decoding or
 reserialization occurs before capture. Each invocation has its own ingestion ID.
 
 | Outcome in archive-only mode | Handler behavior | Recovery |
@@ -46,6 +48,12 @@ It is not a temporary rejection or a request for automatic SMTP retries. A sende
 have to resubmit after an outage. This is a deliberate failure policy for an optional
 mode; changing it requires a different, verified ingress mechanism.
 
+Status (2026-11-12 22:40 UTC): the permanent-rejection policy, the five-second write
+deadline and the build-time mode are implemented as an agent-proposed design. The owner
+has not yet confirmed them; that confirmation is part of the production verification
+gate in the [roadmap](roadmap.md#phase-2d-retire-gmail-forwarding) and must happen
+before any archive-only release.
+
 A write deadline does not cancel R2 or prove that an object was never committed.
 The receipt's `raw_write_failed` means capture was not confirmed by the handler.
 A late raw object can coexist with a failed capture receipt and SMTP rejection.
@@ -60,21 +68,27 @@ mode treats a D1/Workflow result as proof of SMTP delivery.
 
 ## Evidence and schema compatibility
 
-Forwarding mode continues writing the unchanged v1 receipt. Standalone mode
-writes v2 with `forward: {status: "skipped", reason: "archive_only"}`. The raw
-object format, checksum and `ingress-v1` source identity are unchanged. Standalone
-raw metadata adds `ingressMode=archive-only` and starts with `eventNotifications=0`.
-Only a matching successful v2 receipt can release `email.received` events and
-owner/generic actions. Raw-before-receipt races, rejected late writes, missing
-receipts, provenance mismatches and conflicting retained receipts cannot grant
-that permission. Once qualified, the catalog retains it if the receipt disappears.
-Parsing rejects v1 skipped outcomes and v2 forwarding claims.
+Forwarding mode continues writing the unchanged v1 receipt. Standalone mode writes v2
+with `forward: {status: "skipped", reason: "archive_only"}`. The raw object format,
+checksum and `ingress-v1` source identity are unchanged; forwarding-mode raw metadata is
+unchanged. Standalone raw metadata adds `ingressMode=archive-only` and starts with
+`eventNotifications=0`. Only a matching successful v2 receipt can release
+`email.received` events and owner/generic actions. Raw-before-receipt races, rejected
+late writes, missing receipts, provenance mismatches and conflicting retained receipts
+cannot grant that permission. Once qualified, the catalog retains it if the receipt
+disappears. A release emits `email.received`, but `email.ready`/`email.failed` events of
+processing that finished while the source was still held are not re-emitted; consumers
+needing them must read processing state. Parsing rejects v1 skipped outcomes and v2
+forwarding claims.
 
 Apply `0014_standalone_ingress.sql` before activating the mode. It expands the
 catalog forwarding constraint and preserves sparse source rowids, snapshots,
 scan state, Gmail invariants and routing policy/context rows. The parent-table
 rebuild explicitly saves/restores both tables with cascading foreign keys.
-Run it as one migration transaction/batch, as tested on local D1. Back up the
+Run it as one migration transaction/batch with foreign keys enabled (the D1
+default), as tested on local D1. With foreign keys off, the parent drop does not
+cascade and the child restore fails on duplicate keys; nothing is lost, but the
+migration aborts. Child-table rowids are not preserved; nothing reads them. Back up the
 database and verify row/relationship preservation for a production migration.
 The tests do not perform a production migration.
 

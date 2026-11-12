@@ -241,6 +241,7 @@ describe("archive and forward ingress in workerd", () => {
       ingestId: receipt.ingestId,
       sha256: receipt.archive.sha256,
     });
+    expect(raw!.customMetadata).not.toHaveProperty("ingressMode");
     expect(incoming.forward).toHaveBeenCalledExactlyOnceWith(env.FORWARD_TO, expect.any(Headers));
     expect(incoming.forward.mock.calls[0]?.[1]?.get("X-Fumi-Ingest-ID")).toBe(receipt.ingestId);
   });
@@ -281,6 +282,34 @@ describe("archive and forward ingress in workerd", () => {
     expect(raw?.customMetadata?.["envelopeTo"]).toBe(incoming.to);
     expect(incoming.forward).toHaveBeenCalledOnce();
   });
+
+  it.each(["raw.eml", "receipt.json"])(
+    "keeps awaiting a slow %s write past the standalone deadline in forwarding mode",
+    async (suffix) => {
+      vi.useFakeTimers();
+      const put = env.MAIL_ARCHIVE.put.bind(env.MAIL_ARCHIVE);
+      vi.spyOn(env.MAIL_ARCHIVE, "put").mockImplementation(async (key, value, options) => {
+        if (key.endsWith(suffix)) {
+          await new Promise((resolve) => setTimeout(resolve, ARCHIVE_WRITE_TIMEOUT_MS * 2));
+        }
+        return put(key, value, options);
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const incoming = message();
+      const completed = run(incoming);
+      await vi.advanceTimersByTimeAsync(ARCHIVE_WRITE_TIMEOUT_MS * 2 + 1);
+      await completed;
+      // The ingest outcome must not report an abandoned archive write.
+      expect(errors.mock.calls.flat().filter((line) => String(line).includes('"ingest"'))).toEqual(
+        [],
+      );
+      const stored = await receipts();
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.archive.status).toBe("stored");
+      expect(incoming.setReject).not.toHaveBeenCalled();
+      expect(incoming.forward).toHaveBeenCalledOnce();
+    },
+  );
 
   it("surfaces forwarding failure after preserving the raw mail and failed outcome", async () => {
     const incoming = message();
