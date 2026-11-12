@@ -18,6 +18,16 @@ supported by verified local text, and raw provenance matched. The two managed
 queries used no rewriting or answer generation. This is source/citation
 acceptance, not exhaustive search-quality evaluation or complete archive coverage.
 
+A separate administrator-targeted corpus indexed a controlled fixture body and
+four completed attachment representations: local ZIP text, decrypted PDF OCR,
+DOCX conversion and PNG OCR. Two successful shared production queries returned
+all four formats in semantic and hybrid modes. All eight format/mode checks
+verified derived and original attachment SHA-256, raw MIME SHA-256, representation,
+authenticated download URIs and exact excerpts against retained source bytes and
+conversion ledger identities. Independent verification reused saved responses and
+made no additional queries. This scoped acceptance does not establish full-corpus
+coverage, provider availability or general retrieval quality.
+
 ## Activation and scope
 
 Apply migration `0013_managed_mail_search.sql`. An administrator must separately

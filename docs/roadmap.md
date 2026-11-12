@@ -103,6 +103,11 @@ establish production delivery.
       queries were used with rewriting and answer generation disabled. This is
       source/citation acceptance, not exhaustive retrieval-quality evaluation or
       complete corpus coverage. See [managed retrieval](managed-mail-search.md).
+- [x] Verify controlled ZIP, decrypted PDF OCR, DOCX and PNG OCR retrieval in both
+      semantic and hybrid modes. Eight format/mode checks matched derived,
+      original attachment and raw MIME hashes, authenticated URIs and supported
+      excerpts. This uses an administrator-targeted fixture corpus and does not
+      establish whole-archive coverage or general retrieval quality.
 - [ ] Compare AI Search with explicit D1/Vectorize indexing on Japanese mail,
       exact numbers, sender/date constraints and attachment-heavy questions.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
@@ -125,8 +130,9 @@ establish production delivery.
       their own rules and handlers; fumi pins and adopts them rather than maintaining
       copies of their business rules. See [plugins](plugins.md).
 - [x] Add strict specialist-owner HTTP/service/RPC adapters and durable receipts. The
-      Kogane owner adapter is deployed; Fumi adoption and real end-to-end OTP acceptance
-      remain unverified. See
+      Kogane owner adapter is deployed. Private owner-only RPC adoption and the first
+      durable decline of a controlled no-code message are verified. Repeat-receipt
+      verification and real end-to-end OTP acceptance remain unverified. See
       [owner status](plugins.md#kogane-implementation-and-adoption-status).
 - [x] Deterministic rules first, optional bounded Claude structured classification
       for unresolved cases, then one administrator-configured generic webhook.
@@ -193,7 +199,10 @@ the low-priority web client is not a prerequisite for retirement.
 - [x] Search bounded related archive messages for ephemeral password-shaped hints
       under namespace/participant/thread-or-subject-or-filename constraints.
       Actual cryptographic decryption proves success; model extraction is optional
-      future work and is not required for the implemented path.
+      future work and is not required for the implemented path. Retained originals,
+      the activation binding snapshot and rechecked hosted ZIP/PDF outputs
+      corroborate related-mail lookup without per-candidate telemetry; see
+      [attachment acceptance](attachment-conversion.md).
 - [x] Verify decryption locally with bounded attempts, size/time/expansion limits;
       save a distinct decrypted derivative only on verified success.
 - [x] Keep resolved candidate values out of logs, MCP results and new derivative

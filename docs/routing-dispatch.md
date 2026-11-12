@@ -6,6 +6,14 @@ policy is provisioned by this change. Production delivery and the specialist-own
 implementation require separate acceptance. MCP Events callbacks remain a separate,
 deferred consumer; they are not this ordinary action webhook.
 
+A private owner-only RPC adoption and its first durable decline were verified on
+2026-11-12 with a controlled incoming message containing no verification code. The first
+readback recorded one owner attempt and `not_applicable` receipt, held fallback without
+a configured notification destination, and no ordinary action operation. Repeat-receipt
+verification is pending. This acceptance does not establish handled OTP, financial
+authentication, classification or ordinary webhook delivery. See
+[owner adoption status](plugins.md#kogane-implementation-and-adoption-status).
+
 ## Runtime and ownership
 
 `dispatchRoutingSource(env, rawKey, runtime)` is the immediate post-MIME hook. The

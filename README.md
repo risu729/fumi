@@ -35,9 +35,13 @@ select Techo bots or accounts. A real webhook receiver and classifier key remain
 deferred. [Managed semantic/hybrid retrieval](docs/managed-mail-search.md) is
 implemented with separate private ingestion/query budgets. Bounded attachment
 conversion/OCR, original/derived citations, local ZIP decryption and isolated
-password-protected PDF processing have
-[synthetic implementations](docs/attachment-conversion.md); private activation and
-real-document acceptance remain separate. See the [ingress runbook](docs/ingress.md) for
+password-protected PDF processing have controlled production
+[attachment acceptance](docs/attachment-conversion.md), including all four fixture
+formats in lexical, semantic and hybrid retrieval. This establishes bounded
+fixture coverage; whole-archive conversion and retrieval coverage remain separate.
+Private owner-only RPC adoption has a verified first durable decline of a no-code
+test message; repeat receipt and handled OTP acceptance remain unverified. See the
+[ingress runbook](docs/ingress.md) for
 deployment, acceptance and recovery; a deployed Worker alone does not establish
 production delivery.
 
