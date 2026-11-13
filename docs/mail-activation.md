@@ -147,6 +147,37 @@ the Queue path, use an explicitly authorized controlled recipient outside that
 category; correlate its provider message ID, queue event and catalog outcome.
 Do not resend automatically to manufacture event evidence.
 
+## Signed MCP Events acceptance (temporary)
+
+Signed MCP Events are accepted against a short-lived receiver, not a permanent
+consumer. [`tools/events-receiver`](../tools/events-receiver/) answers callback
+verification, checks Standard Webhooks signatures against two per-run secrets and
+keeps only `webhook-id`, the event name, signature results and receipt times.
+Payload data, such as `ingestId` and `operationId`, is not stored.
+
+The `Events acceptance` workflow runs from `main` by manual dispatch only. One run:
+
+1. Generates two signing secrets and a read token, and deploys the receiver on the
+   dispatched hostname. The hostname is a workflow input, not committed.
+2. Calls `/mcp` with an Access service token, subscribes to `email.received`,
+   `email.ready` and `email.send_status_changed`, and sends one controlled
+   message from the principal's first sender address to itself.
+3. Requires each of the three events to arrive with exactly one signature, valid
+   under the first secret.
+4. Just after a five-minute Cron boundary, sends a second message and
+   resubscribes with the second secret. The next scheduled delivery must carry
+   two signatures, one per secret.
+5. Unsubscribes, writes only booleans and counts to the job summary and deletes
+   the receiver Worker, even when a check fails.
+
+Prerequisites are owner-provisioned and removed after acceptance: an Access
+service token allowed by the fumi Access application, its client ID and secret
+as the `FUMI_EVENTS_ACCESS_CLIENT_ID` and `FUMI_EVENTS_ACCESS_CLIENT_SECRET`
+`production` environment secrets, a `MAIL_GRANTS` entry for
+`service:<client ID>` with `mail:read`, `mail:send`, `mail:events` and one
+sender address that fumi receives, and the receiver origin in `WEBHOOK_ORIGINS`.
+After acceptance, remove those, then this workflow and the receiver code.
+
 References:
 [subscription source type](https://github.com/cloudflare/workers-sdk/blob/d434f33d2f7d85c07ac6381822461267891a8ef8/packages/wrangler/src/queues/subscription-types.ts),
 [Email Sending events](https://developers.cloudflare.com/email-service/reference/event-subscriptions/),

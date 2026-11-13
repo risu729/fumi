@@ -1,0 +1,102 @@
+name: Events acceptance
+# Temporary: verifies signed MCP Events against a short-lived receiver Worker.
+# Remove this workflow and tools/events-receiver after acceptance.
+on:
+  workflow_dispatch:
+    inputs:
+      receiver_hostname:
+        description: Custom domain for the temporary receiver; must already be in WEBHOOK_ORIGINS
+        required: true
+        type: string
+concurrency:
+  group: events-acceptance
+  cancel-in-progress: false
+permissions: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  acceptance:
+    name: Verify signed MCP Events
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    environment: production
+    env:
+      RECEIVER_HOSTNAME: ${{ inputs.receiver_hostname }}
+    steps:
+      - name: Validate and mask the receiver hostname
+        run: |
+          if [[ ! "${RECEIVER_HOSTNAME}" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+            echo '::error::receiver_hostname must be a lowercase DNS hostname.'
+            exit 1
+          fi
+          echo "::add-mask::${RECEIVER_HOSTNAME}"
+      - name: Checkout the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install locked tools
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked
+          cache: "false"
+      - name: Install dependencies
+        run: mise run install
+      - name: Generate per-run signing secrets and read token
+        run: |
+          mise exec -- node --input-type=module <<'NODE'
+          import { randomBytes } from "node:crypto";
+          import { appendFileSync, writeFileSync } from "node:fs";
+          const first = `whsec_${randomBytes(32).toString("base64")}`;
+          const second = `whsec_${randomBytes(32).toString("base64")}`;
+          const token = randomBytes(32).toString("hex");
+          for (const value of [first, second, token]) console.log(`::add-mask::${value}`);
+          writeFileSync(
+            `${process.env.RUNNER_TEMP}/receiver-secrets.json`,
+            JSON.stringify({ SIGNING_SECRETS: JSON.stringify([first, second]), READ_TOKEN: token }),
+            { mode: 0o600 },
+          );
+          appendFileSync(
+            process.env.GITHUB_ENV,
+            `SIGNING_SECRET_1=${first}\nSIGNING_SECRET_2=${second}\nREAD_TOKEN=${token}\n`,
+          );
+          NODE
+      - name: Deploy the temporary receiver
+        working-directory: tools/events-receiver
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          FUMI_EVENTS_RECEIVER_HOSTNAME: ${{ inputs.receiver_hostname }}
+        run: |
+          mise exec -- cf build --mode production
+          mise exec -- cf deploy --prebuilt --mode production --no-provision \
+            --secrets-file "${RUNNER_TEMP}/receiver-secrets.json"
+          rm -f "${RUNNER_TEMP}/receiver-secrets.json"
+      - name: Wait for the receiver hostname
+        run: |
+          for _ in $(seq 1 36); do
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 "https://${RECEIVER_HOSTNAME}/health" || true)"
+            if [[ "${status}" == "204" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo '::error::The receiver did not become reachable.'
+          exit 1
+      - name: Run the acceptance checks
+        env:
+          FUMI_ORIGIN: https://fumi.takuk.me
+          ACCESS_CLIENT_ID: ${{ secrets.FUMI_EVENTS_ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.FUMI_EVENTS_ACCESS_CLIENT_SECRET }}
+        run: RECEIVER_ORIGIN="https://${RECEIVER_HOSTNAME}" mise exec -- node tools/events-receiver/acceptance.mjs
+      - name: Delete the temporary receiver
+        if: ${{ always() }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: mise exec -- cf workers delete fumi-events-check --force
