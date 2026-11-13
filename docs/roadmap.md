@@ -171,8 +171,10 @@ establish production delivery.
       subscriptions, replay and bounded retries.
 - [x] Activate and verify authenticated production MCP reads, sender domains,
       sends/replies, attachment hashes, idempotency and provider delivery events.
-- [ ] Verify signed MCP Events against the chosen production webhook receiver.
-      Receiver selection and end-to-end delivery remain deferred.
+- [ ] Verify signed MCP Events against a temporary verification receiver. No
+      production consumer exists, so no permanent receiver is kept; the probe
+      receiver and its `WEBHOOK_ORIGINS` entry are removed after acceptance
+      (owner, 2026-11-13 05:53 UTC).
 
 See [outbound MCP](outbound-mcp.md) and the [agent API](agent-mail.md).
 Implementation and synthetic tests do not establish production delivery.
