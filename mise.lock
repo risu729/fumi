@@ -3,20 +3,20 @@
 lockfile_version = 4
 
 [[tools.betterleaks]]
-version = "1.10.0"
+version = "v1.10.1"
 backend = "aqua:betterleaks/betterleaks"
-specifiers = ["1.10.0"]
+specifiers = ["v1.10.1"]
 
 [tools.betterleaks."platforms.linux-x64"]
-checksum = "sha256:9d9ad503cd5d80d18a939352266c3fcca52f10da9b83cd5cfe646989b13940fe"
-url = "https://github.com/betterleaks/betterleaks/releases/download/v1.10.0/betterleaks_1.10.0_linux_x64.tar.gz"
-url_api = "https://api.github.com/repos/betterleaks/betterleaks/releases/assets/710841396"
+checksum = "sha256:c174b42d7aa60caf58c0c3e555c0e4bed01fe6b0d99a412bce777b5af4ce913e"
+url = "https://github.com/betterleaks/betterleaks/releases/download/v1.10.1/betterleaks_1.10.1_linux_x64.tar.gz"
+url_api = "https://api.github.com/repos/betterleaks/betterleaks/releases/assets/740237681"
 provenance = "cosign"
 
 [tools.betterleaks."platforms.windows-x64"]
-checksum = "sha256:bafd52abcb440c2a06ea36d5e1fff217315db0aac517e60d74e64b2bb9f18468"
-url = "https://github.com/betterleaks/betterleaks/releases/download/v1.10.0/betterleaks_1.10.0_windows_x64.zip"
-url_api = "https://api.github.com/repos/betterleaks/betterleaks/releases/assets/710841275"
+checksum = "sha256:53d4b37635a999992fb8e1d79f8215279315cbb3b4139314289b69407e79143d"
+url = "https://github.com/betterleaks/betterleaks/releases/download/v1.10.1/betterleaks_1.10.1_windows_x64.zip"
+url_api = "https://api.github.com/repos/betterleaks/betterleaks/releases/assets/740237680"
 provenance = "cosign"
 
 [[tools.bun]]
