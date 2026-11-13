@@ -122,8 +122,8 @@ async function send(index, address) {
       idempotency_key: `events-acceptance-${runKey}-${index}`,
     },
   });
-  const state = result.structuredContent?.state ?? "unknown";
-  report(`send ${index} state`, state);
+  // Report a boolean only; server text never reaches the job summary.
+  report(`send ${index} accepted`, result.structuredContent?.state === "accepted");
   if (result.isError) throw new Error(`Send ${index} failed`);
 }
 
@@ -180,7 +180,7 @@ try {
     report(`${name} delivered with both rotation signatures`, dualSeen.has(name));
 
   const all = await results();
-  report("rejected deliveries", all.rejected);
+  report("rejected deliveries", Number.isSafeInteger(all.rejected) ? Number(all.rejected) : -1);
   report("accepted event deliveries", all.deliveries.filter((r) => r.kind === "event").length);
   passed = verified && single && rotationVerified && dual;
 } catch (error) {

@@ -29,12 +29,13 @@ jobs:
         # Read the input from the event file so no step log header prints it.
         run: |
           hostname="$(jq --raw-output '.inputs.receiver_hostname' "${GITHUB_EVENT_PATH}")"
-          echo "::add-mask::${hostname}"
           # A fixed label keeps the receiver off fumi's API host and the zone apex.
+          # Check before masking so no unvalidated text reaches a workflow command.
           if [[ ! "${hostname}" =~ ^fumi-events-check\.([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
             echo '::error::receiver_hostname must be fumi-events-check.<zone>.'
             exit 1
           fi
+          echo "::add-mask::${hostname}"
           echo "RECEIVER_HOSTNAME=${hostname}" >> "${GITHUB_ENV}"
       - name: Checkout the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,7 +83,7 @@ jobs:
             echo '::error::The hostname already serves another Worker.'
             exit 1
           fi
-          address="$(dig +short "${RECEIVER_HOSTNAME}" | head -n 1)"
+          address="$({ dig +short A "${RECEIVER_HOSTNAME}"; dig +short AAAA "${RECEIVER_HOSTNAME}"; } | head -n 1)"
           if [[ -n "${address}" ]]; then
             echo '::error::The hostname already resolves; choose an unused hostname.'
             exit 1
