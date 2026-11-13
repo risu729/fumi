@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       receiver_hostname:
-        description: Custom domain for the temporary receiver; must already be in WEBHOOK_ORIGINS
+        description: New fumi-events-check.<zone> hostname for the temporary receiver; must be in WEBHOOK_ORIGINS
         required: true
         type: string
 concurrency:
@@ -24,16 +24,18 @@ jobs:
     permissions:
       contents: read
     environment: production
-    env:
-      RECEIVER_HOSTNAME: ${{ inputs.receiver_hostname }}
     steps:
       - name: Validate and mask the receiver hostname
+        # Read the input from the event file so no step log header prints it.
         run: |
-          if [[ ! "${RECEIVER_HOSTNAME}" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
-            echo '::error::receiver_hostname must be a lowercase DNS hostname.'
+          hostname="$(jq --raw-output '.inputs.receiver_hostname' "${GITHUB_EVENT_PATH}")"
+          echo "::add-mask::${hostname}"
+          # A fixed label keeps the receiver off fumi's API host and the zone apex.
+          if [[ ! "${hostname}" =~ ^fumi-events-check\.([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+            echo '::error::receiver_hostname must be fumi-events-check.<zone>.'
             exit 1
           fi
-          echo "::add-mask::${RECEIVER_HOSTNAME}"
+          echo "RECEIVER_HOSTNAME=${hostname}" >> "${GITHUB_ENV}"
       - name: Checkout the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,13 +68,33 @@ jobs:
             `SIGNING_SECRET_1=${first}\nSIGNING_SECRET_2=${second}\nREAD_TOKEN=${token}\n`,
           );
           NODE
+      - name: Refuse a hostname that is already a Worker custom domain
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          count="$(curl --silent --show-error --fail --max-time 20 \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --get --data-urlencode "hostname=${RECEIVER_HOSTNAME}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/domains" |
+            jq '[.result[]? | select(.service != "fumi-events-check")] | length')"
+          if [[ "${count}" != "0" ]]; then
+            echo '::error::The hostname already serves another Worker.'
+            exit 1
+          fi
+          address="$(dig +short "${RECEIVER_HOSTNAME}" | head -n 1)"
+          if [[ -n "${address}" ]]; then
+            echo '::error::The hostname already resolves; choose an unused hostname.'
+            exit 1
+          fi
       - name: Deploy the temporary receiver
+        id: deploy
         working-directory: tools/events-receiver
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          FUMI_EVENTS_RECEIVER_HOSTNAME: ${{ inputs.receiver_hostname }}
         run: |
+          export FUMI_EVENTS_RECEIVER_HOSTNAME="${RECEIVER_HOSTNAME}"
           mise exec -- cf build --mode production
           mise exec -- cf deploy --prebuilt --mode production --no-provision \
             --secrets-file "${RUNNER_TEMP}/receiver-secrets.json"
@@ -95,8 +117,19 @@ jobs:
           ACCESS_CLIENT_SECRET: ${{ secrets.FUMI_EVENTS_ACCESS_CLIENT_SECRET }}
         run: RECEIVER_ORIGIN="https://${RECEIVER_HOSTNAME}" mise exec -- node tools/events-receiver/acceptance.mjs
       - name: Delete the temporary receiver
-        if: ${{ always() }}
+        if: ${{ always() && steps.deploy.outcome != 'skipped' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: mise exec -- cf workers delete fumi-events-check --force
+        run: |
+          mise exec -- cf workers delete fumi-events-check --force
+          remaining="$(curl --silent --show-error --fail --max-time 20 \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --get --data-urlencode "service=fumi-events-check" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/domains" |
+            jq '.result | length')"
+          echo "Remaining receiver custom domains: ${remaining}"
+          if [[ "${remaining}" != "0" ]]; then
+            echo '::error::Remove the receiver custom domain manually.'
+            exit 1
+          fi

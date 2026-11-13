@@ -152,10 +152,17 @@ Do not resend automatically to manufacture event evidence.
 Signed MCP Events are accepted against a short-lived receiver, not a permanent
 consumer. [`tools/events-receiver`](../tools/events-receiver/) answers callback
 verification, checks Standard Webhooks signatures against two per-run secrets and
-keeps only `webhook-id`, the event name, signature results and receipt times.
-Payload data, such as `ingestId` and `operationId`, is not stored.
+keeps only `webhook-id`, the event name, signature results and receipt times for
+signed requests; unsigned or wrongly signed requests only increment a counter.
+The payload body is not stored, but `webhook-id` embeds the event's own ID, such
+as `received:<ingestId>` or `send:<operationId>:<status>`. The inbound
+subscriptions are unfiltered, so every live inbound message during a run
+produces `email.received` and `email.ready` deliveries to the receiver.
 
-The `Events acceptance` workflow runs from `main` by manual dispatch only. One run:
+The `Events acceptance` workflow runs from `main` by manual dispatch only. The
+hostname must be an unused `fumi-events-check.<zone>` name; the run refuses one
+that already resolves or serves another Worker. Dispatching a run is the
+explicit authorization for its two controlled sends. One run:
 
 1. Generates two signing secrets and a read token, and deploys the receiver on the
    dispatched hostname. The hostname is a workflow input, not committed.
@@ -164,11 +171,12 @@ The `Events acceptance` workflow runs from `main` by manual dispatch only. One r
    message from the principal's first sender address to itself.
 3. Requires each of the three events to arrive with exactly one signature, valid
    under the first secret.
-4. Just after a five-minute Cron boundary, sends a second message and
-   resubscribes with the second secret. The next scheduled delivery must carry
-   two signatures, one per secret.
-5. Unsubscribes, writes only booleans and counts to the job summary and deletes
-   the receiver Worker, even when a check fails.
+4. About 70 seconds before a five-minute Cron boundary, sends a second message
+   and resubscribes with the second secret. The next scheduled delivery must
+   carry two signatures, one per secret.
+5. Unsubscribes, writes only booleans and counts to the job summary, deletes
+   the receiver Worker even when a check fails, and checks that no custom
+   domain remains for it.
 
 Prerequisites are owner-provisioned and removed after acceptance: an Access
 service token allowed by the fumi Access application, its client ID and secret

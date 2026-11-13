@@ -23,12 +23,16 @@ export interface DeliveryRecord {
   name: string | null;
   presented: number;
   matchedKeys: number[];
-  accepted: boolean;
   receivedAt: number;
+}
+export interface DeliveryResults {
+  deliveries: DeliveryRecord[];
+  rejected: number;
 }
 export interface DeliveryStore {
   record(record: DeliveryRecord): Promise<void>;
-  list(): Promise<DeliveryRecord[]>;
+  reject(): Promise<void>;
+  list(): Promise<DeliveryResults>;
 }
 export interface ReceiverConfig {
   SIGNING_SECRETS: string;
@@ -87,7 +91,7 @@ export async function handleReceiver(
     const header = request.headers.get("authorization") ?? "";
     if (config.READ_TOKEN.length < 32 || !sameToken(header, `Bearer ${config.READ_TOKEN}`))
       return plain(401);
-    return json({ deliveries: await store.list() });
+    return json(await store.list());
   }
   if (url.pathname !== "/events") return plain(404);
   if (request.method !== "POST") return plain(405);
@@ -120,16 +124,19 @@ export async function handleReceiver(
     signature,
     Math.floor(now / 1000),
   );
+  if (!result.valid) {
+    // Unauthenticated callers can only increment a counter, never fill the store.
+    await store.reject();
+    return plain(401);
+  }
   await store.record({
     eventId: id,
     kind: verification ? "verification" : "event",
     name,
     presented: result.presented,
     matchedKeys: result.matchedKeys,
-    accepted: result.valid,
     receivedAt: now,
   });
-  if (!result.valid) return plain(401);
   return verification ? json({ challenge: message["challenge"] }) : plain(204);
 }
 
@@ -137,7 +144,10 @@ export class Results extends DurableObject<ReceiverConfig> {
   constructor(state: DurableObjectState, env: ReceiverConfig) {
     super(state, env);
     state.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS deliveries (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT, presented INTEGER NOT NULL, matched_keys TEXT NOT NULL, accepted INTEGER NOT NULL, received_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS deliveries (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT, presented INTEGER NOT NULL, matched_keys TEXT NOT NULL, received_at INTEGER NOT NULL)",
+    );
+    state.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS rejected (id INTEGER PRIMARY KEY CHECK (id = 1), count INTEGER NOT NULL)",
     );
   }
   record(record: DeliveryRecord): void {
@@ -145,37 +155,44 @@ export class Results extends DurableObject<ReceiverConfig> {
     const count = sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM deliveries").one();
     if (count.count >= MAX_RECORDS) return;
     sql.exec(
-      "INSERT INTO deliveries (event_id,kind,name,presented,matched_keys,accepted,received_at) VALUES (?,?,?,?,?,?,?)",
+      "INSERT INTO deliveries (event_id,kind,name,presented,matched_keys,received_at) VALUES (?,?,?,?,?,?)",
       record.eventId,
       record.kind,
       record.name,
       record.presented,
       record.matchedKeys.join(","),
-      record.accepted ? 1 : 0,
       record.receivedAt,
     );
   }
-  list(): DeliveryRecord[] {
-    return this.ctx.storage.sql
-      .exec<{
-        event_id: string;
-        kind: "verification" | "event";
-        name: string | null;
-        presented: number;
-        matched_keys: string;
-        accepted: number;
-        received_at: number;
-      }>("SELECT * FROM deliveries ORDER BY seq")
-      .toArray()
-      .map((row) => ({
-        eventId: row.event_id,
-        kind: row.kind,
-        name: row.name,
-        presented: row.presented,
-        matchedKeys: row.matched_keys === "" ? [] : row.matched_keys.split(",").map(Number),
-        accepted: row.accepted === 1,
-        receivedAt: row.received_at,
-      }));
+  reject(): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO rejected (id,count) VALUES (1,1) ON CONFLICT(id) DO UPDATE SET count=count+1",
+    );
+  }
+  list(): DeliveryResults {
+    const sql = this.ctx.storage.sql;
+    const rejected = sql.exec<{ count: number }>("SELECT count FROM rejected WHERE id=1").toArray();
+    return {
+      rejected: rejected[0]?.count ?? 0,
+      deliveries: sql
+        .exec<{
+          event_id: string;
+          kind: "verification" | "event";
+          name: string | null;
+          presented: number;
+          matched_keys: string;
+          received_at: number;
+        }>("SELECT * FROM deliveries ORDER BY seq")
+        .toArray()
+        .map((row) => ({
+          eventId: row.event_id,
+          kind: row.kind,
+          name: row.name,
+          presented: row.presented,
+          matchedKeys: row.matched_keys === "" ? [] : row.matched_keys.split(",").map(Number),
+          receivedAt: row.received_at,
+        })),
+    };
   }
 }
 
@@ -185,6 +202,9 @@ export default {
     return handleReceiver(request, env, {
       record: async (record) => {
         await stub.record(record);
+      },
+      reject: async () => {
+        await stub.reject();
       },
       list: async () => stub.list(),
     });

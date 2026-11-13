@@ -46,16 +46,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** @typedef {{ eventId: string, kind: string, name: string | null, presented: number, matchedKeys: number[], accepted: boolean, receivedAt: number }} DeliveryRecord */
-/** @returns {Promise<DeliveryRecord[]>} */
-async function deliveries() {
+/** @typedef {{ eventId: string, kind: string, name: string | null, presented: number, matchedKeys: number[], receivedAt: number }} DeliveryRecord */
+/** @returns {Promise<{ deliveries: DeliveryRecord[], rejected: number }>} */
+async function results() {
   const response = await fetch(`${receiverOrigin}/results`, {
     headers: { Authorization: `Bearer ${readToken}` },
     redirect: "error",
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`Receiver results HTTP ${response.status}`);
-  return (await response.json()).deliveries;
+  return response.json();
+}
+async function deliveries() {
+  return (await results()).deliveries;
 }
 /** @param {string} label @param {number} timeoutMs @param {(records: DeliveryRecord[]) => boolean} done */
 async function waitFor(label, timeoutMs, done) {
@@ -70,18 +73,20 @@ async function waitFor(label, timeoutMs, done) {
   return false;
 }
 /** @param {DeliveryRecord} record */
-const singleKey = (record) =>
-  record.accepted && record.presented === 1 && record.matchedKeys.join(",") === "0";
+const singleKey = (record) => record.presented === 1 && record.matchedKeys.join(",") === "0";
 /** @param {DeliveryRecord} record */
-const dualKey = (record) =>
-  record.accepted && record.presented === 2 && record.matchedKeys.join(",") === "0,1";
+const dualKey = (record) => record.presented === 2 && record.matchedKeys.join(",") === "0,1";
+/** @param {DeliveryRecord[]} records */
+const verifications = (records) => records.filter((record) => record.kind === "verification");
 
-/** Wait until shortly after a five-minute Cron boundary, so a rotation made now
- * leaves the next scheduled delivery inside the five-minute dual-signing window. */
-async function alignAfterCronTick() {
+/** Wait until about 70 seconds before a five-minute Cron boundary. A rotation
+ * made then keeps the previous secret until about four minutes after that
+ * boundary, so the scheduled handler may spend most of that time on earlier
+ * work before it signs the next delivery. */
+async function alignBeforeCronTick() {
   const offset = Date.now() % CRON_PERIOD_MS;
-  if (offset >= 20_000 && offset <= 90_000) return;
-  await sleep((CRON_PERIOD_MS - offset + 30_000) % CRON_PERIOD_MS);
+  const target = CRON_PERIOD_MS - 70_000;
+  await sleep((target - offset + CRON_PERIOD_MS) % CRON_PERIOD_MS);
 }
 
 const client = new Client({ name: "fumi-events-acceptance", version: "1" });
@@ -139,9 +144,7 @@ try {
     // oxlint-disable-next-line no-await-in-loop -- Subscribe sequentially to share one verification.
     await subscribe(name, secrets[0]);
   }
-  const verified = (await deliveries()).some(
-    (record) => record.kind === "verification" && singleKey(record),
-  );
+  const verified = verifications(await deliveries()).some(singleKey);
   report("callback verification signed with the first secret", verified);
 
   await send(1, address);
@@ -154,40 +157,35 @@ try {
   for (const name of NAMES)
     report(`${name} delivered with one valid signature`, firstSeen.has(name));
 
-  await alignAfterCronTick();
+  await alignBeforeCronTick();
   await send(2, address);
-  const rotatedAt = Date.now();
+  // Compare by receiver record order, not by runner and Worker clocks.
+  const before = await deliveries();
+  const verifiedBefore = verifications(before).length;
   for (const name of NAMES) {
     // oxlint-disable-next-line no-await-in-loop -- Rotate each subscription in turn.
     await subscribe(name, secrets[1]);
   }
-  const rotationVerified = (await deliveries()).some(
-    (record) =>
-      record.kind === "verification" &&
-      record.receivedAt >= rotatedAt &&
-      record.accepted &&
-      record.matchedKeys.join(",") === "1",
-  );
+  const rotationVerified = verifications(await deliveries())
+    .slice(verifiedBefore)
+    .some((record) => record.presented === 1 && record.matchedKeys.join(",") === "1");
   report("rotation callback verification signed with the second secret", rotationVerified);
   const dualSeen = new Set();
   const dual = await waitFor("dual-signature delivery", 8 * 60_000, (records) => {
-    for (const record of records)
-      if (
-        record.kind === "event" &&
-        record.receivedAt >= rotatedAt &&
-        dualKey(record) &&
-        record.name
-      )
-        dualSeen.add(record.name);
+    for (const record of records.slice(before.length))
+      if (record.kind === "event" && dualKey(record) && record.name) dualSeen.add(record.name);
     return dualSeen.has("email.send_status_changed");
   });
   for (const name of NAMES)
     report(`${name} delivered with both rotation signatures`, dualSeen.has(name));
 
-  const all = await deliveries();
-  report("rejected deliveries", all.filter((record) => !record.accepted).length);
-  report("accepted event deliveries", all.filter((r) => r.kind === "event" && r.accepted).length);
+  const all = await results();
+  report("rejected deliveries", all.rejected);
+  report("accepted event deliveries", all.deliveries.filter((r) => r.kind === "event").length);
   passed = verified && single && rotationVerified && dual;
+} catch (error) {
+  // SDK errors can include response bodies, and this log is public.
+  report("aborted", error instanceof Error ? error.name : "unknown");
 } finally {
   for (const [name, id] of subscriptions) {
     try {
