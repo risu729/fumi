@@ -157,6 +157,14 @@ administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
 DNS administration. Redirects are refused on verification and delivery.
 
+Decision (owner, 2026-11-13 05:53 UTC): no production MCP Events consumer exists.
+Grok Bot notifications use the ordinary routing webhook, not MCP Events, and the
+Grok Bot side cannot verify Standard Webhooks signatures or renew 24-hour
+subscriptions. Production acceptance of signed events therefore uses a temporary
+verification receiver that answers callback verification and records only event
+IDs, signature results and times. It and its `WEBHOOK_ORIGINS` entry are removed
+after acceptance; no permanent receiver is kept.
+
 ## Activation checklist
 
 Follow the [activation runbook](mail-activation.md) for targeted Queue and
