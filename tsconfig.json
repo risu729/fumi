@@ -8,7 +8,6 @@
   "include": [
     "src/**/*.ts",
     "test/**/*.ts",
-    "tools/**/*.ts",
     "*.config.ts",
     "worker-runtime.ts",
     ".cloudflare/types"

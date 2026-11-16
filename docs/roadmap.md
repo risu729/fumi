@@ -171,10 +171,11 @@ establish production delivery.
       subscriptions, replay and bounded retries.
 - [x] Activate and verify authenticated production MCP reads, sender domains,
       sends/replies, attachment hashes, idempotency and provider delivery events.
-- [ ] Verify signed MCP Events against a temporary verification receiver. No
-      production consumer exists, so no permanent receiver is kept; the probe
-      receiver and its `WEBHOOK_ORIGINS` entry are removed after acceptance
-      (owner, 2026-11-13 05:53 UTC).
+- [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known
+      client of the draft MCP Events proposal, once the owner's ChatGPT
+      subscription resumes. Until then the implementation stays in place, unused,
+      with `WEBHOOK_ORIGINS` empty; Grok Bot is the primary notification target
+      through the routing webhook (owner, 2026-11-16 11:59 UTC).
 
 See [outbound MCP](outbound-mcp.md) and the [agent API](agent-mail.md).
 Implementation and synthetic tests do not establish production delivery.
