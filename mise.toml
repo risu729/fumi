@@ -24,7 +24,6 @@ betterleaks = "v1.10.1"
 
 [settings]
 lockfile = true
-lockfile_mode = "generate"
 lockfile_platforms = ["linux-x64", "windows-x64"]
 
 [settings.npm]
