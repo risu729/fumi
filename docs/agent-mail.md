@@ -165,6 +165,17 @@ verification receiver that answers callback verification and records only event
 IDs, signature results and times. It and its `WEBHOOK_ORIGINS` entry are removed
 after acceptance; no permanent receiver is kept.
 
+Decision (owner, 2026-11-16 11:59 UTC): MCP Events acceptance is deferred until the
+owner's ChatGPT subscription resumes, and will then use ChatGPT as the real client.
+`events/*` follows a draft (the MCP Tasks and Events working group's unnumbered
+Events proposal, as implemented by ChatGPT), not the 2026-07-28 MCP specification.
+MCP Portals proxy only tools, prompts and resources, so the methods are not
+reachable through the owner's portal. The implementation is kept unused rather than
+removed. With `WEBHOOK_ORIGINS` empty, callback verification fails and nothing is
+delivered. The temporary receiver from
+[#64](https://github.com/risu729/fumi/pull/64) was removed without being used.
+Grok Bot is the primary notification target through the routing webhook.
+
 ## Activation checklist
 
 Follow the [activation runbook](mail-activation.md) for targeted Queue and
