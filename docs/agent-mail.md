@@ -163,7 +163,7 @@ Grok Bot side cannot verify Standard Webhooks signatures or renew 24-hour
 subscriptions. Production acceptance of signed events therefore uses a temporary
 verification receiver that answers callback verification and records only event
 IDs, signature results and times. It and its `WEBHOOK_ORIGINS` entry are removed
-after acceptance; no permanent receiver is kept.
+after acceptance; no permanent receiver is kept. Superseded by the next decision.
 
 Decision (owner, 2026-11-16 11:59 UTC): MCP Events acceptance is deferred until the
 owner's ChatGPT subscription resumes, and will then use ChatGPT as the real client.

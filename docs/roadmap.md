@@ -172,7 +172,7 @@ establish production delivery.
 - [x] Activate and verify authenticated production MCP reads, sender domains,
       sends/replies, attachment hashes, idempotency and provider delivery events.
 - [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known
-      client of the draft MCP Events specification, once the owner's ChatGPT
+      client of the draft MCP Events proposal, once the owner's ChatGPT
       subscription resumes. Until then the implementation stays in place, unused,
       with `WEBHOOK_ORIGINS` empty; Grok Bot is the primary notification target
       through the routing webhook (owner, 2026-11-16 11:59 UTC).

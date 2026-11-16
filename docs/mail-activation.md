@@ -138,7 +138,8 @@ mise exec -- cf access curl https://fumi.takuk.me/mcp -- \
 create a service token for this interactive test. An allowed Access identity
 still needs its server-side `MAIL_GRANTS` entry. Verify MCP initialization and
 scoped tools, authenticated downloads, one authorized send and its received copy,
-then provider-event projection and signed MCP notifications separately.
+then provider-event projection. Signed MCP notifications are deferred; see the
+[roadmap](roadmap.md).
 
 Email Sending events exclude Email Routing forwards, routing replies and
 deliveries to verified routing recipients. Sending to the Gmail forwarding
