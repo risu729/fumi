@@ -96,6 +96,7 @@ Evaluations and research snapshots:
 - [Cloudflare feature evaluation](cloudflare-features.md)
 - [Existing Cloudflare mail projects](existing-projects.md)
 - [Web client options](web-client-options.md)
+- [File transfer in MCP](mcp-file-transfer.md)
 - [Gmail connector tool reference](reference/gmail-tools.md)
 
 This layout follows
