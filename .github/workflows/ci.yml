@@ -163,11 +163,12 @@ jobs:
           "${cf[@]}" d1 get "${FUMI_CATALOG_DATABASE_ID}" |
             jq -e --arg id "${FUMI_CATALOG_DATABASE_ID}" '(.result // .) | .uuid == $id and .name == "fumi-catalog"' > /dev/null
           pending="$("${cf[@]}" d1 migrations list "${FUMI_CATALOG_DATABASE_ID}")"
-          printf '### Catalog migrations\n\nPending before this run:\n\n```json\n%s\n```\n\n' "${pending}" >> "${GITHUB_STEP_SUMMARY}"
+          fence="\`\`\`"
+          printf '### Catalog migrations\n\nPending before this run:\n\n%sjson\n%s\n%s\n\n' "${fence}" "${pending}" "${fence}" >> "${GITHUB_STEP_SUMMARY}"
           if jq -e 'length > 0' <<< "${pending}" > /dev/null; then
             # A Time Travel restore point taken just before the first change.
             bookmark="$("${cf[@]}" d1 time-travel get-bookmark "${FUMI_CATALOG_DATABASE_ID}")"
-            printf 'Time Travel bookmark before applying:\n\n```json\n%s\n```\n\n' "${bookmark}" >> "${GITHUB_STEP_SUMMARY}"
+            printf 'Time Travel bookmark before applying:\n\n%sjson\n%s\n%s\n\n' "${fence}" "${bookmark}" "${fence}" >> "${GITHUB_STEP_SUMMARY}"
             "${cf[@]}" d1 migrations apply "${FUMI_CATALOG_DATABASE_ID}"
           fi
           "${cf[@]}" d1 migrations list "${FUMI_CATALOG_DATABASE_ID}" | jq -e 'length == 0' > /dev/null
