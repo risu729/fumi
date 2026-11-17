@@ -293,4 +293,19 @@ describe("official MCP HTTP transport", () => {
       "issues",
     );
   });
+  it("marks attachment bytes as base64 so hosts can offer file references", () => {
+    const json = bridge(toolSchemas.upload_attachment)["~standard"].jsonSchema.input({
+      target: "draft-2020-12",
+    });
+    expect(json).toMatchObject({
+      properties: {
+        content_base64: {
+          type: "string",
+          format: "byte",
+          maxLength: 1_398_104,
+          description: "The base64-encoded content of the attachment.",
+        },
+      },
+    });
+  });
 });
