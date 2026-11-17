@@ -68,37 +68,35 @@ establish production delivery.
 - [ ] Complete and independently verify the configured historical scope. Exact
       copies through the connected Gmail transport are active; optional read-only
       OAuth remains an alternative. No Gmail writes are supported.
-- [ ] Awaiting owner approval of the design: keep importing Gmail SENT mail after
-      the historical cutoff. The owner sends by hand from Gmail through Cloudflare
-      Email Sending SMTP. Those messages do not pass through fumi's outbound archive,
-      reach ingress only when an owner-domain routed address is a recipient, and
-      Cloudflare keeps only short-lived send logs, so Gmail SENT is their only
-      lasting copy (owner, 2026-11-17 17:37 UTC). The capture lasts as long as the
-      owner sends from Gmail; retiring forwarding in phase 2D does not end it.
-      A self-BCC was rejected because forwarding copies it back into the Gmail
-      inbox; an archive-only BCC address would need per-route ingress code, and
-      Gmail cannot add a BCC automatically.
-      The existing read-only transport, exact raw MIME, provider-ID identity and
-      suppressed notifications carry over, but the importer needs new code: a SENT
-      label filter (its list query has none, so a rolling window would otherwise
-      import INBOX too), and a rolling scope and run model, because each `importId`
-      has one immutable scope and `GMAIL_IMPORT_CONFIG` holds one run. Windows must
-      overlap, end some time before the current time for Gmail indexing lag, and
-      reuse the historical `accountNamespace` so one message keeps one identity,
-      which means sharing the per-account lease with the unfinished historical run.
-      A sent message deleted from Gmail before the next poll is a gap bounded by the
-      poll interval. A sent message that also reached ingress is stored twice, as
-      already accepted for distinct live and Gmail sources.
-      Open choices, with their permission impact:
-      a scheduled Worker holding a refreshing `gmail.readonly` OAuth token (Gmail
-      has no SENT-only scope, so this is standing read access to the whole mailbox,
-      exposed to any merged and deployed code; consumer OAuth clients in Testing
-      status get refresh tokens that expire after seven days), or periodic connector
-      staging by an operator agent (no stored Google credential, but the connector
-      can also send and modify mail, the staged account hash is an operator
+- [ ] On hold (owner, 2026-11-17 17:44 UTC): keep importing Gmail SENT mail after the
+      historical cutoff. Do not implement until the owner picks the design. The owner
+      sends by hand from Gmail through Cloudflare Email Sending SMTP. Those messages do
+      not pass through fumi's outbound archive, reach ingress only when an owner-domain
+      routed address is a recipient, and Cloudflare keeps only short-lived send logs, so
+      Gmail SENT is their only lasting copy (owner, 2026-11-17 17:37 UTC). The capture
+      lasts as long as the owner sends from Gmail; retiring forwarding in phase 2D does
+      not end it. A self-BCC was rejected because forwarding copies it back into the
+      Gmail inbox; an archive-only BCC address would need per-route ingress code, and
+      Gmail cannot add a BCC automatically. The existing read-only transport, exact raw
+      MIME, provider-ID identity and suppressed notifications carry over, but the
+      importer needs new code: a SENT label filter (its list query has none, so a
+      rolling window would otherwise import INBOX too), and a rolling scope and run
+      model, because each `importId` has one immutable scope and `GMAIL_IMPORT_CONFIG`
+      holds one run. Windows must overlap, end some time before the current time for
+      Gmail indexing lag, and reuse the historical `accountNamespace` so one message
+      keeps one identity, which means sharing the per-account lease with the unfinished
+      historical run. A sent message deleted from Gmail before the next poll is a gap
+      bounded by the poll interval. A sent message that also reached ingress is stored
+      twice, as already accepted for distinct live and Gmail sources. Open choices, with
+      their permission impact: a scheduled Worker holding a refreshing `gmail.readonly`
+      OAuth token (Gmail has no SENT-only scope, so this is standing read access to the
+      whole mailbox, exposed to any merged and deployed code; consumer OAuth clients in
+      Testing status get refresh tokens that expire after seven days), or periodic
+      connector staging by an operator agent (no stored Google credential, but the
+      connector can also send and modify mail, the staged account hash is an operator
       attestation, and capture depends on scheduled agent sessions). Gmail
-      `history.list` or `watch` with `labelIds: ["SENT"]` are refinements of the
-      first option, with the same scope.
+      `history.list` or `watch` with `labelIds: ["SENT"]` are refinements of the first
+      option, with the same scope.
 - [x] Bound request rate/concurrency and advance checkpoints only after durable commits.
       Count unique per-run provider IDs and preserve distinct live/backfill sources even
       when MIME hashes match. Controlled hosted native small-original staging
