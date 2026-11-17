@@ -7,7 +7,9 @@ import {
   forwardMail,
   getSentMail,
   previewMail,
+  sendDraft,
   sendMail,
+  updateDraft,
 } from "../src/outbound.ts";
 import type { MailInput, OutboundContext } from "../src/outbound.ts";
 import {
@@ -47,6 +49,7 @@ async function stored(kind: string, bytes: Uint8Array) {
 async function seedParent(
   body: { text: string | null; html: string | null } = { text: parentText, html: null },
   attachments: { filename: string | null; mimeType: string; content: Uint8Array }[] = [],
+  metadata: Record<string, unknown> = {},
 ) {
   const bodyRef = await stored("body-json", encoder.encode(JSON.stringify(body)));
   const attachmentRefs = [];
@@ -75,6 +78,7 @@ async function seedParent(
         date: "2026-11-17T14:13:00.000Z",
         messageId: "<parent@example.invalid>",
         threadHeaders: [{ name: "date", value: "Tue, 17 Nov 2026 23:13:00 +0900" }],
+        ...metadata,
       }),
       JSON.stringify(attachmentRefs),
       attachmentRefs.length,
@@ -130,7 +134,9 @@ describe("Gmail-style reply and forward composition", () => {
     expect(formatMailDate("Mon, 16 Nov 2026 00:05:00 -0500 (EST)")).toBe(
       "Mon, Nov 16, 2026 at 12:05 AM",
     );
-    expect(formatMailDate("2026-11-17T14:13:00.000Z")).toBe("Tue, Nov 17, 2026 at 2:13 PM");
+    expect(formatMailDate("2026-11-17T14:13:00.000Z")).toBe("Tue, Nov 17, 2026 at 2:13 PM UTC");
+    expect(formatMailDate("Mon, 16 Nov 2026 10:00:00 EST")).toBe("Mon, Nov 16, 2026 at 10:00 AM");
+    expect(formatMailDate("Mon, 16 Nov 2026 10:00:00 GMT")).toBe("Mon, Nov 16, 2026 at 10:00 AM");
     expect(formatMailDate("not a date")).toBeNull();
     expect(quoteLines("a\n\n> b\n")).toBe("> a\n>\n>> b");
     expect(
@@ -178,6 +184,101 @@ describe("Gmail-style reply and forward composition", () => {
     expect(message.text).toBeUndefined();
     expect(message.html).toMatch(
       /^<html><body><p>Hi<\/p><br><div class="gmail_quote">.*<\/div><\/body><\/html>$/s,
+    );
+  });
+
+  it("prefixes only a prefilled subject and keeps one the caller changed", async () => {
+    await seedParent();
+    const { ctx, send } = context();
+    await sendMail(ctx, principal, { ...reply, subject: "Synthetic parent" }, "same-subject");
+    expect(sent(send).subject).toBe("Re: Synthetic parent");
+    await sendMail(ctx, principal, { ...reply, subject: "Project update" }, "changed-subject");
+    expect(sent(send, 1).subject).toBe("Project update");
+  });
+
+  it("escapes hostile parent headers and markup into the HTML quote", async () => {
+    await seedParent({ text: '<script>alert(1)</script>\n"><img src=x>', html: null }, [], {
+      from: { name: '"><img src=x onerror=alert(1)>', address: "evil@example.invalid" },
+      subject: "Hi\r\nBcc: victim@example.invalid",
+    });
+    const { ctx, send } = context();
+    await sendMail(ctx, principal, reply, "hostile");
+    const message = sent(send);
+    expect(message.subject).toBe("Re: Hi Bcc: victim@example.invalid");
+    expect(message.html).not.toContain("<script>");
+    expect(message.html).not.toContain("<img");
+    expect(message.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(message.html).toContain(
+      "&lt;img src=x onerror=alert(1)&gt; &lt;evil@example.invalid&gt;",
+    );
+    expect(message.bcc).toEqual([]);
+    expect(message.headers).toEqual({
+      "In-Reply-To": "<parent@example.invalid>",
+      References: "<parent@example.invalid>",
+    });
+  });
+
+  it("adds no attribution when the parent has no text", async () => {
+    await seedParent({ text: "\n \n", html: null });
+    const { ctx, send } = context();
+    await sendMail(ctx, principal, reply, "empty-parent");
+    expect(sent(send).text).toBe("Reply body");
+  });
+
+  it("stays linear on long newline and whitespace runs", async () => {
+    await seedParent({
+      text: `${"\n".repeat(OUTBOUND_LIMITS.bodyBytes)}x${"\n".repeat(100_000)}`,
+      html: null,
+    });
+    const { ctx, send } = context();
+    const started = Date.now();
+    await sendMail(ctx, principal, { ...reply, payload: { text: "Reply body" } }, "newlines");
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions").run();
+    await seedParent({ text: null, html: `<p>${" ".repeat(200_000)}x${" ".repeat(200_000)}<!--` });
+    await sendMail(ctx, principal, { ...reply, payload: { text: "Reply body" } }, "spaces");
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions").run();
+    await seedParent(undefined, [], {});
+    await forwardMail(
+      ctx,
+      principal,
+      rawKey,
+      { ...reply, reply_message_id: undefined, payload: { text: "\n".repeat(200_000) } },
+      "forward-newlines",
+    );
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
+
+  it("matches a same-key retry on the caller's request, before composing", async () => {
+    await seedParent(undefined, [
+      { filename: "notes.txt", mimeType: "text/plain", content: encoder.encode("synthetic") },
+    ]);
+    const { ctx, send } = context();
+    const first = await sendMail(ctx, principal, reply, "retry");
+    // The parent body becoming unreadable cannot strand a retry of a settled operation.
+    await env.MAIL_ARCHIVE.delete(
+      (await env.MAIL_ARCHIVE.list({ prefix: `${prefix}/body-json/` })).objects.map((o) => o.key),
+    );
+    const retry = await sendMail(ctx, principal, reply, "retry");
+    expect(retry.operation_id).toBe(first.operation_id);
+    await expect(
+      sendMail(ctx, principal, { ...reply, include_attachments: true }, "retry"),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("quotes a reply draft exactly once through update and send", async () => {
+    await seedParent();
+    const { ctx, send } = context();
+    const draft = await createDraft(ctx, principal, reply);
+    const updated = await updateDraft(ctx, principal, draft.draft_id, 1, {
+      ...draft.input,
+      payload: { text: "Edited reply" },
+    });
+    expect(updated.input.payload.text).toBe("Edited reply");
+    await sendDraft(ctx, principal, draft.draft_id, 2, "draft-send");
+    expect(sent(send).text).toBe(
+      `Edited reply\n\n${attribution}\n\n> First line\n>\n>> earlier quote\n> Last line\n`,
     );
   });
 

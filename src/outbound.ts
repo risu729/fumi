@@ -9,6 +9,7 @@ import {
   forwardSubject,
   loadParent,
   replySubject,
+  truncateBytes,
   type ParentMail,
 } from "./outbound-compose.ts";
 
@@ -64,6 +65,7 @@ interface Operation {
   operation_id: string;
   principal_id: string;
   input_hash: string;
+  request_hash: string | null;
   input_key: string;
   receipt_key: string;
   state: "prepared" | "submitting" | "accepted" | "rejected" | "unknown";
@@ -382,13 +384,15 @@ function parentAttachments(input: NormalizedMail, parent: ParentMail): Attachmen
     attachment_id: `part_${original.index}`,
     sha256: original.sha256,
     size: original.size,
+    // The same filename and type limits as upload_attachment.
     filename:
-      controlFree(original.filename ?? "", "_")
-        .replace(/[/\\]/g, "_")
-        .slice(0, 200) || `attachment-${original.index}`,
-    content_type: /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(original.mimeType)
-      ? original.mimeType
-      : "application/octet-stream",
+      truncateBytes(controlFree(original.filename ?? "", "_").replace(/[/\\]/g, "_"), 200) ||
+      `attachment-${original.index}`,
+    content_type:
+      original.mimeType.length <= 100 &&
+      /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(original.mimeType)
+        ? original.mimeType
+        : "application/octet-stream",
     object_key: original.key,
   }));
   const attachments = [...input.payload.attachments, ...originals];
@@ -440,13 +444,9 @@ async function compose(
     if (error instanceof ComposeError) fail(error.code);
     throw error;
   }
-  const subject = forward
-    ? forwardSubject(input.subject, parent)
-    : replySubject(input.subject, parent);
   return {
     ...input,
-    // A prefix that would overflow the header limit is dropped rather than truncating.
-    subject: encoder.encode(subject).byteLength > 998 ? input.subject : subject,
+    subject: forward ? forwardSubject(input.subject, parent) : replySubject(input.subject, parent),
     payload: {
       ...body,
       // Gmail attaches originals to forwards, not replies; either can be switched.
@@ -930,6 +930,26 @@ async function submit(
 ) {
   if (typeof key !== "string" || !/^[\x21-\x7e]{1,160}$/.test(key)) fail("invalid_idempotency_key");
   const session = db(ctx);
+  // The caller's request identifies the operation; the composed message is what is
+  // archived and sent. Composition reads the parent and can change between
+  // releases, so a same-key retry is matched on the request before composing.
+  const requestHash = await digest(
+    JSON.stringify({
+      version: "outbound-request-v1",
+      input: authored,
+      draft: draft ?? null,
+      forward_message_id: forward ?? null,
+    }),
+  );
+  let operation = await session
+    .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
+    .bind(principal.id, key)
+    .first<Operation>();
+  if (operation?.request_hash) {
+    if (operation.request_hash !== requestHash) fail("idempotency_conflict");
+    if (operation.state !== "prepared")
+      return getSendStatus(ctx, principal, operation.operation_id);
+  }
   // The archived input is the composed message, so the sent record matches what was submitted.
   const input = await compose(ctx, authored, forward);
   const json = JSON.stringify({
@@ -939,11 +959,8 @@ async function submit(
     forward_message_id: forward ?? null,
   });
   const hash = await digest(json);
-  let operation = await session
-    .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
-    .bind(principal.id, key)
-    .first<Operation>();
   if (operation) {
+    // Rows from before request_hash, or a prepared row whose composition changed.
     if (operation.input_hash !== hash) fail("idempotency_conflict");
     if (operation.state !== "prepared")
       return getSendStatus(ctx, principal, operation.operation_id);
@@ -965,13 +982,14 @@ async function submit(
     await session.batch([
       session
         .prepare(
-          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at) SELECT ?,?,?,?,?,?,?,'prepared',?,?,?,? WHERE 1=1${draftFence}`,
+          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,request_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,'prepared',?,?,?,? WHERE 1=1${draftFence}`,
         )
         .bind(
           operationId,
           principal.id,
           key,
           hash,
+          requestHash,
           input.from_address,
           inputKey,
           receiptKey,

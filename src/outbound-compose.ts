@@ -48,6 +48,18 @@ const QUOTE_STYLE =
 export const FORWARD_SEPARATOR = "---------- Forwarded message ---------";
 export const QUOTE_TRUNCATED = "[Quoted text truncated by fumi]";
 
+/** Cut to at most `limit` UTF-8 bytes on a code point boundary. */
+export function truncateBytes(value: string, limit: number): string {
+  let result = "";
+  let size = 0;
+  for (const character of value) {
+    size += encoder.encode(character).byteLength;
+    if (size > limit) break;
+    result += character;
+  }
+  return result;
+}
+
 /** Header values are single-line display text in the composed body. */
 function line(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -76,17 +88,47 @@ function mailboxes(value: unknown): string[] {
   return Array.isArray(value) ? value.flatMap(mailbox) : mailbox(value);
 }
 
-/** Gmail's "Tue, Nov 17, 2026 at 11:13 PM", in the Date header's own UTC offset. */
+/** RFC 5322 obsolete zone names (section 4.3), in minutes east of UTC. */
+const NAMED_ZONES: Record<string, number> = {
+  UT: 0,
+  GMT: 0,
+  EST: -300,
+  EDT: -240,
+  CST: -360,
+  CDT: -300,
+  MST: -420,
+  MDT: -360,
+  PST: -480,
+  PDT: -420,
+};
+
+function zoneOffset(raw: string): number | null {
+  // Strip a trailing comment such as "(JST)" without a backtracking regex.
+  let end = raw.trimEnd();
+  if (end.endsWith(")")) {
+    const open = end.lastIndexOf("(");
+    if (open !== -1) end = end.slice(0, open).trimEnd();
+  }
+  const token = end.slice(end.lastIndexOf(" ") + 1);
+  const numeric = /^([+-])(\d{2}):?(\d{2})$/.exec(token);
+  if (numeric)
+    return (numeric[1] === "-" ? -1 : 1) * (Number(numeric[2]) * 60 + Number(numeric[3]));
+  return NAMED_ZONES[token.toUpperCase()] ?? null;
+}
+
+/**
+ * Gmail's "Tue, Nov 17, 2026 at 11:13 PM", in the Date header's own zone. Without a
+ * numeric or RFC 5322 named zone the time is shown in UTC and labeled as such.
+ */
 export function formatMailDate(raw: string | null): string | null {
   if (!raw) return null;
   const time = Date.parse(raw);
   if (!Number.isFinite(time)) return null;
-  const zone = /([+-])(\d{2}):?(\d{2})\s*(?:\([^)]*\))?\s*$/.exec(raw);
-  const offset = zone ? (zone[1] === "-" ? -1 : 1) * (Number(zone[2]) * 60 + Number(zone[3])) : 0;
-  const local = new Date(time + offset * 60_000);
+  const offset = zoneOffset(raw);
+  const local = new Date(time + (offset ?? 0) * 60_000);
   const hours = local.getUTCHours();
   const minutes = String(local.getUTCMinutes()).padStart(2, "0");
-  return `${DAYS[local.getUTCDay()]}, ${MONTHS[local.getUTCMonth()]} ${local.getUTCDate()}, ${local.getUTCFullYear()} at ${hours % 12 || 12}:${minutes} ${hours < 12 ? "AM" : "PM"}`;
+  return `${DAYS[local.getUTCDay()]}, ${MONTHS[local.getUTCMonth()]} ${local.getUTCDate()}, ${local.getUTCFullYear()} at ${hours % 12 || 12}:${minutes} ${hours < 12 ? "AM" : "PM"}${offset === null ? " UTC" : ""}`;
 }
 
 const entities: Record<string, string> = {
@@ -160,8 +202,15 @@ export function htmlToText(html: string): string {
       output.push("\n");
     }
   }
+  // Line-wise trimming stays linear on long whitespace runs.
   return decodeEntities(output.join(""))
-    .replace(/[ \t]+\n/g, "\n")
+    .split("\n")
+    .map((entry) => {
+      let end = entry.length;
+      while (end > 0 && (entry[end - 1] === " " || entry[end - 1] === "\t")) end--;
+      return entry.slice(0, end);
+    })
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -178,8 +227,12 @@ function htmlLines(value: string): string {
   return escapeHtml(value).replace(/\n/g, "<br>\n");
 }
 
+/** CRLF/CR to LF and no trailing newlines; a loop, since /\n+$/ backtracks quadratically. */
 function normalizeNewlines(value: string): string {
-  return value.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  const normalized = value.replace(/\r\n?/g, "\n");
+  let end = normalized.length;
+  while (end > 0 && normalized.charCodeAt(end - 1) === 10) end--;
+  return normalized.slice(0, end);
 }
 
 /** Plain-text quote: "> line", ">>" for already quoted lines and ">" for blank lines. */
@@ -253,14 +306,24 @@ export async function loadParent(
   };
 }
 
+/**
+ * Like Gmail's prefilled subject: an empty subject, or the parent's own subject,
+ * gets the prefix. A subject the caller changed is sent as written.
+ */
+function prefixed(subject: string, parent: ParentMail, prefix: string, existing: RegExp) {
+  if (subject.trim() && subject.trim() !== parent.subject) return subject;
+  const base = truncateBytes(parent.subject, 998);
+  if (existing.test(base)) return base;
+  const result = `${prefix} ${base}`;
+  return encoder.encode(result).byteLength > 998 ? base : result;
+}
+
 export function replySubject(subject: string, parent: ParentMail): string {
-  const base = subject.trim() ? subject : parent.subject;
-  return /^\s*re\s*:/i.test(base) ? base : `Re: ${base}`;
+  return prefixed(subject, parent, "Re:", /^re\s*:/i);
 }
 
 export function forwardSubject(subject: string, parent: ParentMail): string {
-  const base = subject.trim() ? subject : parent.subject;
-  return /^\s*fwd?\s*:/i.test(base) ? base : `Fwd: ${base}`;
+  return prefixed(subject, parent, "Fwd:", /^fwd?\s*:/i);
 }
 
 function attribution(parent: ParentMail): string {
@@ -297,6 +360,8 @@ export function composeReply(
   parent: ParentMail,
   limit: number,
 ): ComposedPart {
+  // Nothing to quote: Gmail's attribution over an empty quote adds nothing.
+  if (!parent.text.trim()) return author;
   const source = parent.text.slice(0, limit);
   const full = quotedReply(author, parent, source);
   if (source.length === parent.text.length && bytes(full) <= limit) return full;

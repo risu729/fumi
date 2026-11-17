@@ -203,7 +203,7 @@ describe("official MCP HTTP transport", () => {
       });
       expect(preview.structuredContent).toMatchObject({
         input: {
-          subject: "Re: Synthetic reply",
+          subject: "Synthetic reply",
           payload: { text: "Synthetic\n\n<unknown sender> wrote:\n\n> Synthetic parent\n" },
         },
       });

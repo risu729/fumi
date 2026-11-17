@@ -48,6 +48,7 @@ export const mailInputEntries = {
   reply_to: v.optional(address),
 };
 export const mailInputSchema = v.strictObject(mailInputEntries);
+const { quote: _quote, ...forwardInputEntries } = mailInputEntries;
 export const toolSchemas = {
   get_mail_health: v.strictObject({}),
   search_mail_semantic: v.strictObject({
@@ -108,8 +109,9 @@ export const toolSchemas = {
     expected_revision: v.pipe(v.number(), v.integer(), v.minValue(1)),
     idempotency_key: identifier,
   }),
+  // Forwards never quote: the forwarded block replaces the reply quote.
   forward_emails: v.strictObject({
-    ...mailInputEntries,
+    ...forwardInputEntries,
     message_id: identifier,
     idempotency_key: identifier,
   }),
