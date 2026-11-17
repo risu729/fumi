@@ -79,7 +79,7 @@ Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
 not full bodies or attachments. Without a source filter it includes live and
 imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
 Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
-live ingress has `INBOX`. Historical Gmail SENT messages therefore require
+live ingress has `INBOX`. Gmail SENT messages therefore require
 `archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For compatibility,
 `SENT` without `archive_source` still lists the caller's outgoing operation records
 and accepts only an empty query. Continuation tokens bind query, source and labels;

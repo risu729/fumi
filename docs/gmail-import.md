@@ -3,6 +3,8 @@
 Status: implemented for synthetic local validation. OAuth provisioning, production
 migration, activation and real-mail import require explicit operator execution.
 This is a historical migration, not Gmail synchronization or archive-gap recovery.
+Ongoing capture of Gmail SENT mail after the frozen cutoff is planned separately
+in the [roadmap](roadmap.md) (owner, 2026-11-17 17:37 UTC) and is not implemented.
 
 ## Trusted operator surface
 
