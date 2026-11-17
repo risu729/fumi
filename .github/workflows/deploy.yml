@@ -51,8 +51,6 @@ jobs:
           version: 2026.11.8
           install_args: --locked
           cache: "false"
-      - name: Install dependencies
-        run: mise run install
       - name: Check repository
         run: mise run ci
         env:

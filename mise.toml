@@ -23,6 +23,8 @@ pkl = "0.33.0"
 betterleaks = "v1.10.1"
 
 [settings]
+# Required by [deps].
+experimental = true
 lockfile = true
 lockfile_platforms = ["linux-x64", "windows-x64"]
 
@@ -32,8 +34,12 @@ package_manager = "bun"
 [env]
 _.path = ["{{config_root}}/node_modules/.bin"]
 
-[tasks.install]
-description = "Install the exact locked dependencies."
+# mise run and mise exec install the locked dependencies first when an input changed.
+# bunfig.toml joins the default sources (bun.lock, package.json): its isolated linker
+# decides the node_modules layout.
+[deps.bun]
+auto = true
+sources = ["package.json", "bun.lock", "bunfig.toml"]
 run = "bun install --frozen-lockfile"
 
 [tasks.typecheck]
