@@ -43,6 +43,7 @@ export const mailInputEntries = {
   subject: v.pipe(v.string(), v.maxLength(998)),
   payload: payloadSchema,
   reply_message_id: v.optional(identifier),
+  quote: v.optional(v.boolean()),
   reply_to: v.optional(address),
 };
 export const mailInputSchema = v.strictObject(mailInputEntries);
@@ -96,6 +97,7 @@ export const toolSchemas = {
     subject: v.optional(v.pipe(v.string(), v.maxLength(998))),
     payload: v.optional(payloadSchema),
     reply_message_id: v.optional(identifier),
+    quote: v.optional(v.boolean()),
     reply_to: v.optional(address),
   }),
   send_email: v.strictObject({ ...mailInputEntries, idempotency_key: identifier }),
@@ -106,6 +108,7 @@ export const toolSchemas = {
   }),
   forward_emails: v.strictObject({
     ...mailInputEntries,
+    include_attachments: v.optional(v.boolean()),
     message_id: identifier,
     idempotency_key: identifier,
   }),

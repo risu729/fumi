@@ -1,6 +1,16 @@
 import type { MailPrincipal } from "./principal.ts";
 import { eventStatement } from "./event-store.ts";
 import { parseReceipt } from "./receipt-schema.ts";
+import {
+  ComposeError,
+  composeForward,
+  composeReply,
+  controlFree,
+  forwardSubject,
+  loadParent,
+  replySubject,
+  type ParentMail,
+} from "./outbound-compose.ts";
 
 export interface OutboundContext {
   MAIL_CATALOG: D1Database;
@@ -20,6 +30,8 @@ export interface MailInput {
     attachments?: { attachment_id: string; sha256: string }[];
   };
   reply_message_id?: string;
+  /** Replies quote the parent Gmail-style unless this is false. */
+  quote?: boolean;
   reply_to?: string;
 }
 
@@ -31,6 +43,7 @@ interface NormalizedMail {
   subject: string;
   payload: { text?: string; html?: string; attachments: AttachmentReference[] };
   reply_message_id?: string;
+  quote?: boolean;
   reply_to?: string;
   headers: Record<string, string>;
 }
@@ -208,6 +221,7 @@ async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
   input: unknown,
+  options: { forward?: boolean } = {},
 ): Promise<NormalizedMail> {
   const item = record(input);
   exact(item, [
@@ -218,8 +232,15 @@ async function normalize(
     "subject",
     "payload",
     "reply_message_id",
+    "quote",
     "reply_to",
   ]);
+  const quote = item["quote"];
+  if (
+    quote !== undefined &&
+    (typeof quote !== "boolean" || item["reply_message_id"] === undefined || options.forward)
+  )
+    fail("invalid_input");
   let sender = item["from_address"];
   if (sender === undefined) {
     if (item["reply_message_id"] === undefined) fail("from_address_required");
@@ -268,8 +289,9 @@ async function normalize(
     payload["text"] === undefined ? undefined : text(payload["text"], OUTBOUND_LIMITS.bodyBytes);
   const html =
     payload["html"] === undefined ? undefined : text(payload["html"], OUTBOUND_LIMITS.bodyBytes);
+  // A forward may carry no note of its own: the forwarded block is its body.
   if (
-    !(bodyText || html) ||
+    (!(bodyText || html) && !options.forward) ||
     encoder.encode((bodyText ?? "") + (html ?? "")).byteLength > OUTBOUND_LIMITS.bodyBytes
   )
     fail("invalid_body");
@@ -336,8 +358,89 @@ async function normalize(
       attachments,
     },
     ...(reply === undefined ? {} : { reply_message_id: reply }),
+    ...(quote === undefined ? {} : { quote }),
     ...(item["reply_to"] === undefined ? {} : { reply_to: address(item["reply_to"]) }),
     headers,
+  };
+}
+
+/** Original attachments join a forward the way Gmail attaches them by default. */
+function forwardAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
+  const originals = parent.attachments.map((original): AttachmentReference => ({
+    attachment_id: `part_${original.index}`,
+    sha256: original.sha256,
+    size: original.size,
+    filename:
+      controlFree(original.filename ?? "", "_")
+        .replace(/[/\\]/g, "_")
+        .slice(0, 200) || `attachment-${original.index}`,
+    content_type: /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(original.mimeType)
+      ? original.mimeType
+      : "application/octet-stream",
+    object_key: original.key,
+  }));
+  const attachments = [...input.payload.attachments, ...originals];
+  if (
+    attachments.length > OUTBOUND_LIMITS.attachments ||
+    attachments.some((entry) => entry.size > OUTBOUND_LIMITS.attachmentBytes) ||
+    attachments.reduce((sum, entry) => sum + entry.size, 0) > OUTBOUND_LIMITS.totalAttachmentBytes
+  )
+    fail("forward_attachments_too_large");
+  return attachments;
+}
+
+/**
+ * Build the message exactly as it is archived and sent: a Gmail-style quote for
+ * replies, or a forwarded-message block (and original attachments) for forwards.
+ * Drafts keep the author's own input; composition happens at preview and send.
+ */
+async function compose(
+  ctx: OutboundContext,
+  input: NormalizedMail,
+  forward?: { rawKey: string; includeAttachments: boolean },
+): Promise<NormalizedMail> {
+  const parentKey = forward?.rawKey ?? input.reply_message_id;
+  if (parentKey === undefined) return input;
+  let parent: ParentMail;
+  try {
+    parent = await loadParent(
+      db(ctx),
+      ctx.MAIL_ARCHIVE,
+      parentKey,
+      forward !== undefined || input.quote !== false,
+    );
+  } catch (error) {
+    if (error instanceof ComposeError) fail(error.code);
+    throw error;
+  }
+  const author = {
+    ...(input.payload.text === undefined ? {} : { text: input.payload.text }),
+    ...(input.payload.html === undefined ? {} : { html: input.payload.html }),
+  };
+  let body;
+  try {
+    body = forward
+      ? composeForward(author, parent, OUTBOUND_LIMITS.bodyBytes)
+      : input.quote === false
+        ? author
+        : composeReply(author, parent, OUTBOUND_LIMITS.bodyBytes);
+  } catch (error) {
+    if (error instanceof ComposeError) fail(error.code);
+    throw error;
+  }
+  const subject = forward
+    ? forwardSubject(input.subject, parent)
+    : replySubject(input.subject, parent);
+  return {
+    ...input,
+    // A prefix that would overflow the header limit is dropped rather than truncating.
+    subject: encoder.encode(subject).byteLength > 998 ? input.subject : subject,
+    payload: {
+      ...body,
+      attachments: forward?.includeAttachments
+        ? forwardAttachments(input, parent)
+        : input.payload.attachments,
+    },
   };
 }
 
@@ -357,7 +460,7 @@ async function previewMailImpl(ctx: OutboundContext, principal: MailPrincipal, i
   if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
     fail("forbidden");
   return {
-    input: publicMail(await normalize(ctx, principal, input)),
+    input: publicMail(await compose(ctx, await normalize(ctx, principal, input))),
     policy: { allowed: true },
     submitted: false,
   };
@@ -473,6 +576,7 @@ function draftInput(input: NormalizedMail): MailInput {
       })),
     },
     ...(input.reply_message_id ? { reply_message_id: input.reply_message_id } : {}),
+    ...(input.quote === undefined ? {} : { quote: input.quote }),
     ...(input.reply_to ? { reply_to: input.reply_to } : {}),
   };
 }
@@ -743,6 +847,7 @@ async function forwardMailImpl(
   parentRawKey: string,
   input: unknown,
   idempotencyKey: string,
+  options: { includeAttachments?: boolean } = {},
 ) {
   scope(principal, "mail:read");
   scope(principal, "mail:send");
@@ -754,10 +859,10 @@ async function forwardMailImpl(
   return submit(
     ctx,
     principal,
-    await normalize(ctx, principal, input),
+    await normalize(ctx, principal, input, { forward: true }),
     idempotencyKey,
     undefined,
-    parentRawKey,
+    { rawKey: parentRawKey, includeAttachments: options.includeAttachments !== false },
   );
 }
 
@@ -802,18 +907,20 @@ async function providerMessage(
 async function submit(
   ctx: OutboundContext,
   principal: MailPrincipal,
-  input: NormalizedMail,
+  authored: NormalizedMail,
   key: string,
   draft?: { id: string; revision: number },
-  forward?: string,
+  forward?: { rawKey: string; includeAttachments: boolean },
 ) {
   if (typeof key !== "string" || !/^[\x21-\x7e]{1,160}$/.test(key)) fail("invalid_idempotency_key");
   const session = db(ctx);
+  // The archived input is the composed message, so the sent record matches what was submitted.
+  const input = await compose(ctx, authored, forward);
   const json = JSON.stringify({
     version: "outbound-v1",
     input,
     draft: draft ?? null,
-    forward_message_id: forward ?? null,
+    forward_message_id: forward?.rawKey ?? null,
   });
   const hash = await digest(json);
   let operation = await session

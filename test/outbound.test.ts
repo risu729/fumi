@@ -70,6 +70,17 @@ function event(
   };
 }
 
+/** Store a content-addressed extraction body the way MIME extraction does. */
+async function storeBody(text: string) {
+  const bytes = new TextEncoder().encode(JSON.stringify({ text, html: null }));
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (n) =>
+    n.toString(16).padStart(2, "0"),
+  ).join("");
+  const key = `ingest/synthetic/body-json/${digest}`;
+  await env.MAIL_ARCHIVE.put(key, bytes);
+  return key;
+}
+
 beforeAll(async () => applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS));
 beforeEach(async () => {
   await env.MAIL_CATALOG.batch(
@@ -281,7 +292,7 @@ describe("durable outbound submission in workerd", () => {
     const rawKey = "ingest/synthetic/raw.eml";
     await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
       metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
-      VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]','synthetic-body','synthetic-manifest',0)`)
+      VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
       .bind(
         rawKey,
         "0".repeat(64),
@@ -289,6 +300,7 @@ describe("durable outbound submission in workerd", () => {
           messageId: "<parent@example.invalid>",
           references: "<ancestor@example.invalid>",
         }),
+        await storeBody("Synthetic parent body"),
       )
       .run();
     await sendMail(ctx, principal, { ...input, reply_message_id: rawKey }, "reply");
@@ -361,7 +373,7 @@ describe("durable outbound submission in workerd", () => {
     };
     await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
       metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
-      VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]','synthetic-body','synthetic-manifest',0)`)
+      VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
       .bind(
         rawKey,
         sha,
@@ -369,6 +381,7 @@ describe("durable outbound submission in workerd", () => {
           messageId: "<parent@example.invalid>",
           to: [{ address: "forged@other.invalid" }],
         }),
+        await storeBody("Synthetic parent body"),
       )
       .run();
     await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,
