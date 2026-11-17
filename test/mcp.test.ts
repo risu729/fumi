@@ -165,6 +165,13 @@ describe("official MCP HTTP transport", () => {
     await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE external_id=?")
       .bind("a".repeat(64), id)
       .run();
+    const body = new TextEncoder().encode(JSON.stringify({ text: "Synthetic parent", html: null }));
+    const bodyDigest = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", body)),
+      (n) => n.toString(16).padStart(2, "0"),
+    ).join("");
+    const bodyKey = `ingest/2026-11-11/${id}/body-json/${bodyDigest}`;
+    await env.MAIL_ARCHIVE.put(bodyKey, body);
     await env.MAIL_CATALOG.prepare(
       `INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,body_json_key,manifest_key,updated_at) VALUES (?,'mime-v1',?,1,?,'complete',?,'[]',?,?,0)`,
     )
@@ -176,7 +183,7 @@ describe("official MCP HTTP transport", () => {
           messageId: "<parent@example.invalid>",
           to: [{ address: "untrusted@example.invalid" }],
         }),
-        `synthetic/body/${id}`,
+        bodyKey,
         `synthetic/manifest/${id}`,
       )
       .run();
@@ -193,6 +200,12 @@ describe("official MCP HTTP transport", () => {
       expect(preview.structuredContent).toMatchObject({
         input: { from_address: "captured@example.invalid", reply_message_id: `mail_${id}` },
         submitted: false,
+      });
+      expect(preview.structuredContent).toMatchObject({
+        input: {
+          subject: "Synthetic reply",
+          payload: { text: "Synthetic\n\n<unknown sender> wrote:\n\n> Synthetic parent\n" },
+        },
       });
       expect(JSON.stringify(preview)).not.toContain(key);
       const override = await client.callTool({

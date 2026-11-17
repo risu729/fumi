@@ -100,10 +100,12 @@ transmitted bytes. Cloudflare controls Message-ID, Date and transport/MIME heade
 provider IDs separately from RFC Message-ID until their relationship is verified.
 [Header contract](https://developers.cloudflare.com/email-service/reference/headers/).
 
-Replies use stored parent headers for In-Reply-To/References and retain a local
-thread link. MCP new sends and later replies use the outbound API, not the live
-Email Routing `message.reply()` object. That API is limited to the incoming event
-and has sender, DMARC and reply-count restrictions.
+Replies use stored parent headers for In-Reply-To/References and retain a local thread
+link. Gmail-style reply quoting and forward blocks are composed on the server; see
+[reply quoting and forwarding](agent-mail.md#reply-quoting-and-forwarding). MCP new
+sends and later replies use the outbound API, not the live Email Routing
+`message.reply()` object. That API is limited to the incoming event and has sender,
+DMARC and reply-count restrictions.
 [Inbound reply API](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/).
 
 Ongoing Gmail Sent synchronization is out of scope. fumi stores its own sent

@@ -91,13 +91,13 @@ const descriptions: Record<ToolName, string> = {
   search_email_ids:
     "Search with search_emails semantics, returning only opaque message IDs and explicit coverage/pagination. Pending extraction remains visible for unfiltered inbound search.",
   preview_email:
-    "Validate and normalize a proposed message without submitting it. to/cc/bcc are arrays; payload has text and/or html plus uploaded attachment IDs and SHA-256. New mail and replies to imported Gmail require an explicit permitted from_address. Live replies can default to the trusted SMTP envelope recipient, never MIME To. An explicit override must satisfy the sender grant.",
+    "Validate and normalize a proposed message without submitting it. to/cc/bcc are arrays; payload has text and/or html plus uploaded attachment IDs and SHA-256. New mail and replies to imported Gmail require an explicit permitted from_address. Live replies can default to the trusted SMTP envelope recipient, never MIME To. An explicit override must satisfy the sender grant. Returns the composed message as it would be sent, including any reply quote or forward block.",
   upload_attachment:
     "Stage up to 1 MiB of base64 attachment bytes for this principal. Returns attachment_id and SHA-256; include both in a draft/message payload. Does not send mail.",
   copy_attachment:
     "Copy a selected archived attachment into immutable outgoing attachment storage for this principal. Supply exact parent message_id, part_N attachment_id and SHA-256 returned by read_email. Returns an attachment_id/hash usable in drafts and sends. Does not send mail.",
   create_draft:
-    "Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Returns saved input and revision for review. Does not send.",
+    'Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. When sent, replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and an empty subject, or the parent\'s own, becomes "Re: <parent subject>"; a changed subject is kept. Do not quote the parent yourself; set quote false to send without it. Replies attach the parent attachments only with include_attachments true. The draft stores your own text; preview_email shows the composed message. Returns saved input and revision for review. Does not send.',
   get_draft:
     "Read this principal's saved draft, including current revision and complete payload, for review before sending.",
   list_drafts:
@@ -105,11 +105,11 @@ const descriptions: Record<ToolName, string> = {
   update_draft:
     "Patch a saved draft using expected_revision for conflict protection. Omitted fields preserve the current value; provided payload replaces the whole MIME payload, including attachment references. Arrays may be empty to clear cc/bcc. Returns the newly saved revision.",
   send_email:
-    "Submit the explicit message using a required stable idempotency_key. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Use only after user authorization to send. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.",
+    'Submit the explicit message using a required stable idempotency_key. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Use only after user authorization to send. Replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and an empty subject, or the parent\'s own, becomes "Re: <parent subject>"; a changed subject is kept. Do not quote the parent yourself; set quote false to send without it. Replies attach the parent attachments only with include_attachments true. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.',
   send_draft:
     "Send the reviewed draft at expected_revision with a stable idempotency_key. Requires both draft and send scopes. A changed revision is rejected. accepted is not delivery proof.",
   forward_emails:
-    "Forward one selected inbound message with an explicit complete new envelope and payload; no recipients or quoted content are inferred. message_id must come from read/search. Requires read and send scopes and a stable idempotency_key; user must authorize sending.",
+    'Forward one selected inbound message Gmail-style. Recipients are never inferred. fumi appends a "---------- Forwarded message ---------" block (From, Date, Subject, To, Cc) and the original text below your optional note, turns an empty subject, or the original\'s own, into "Fwd: <original subject>" and attaches the original attachments unless include_attachments is false. message_id must come from read/search. Requires read and send scopes and a stable idempotency_key; user must authorize sending.',
   get_send_status:
     "Read this principal's submission and per-recipient delivery event evidence. accepted is provider acceptance. unknown preserves uncertainty and does not authorize another send.",
 };

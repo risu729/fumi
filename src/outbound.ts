@@ -1,6 +1,17 @@
 import type { MailPrincipal } from "./principal.ts";
 import { eventStatement } from "./event-store.ts";
 import { parseReceipt } from "./receipt-schema.ts";
+import {
+  ComposeError,
+  composeForward,
+  composeReply,
+  controlFree,
+  forwardSubject,
+  loadParent,
+  replySubject,
+  truncateBytes,
+  type ParentMail,
+} from "./outbound-compose.ts";
 
 export interface OutboundContext {
   MAIL_CATALOG: D1Database;
@@ -20,6 +31,10 @@ export interface MailInput {
     attachments?: { attachment_id: string; sha256: string }[];
   };
   reply_message_id?: string;
+  /** Replies quote the parent Gmail-style unless this is false. */
+  quote?: boolean;
+  /** Attach the parent's attachments: off by default for replies, on for forwards. */
+  include_attachments?: boolean;
   reply_to?: string;
 }
 
@@ -31,6 +46,8 @@ interface NormalizedMail {
   subject: string;
   payload: { text?: string; html?: string; attachments: AttachmentReference[] };
   reply_message_id?: string;
+  quote?: boolean;
+  include_attachments?: boolean;
   reply_to?: string;
   headers: Record<string, string>;
 }
@@ -48,6 +65,7 @@ interface Operation {
   operation_id: string;
   principal_id: string;
   input_hash: string;
+  request_hash: string | null;
   input_key: string;
   receipt_key: string;
   state: "prepared" | "submitting" | "accepted" | "rejected" | "unknown";
@@ -208,6 +226,7 @@ async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
   input: unknown,
+  options: { forward?: boolean } = {},
 ): Promise<NormalizedMail> {
   const item = record(input);
   exact(item, [
@@ -218,8 +237,23 @@ async function normalize(
     "subject",
     "payload",
     "reply_message_id",
+    "quote",
+    "include_attachments",
     "reply_to",
   ]);
+  const quote = item["quote"];
+  if (
+    quote !== undefined &&
+    (typeof quote !== "boolean" || item["reply_message_id"] === undefined || options.forward)
+  )
+    fail("invalid_input");
+  const includeAttachments = item["include_attachments"];
+  if (
+    includeAttachments !== undefined &&
+    (typeof includeAttachments !== "boolean" ||
+      (item["reply_message_id"] === undefined && !options.forward))
+  )
+    fail("invalid_input");
   let sender = item["from_address"];
   if (sender === undefined) {
     if (item["reply_message_id"] === undefined) fail("from_address_required");
@@ -268,8 +302,9 @@ async function normalize(
     payload["text"] === undefined ? undefined : text(payload["text"], OUTBOUND_LIMITS.bodyBytes);
   const html =
     payload["html"] === undefined ? undefined : text(payload["html"], OUTBOUND_LIMITS.bodyBytes);
+  // A forward may carry no note of its own: the forwarded block is its body.
   if (
-    !(bodyText || html) ||
+    (!(bodyText || html) && !options.forward) ||
     encoder.encode((bodyText ?? "") + (html ?? "")).byteLength > OUTBOUND_LIMITS.bodyBytes
   )
     fail("invalid_body");
@@ -336,8 +371,90 @@ async function normalize(
       attachments,
     },
     ...(reply === undefined ? {} : { reply_message_id: reply }),
+    ...(quote === undefined ? {} : { quote }),
+    ...(includeAttachments === undefined ? {} : { include_attachments: includeAttachments }),
     ...(item["reply_to"] === undefined ? {} : { reply_to: address(item["reply_to"]) }),
     headers,
+  };
+}
+
+/** Parent attachments join after the author's, under the same send limits. */
+function parentAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
+  const originals = parent.attachments.map((original): AttachmentReference => ({
+    attachment_id: `part_${original.index}`,
+    sha256: original.sha256,
+    size: original.size,
+    // The same filename and type limits as upload_attachment.
+    filename:
+      truncateBytes(controlFree(original.filename ?? "", "_").replace(/[/\\]/g, "_"), 200) ||
+      `attachment-${original.index}`,
+    content_type:
+      original.mimeType.length <= 100 &&
+      /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(original.mimeType)
+        ? original.mimeType
+        : "application/octet-stream",
+    object_key: original.key,
+  }));
+  const attachments = [...input.payload.attachments, ...originals];
+  if (
+    attachments.length > OUTBOUND_LIMITS.attachments ||
+    attachments.some((entry) => entry.size > OUTBOUND_LIMITS.attachmentBytes) ||
+    attachments.reduce((sum, entry) => sum + entry.size, 0) > OUTBOUND_LIMITS.totalAttachmentBytes
+  )
+    fail("original_attachments_too_large");
+  return attachments;
+}
+
+/**
+ * Build the message exactly as it is archived and sent: a Gmail-style quote for
+ * replies, or a forwarded-message block (and original attachments) for forwards.
+ * Drafts keep the author's own input; composition happens at preview and send.
+ */
+async function compose(
+  ctx: OutboundContext,
+  input: NormalizedMail,
+  forward?: string,
+): Promise<NormalizedMail> {
+  const parentKey = forward ?? input.reply_message_id;
+  if (parentKey === undefined) return input;
+  let parent: ParentMail;
+  try {
+    parent = await loadParent(
+      db(ctx),
+      ctx.MAIL_ARCHIVE,
+      parentKey,
+      forward !== undefined || input.quote !== false,
+    );
+  } catch (error) {
+    if (error instanceof ComposeError) fail(error.code);
+    throw error;
+  }
+  const author = {
+    ...(input.payload.text === undefined ? {} : { text: input.payload.text }),
+    ...(input.payload.html === undefined ? {} : { html: input.payload.html }),
+  };
+  let body;
+  try {
+    body = forward
+      ? composeForward(author, parent, OUTBOUND_LIMITS.bodyBytes)
+      : input.quote === false
+        ? author
+        : composeReply(author, parent, OUTBOUND_LIMITS.bodyBytes);
+  } catch (error) {
+    if (error instanceof ComposeError) fail(error.code);
+    throw error;
+  }
+  return {
+    ...input,
+    subject: forward ? forwardSubject(input.subject, parent) : replySubject(input.subject, parent),
+    payload: {
+      ...body,
+      // Gmail attaches originals to forwards, not replies; either can be switched.
+      attachments:
+        (input.include_attachments ?? forward !== undefined)
+          ? parentAttachments(input, parent)
+          : input.payload.attachments,
+    },
   };
 }
 
@@ -357,7 +474,7 @@ async function previewMailImpl(ctx: OutboundContext, principal: MailPrincipal, i
   if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
     fail("forbidden");
   return {
-    input: publicMail(await normalize(ctx, principal, input)),
+    input: publicMail(await compose(ctx, await normalize(ctx, principal, input))),
     policy: { allowed: true },
     submitted: false,
   };
@@ -473,6 +590,10 @@ function draftInput(input: NormalizedMail): MailInput {
       })),
     },
     ...(input.reply_message_id ? { reply_message_id: input.reply_message_id } : {}),
+    ...(input.quote === undefined ? {} : { quote: input.quote }),
+    ...(input.include_attachments === undefined
+      ? {}
+      : { include_attachments: input.include_attachments }),
     ...(input.reply_to ? { reply_to: input.reply_to } : {}),
   };
 }
@@ -754,7 +875,7 @@ async function forwardMailImpl(
   return submit(
     ctx,
     principal,
-    await normalize(ctx, principal, input),
+    await normalize(ctx, principal, input, { forward: true }),
     idempotencyKey,
     undefined,
     parentRawKey,
@@ -802,28 +923,66 @@ async function providerMessage(
 async function submit(
   ctx: OutboundContext,
   principal: MailPrincipal,
-  input: NormalizedMail,
+  authored: NormalizedMail,
   key: string,
   draft?: { id: string; revision: number },
   forward?: string,
 ) {
   if (typeof key !== "string" || !/^[\x21-\x7e]{1,160}$/.test(key)) fail("invalid_idempotency_key");
   const session = db(ctx);
-  const json = JSON.stringify({
-    version: "outbound-v1",
-    input,
-    draft: draft ?? null,
-    forward_message_id: forward ?? null,
-  });
-  const hash = await digest(json);
+  // The caller's request identifies the operation; the composed message is what is
+  // archived and sent. Composition reads the parent and can change between
+  // releases, so a same-key retry is matched on the request before composing.
+  const requestHash = await digest(
+    JSON.stringify({
+      version: "outbound-request-v1",
+      input: authored,
+      draft: draft ?? null,
+      forward_message_id: forward ?? null,
+    }),
+  );
+  // Rows from before request_hash stored only the digest of the uncomposed envelope.
+  const legacyHash = async () =>
+    digest(
+      JSON.stringify({
+        version: "outbound-v1",
+        input: authored,
+        draft: draft ?? null,
+        forward_message_id: forward ?? null,
+      }),
+    );
+  const sameRequest = async (row: Operation, composedHash?: string) =>
+    row.request_hash
+      ? row.request_hash === requestHash
+      : row.input_hash === (composedHash ?? (await legacyHash()));
   let operation = await session
     .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
     .bind(principal.id, key)
     .first<Operation>();
+  let input: NormalizedMail;
+  let json: string;
+  let hash: string;
   if (operation) {
-    if (operation.input_hash !== hash) fail("idempotency_conflict");
+    if (!(await sameRequest(operation))) fail("idempotency_conflict");
     if (operation.state !== "prepared")
       return getSendStatus(ctx, principal, operation.operation_id);
+    // An unclaimed operation resumes from its archived message and is never recomposed.
+    const archived = await ctx.MAIL_ARCHIVE.get(operation.input_key);
+    if (!archived || archived.size > 6 * 1024 * 1024) fail("send_content_unavailable");
+    json = await archived.text();
+    hash = operation.input_hash;
+    if ((await digest(json)) !== hash) fail("send_content_unavailable");
+    input = (JSON.parse(json) as { input: NormalizedMail }).input;
+  } else {
+    // The archived input is the composed message, so the sent record matches what was submitted.
+    input = await compose(ctx, authored, forward);
+    json = JSON.stringify({
+      version: "outbound-v1",
+      input,
+      draft: draft ?? null,
+      forward_message_id: forward ?? null,
+    });
+    hash = await digest(json);
   }
   // Resolve and hash every attachment before writing an operation or claiming it.
   const message = await providerMessage(ctx, input);
@@ -842,13 +1001,14 @@ async function submit(
     await session.batch([
       session
         .prepare(
-          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at) SELECT ?,?,?,?,?,?,?,'prepared',?,?,?,? WHERE 1=1${draftFence}`,
+          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,request_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,'prepared',?,?,?,? WHERE 1=1${draftFence}`,
         )
         .bind(
           operationId,
           principal.id,
           key,
           hash,
+          requestHash,
           input.from_address,
           inputKey,
           receiptKey,
@@ -875,7 +1035,7 @@ async function submit(
       .first<Operation>();
   }
   if (!operation) fail("draft_conflict");
-  if (operation.input_hash !== hash) fail("idempotency_conflict");
+  if (!(await sameRequest(operation, hash))) fail("idempotency_conflict");
   if (operation.operation_id !== operationId)
     return getSendStatus(ctx, principal, operation.operation_id);
   const archived = await ctx.MAIL_ARCHIVE.get(operation.input_key);

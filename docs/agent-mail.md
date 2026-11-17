@@ -65,7 +65,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `preview_email` | Validate without sending |
 | `upload_attachment`, `copy_attachment` | Stage new bytes or copy a verified archived part |
 | `create_draft`, `get_draft`, `list_drafts`, `update_draft` | Owner isolation and revision checks |
-| `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key |
+| `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key; Gmail-style reply quote and forward block |
 | `get_send_status` | Submission state plus per-recipient delivery evidence |
 
 Schemas are generated from Valibot through Standard Schema and Standard JSON
@@ -98,6 +98,101 @@ thread reads contain at most 20. Bodies inline at most 16,000 characters per
 representation, with authenticated full-content links when truncated. Attachments
 use descriptors rather than embedding arbitrary bytes in model context. Uploads
 are limited to 1 MiB each, eight attachments and 4 MiB total per send.
+
+## Reply quoting and forwarding
+
+Decision by the owner, 2026-11-17 14:13 UTC: replies and forwards follow Gmail.
+fumi composes the quote or forward block from the archived parent on the server,
+so callers write only their own text.
+
+A reply (`reply_message_id`) appends, below the author's text:
+
+```text
+Reply body
+
+On Tue, Nov 17, 2026 at 11:13 PM Parent Sender <parent@example.invalid> wrote:
+
+> First line
+>
+>> earlier quote
+> Last line
+```
+
+- The quote joins each part the author wrote: `text` gets lines prefixed with `>` and a
+  space (`>` alone for blank lines, `>>` for lines that were already quoted); `html`
+  gets Gmail's `<div class="gmail_quote">` attribution and
+  `<blockquote class="gmail_quote">`, inserted before `</body>` when the author sent a
+  full document.
+- The quoted content is the parent's extracted plain text, or a tag-stripped
+  rendering of an HTML-only parent. The HTML quote is that text, escaped. fumi
+  does not embed the parent's HTML because it has no HTML sanitizer, and the
+  archive treats HTML as opaque.
+- The date is the parent's `Date` header in that header's own zone (a numeric
+  offset or an RFC 5322 name such as `EST`); without one it is shown in UTC with
+  a `UTC` label. The sender is the parent's header `From`. Both are untrusted
+  display text. A parent with no text gets no attribution or quote.
+- Like Gmail's prefilled subject, an empty subject or the parent's own subject
+  becomes `Re:` and a space plus the parent's subject (unchanged when it already
+  starts with `Re:`). A subject the caller changed is sent as written.
+- Replies carry the parent's attachments only with `include_attachments: true`
+  (Gmail does not attach them to replies). The limits and SHA-256 verification
+  described for forwards below apply.
+- `quote: false` sends the author's text only; the subject rule still applies.
+- The author's text is never shortened. When the total would exceed the 256 KiB
+  body limit, the quoted original is cut at the largest prefix that fits and
+  ends with `> [Quoted text truncated by fumi]`. Threading headers keep the full
+  parent reachable. When even the attribution does not fit, the send fails with
+  `invalid_body`; `quote: false` sends it without the quote.
+
+`forward_emails` appends Gmail's block below an optional note (the note may be
+empty) and attaches the original attachments by default, as Gmail does:
+
+```text
+---------- Forwarded message ---------
+From: Parent Sender <parent@example.invalid>
+Date: Tue, Nov 17, 2026 at 11:13 PM
+Subject: Synthetic parent
+To: <owner@example.invalid>
+Cc: Copied <copied@example.invalid>
+
+First line
+```
+
+- The parent's Bcc is never shown. The subject follows the reply rule with `Fwd:`
+  (unchanged when it already starts with `Fwd:` or `Fw:`).
+- Original attachments are referenced by their content-addressed extraction
+  objects and verified by SHA-256 at send time, like uploaded attachments.
+  `include_attachments: false` leaves them out. Filenames have `/`, `\` and
+  control characters replaced with `_` and are cut to 200 bytes; a MIME type that
+  is not a valid token or is over 100 bytes becomes `application/octet-stream`.
+- A forward is never shortened: a body over 256 KiB fails with
+  `forward_too_large`, and attachments over the send limits (eight, 1 MiB each,
+  4 MiB total, including uploaded ones) fail with `original_attachments_too_large`.
+  The original is the content of a forward, so a cut copy would misrepresent it.
+- A parent with more than eight attachments, or one over 1 MiB, used to forward
+  without them and now fails unless `include_attachments: false` is set. Keeping
+  only the attachments that fit would forward an incomplete original without
+  saying so.
+- Inline blocks were chosen over attaching the original MIME as
+  `message/rfc822`: they match Gmail's default and read the same in every client.
+- `preview_email` has no forward mode and there are no forward drafts, so a
+  forward's composed block is visible only in its sent record.
+
+Drafts store the author's own input, including `quote`. `preview_email`, sends
+and the sent archive (`input.json`, `read_email` on `sent_` IDs) contain the
+composed message, so the archive matches what was submitted. A parent whose
+extracted body is missing or fails its digest check fails with
+`original_unavailable` rather than sending without the quote. Reply drafts saved
+before this change have no `quote` field and are quoted when sent.
+
+Idempotency compares `request_hash`, a digest of the caller's own input, draft
+revision and forwarded parent, before anything is composed. A same-key retry of a
+settled operation therefore returns its status even if the parent became
+unreadable or a later fumi release composes differently. `input_hash` remains the
+digest of the archived `input.json`. Operations created before `request_hash`
+existed (migration `0015`) compare `input_hash` with the digest of the uncomposed
+input, which is how they were hashed. A `prepared` operation resumes from its
+archived `input.json` and is never composed again.
 
 ## Sending and recovery
 
