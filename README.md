@@ -92,7 +92,6 @@ Install [mise](https://mise.jdx.dev/getting-started.html), then run:
 ```sh
 mise trust
 mise install
-mise run install
 mise run hooks:install
 mise run ci
 ```
