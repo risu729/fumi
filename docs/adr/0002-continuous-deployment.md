@@ -40,7 +40,7 @@ Both deploy tokens hold D1 write access. Fumi's token held Workers access only.
   manual run on main, whose checks pass. A `security` job runs
   [CodeQL](../../.github/workflows/codeql.yml) first, and the `deploy` job needs
   both. The separate Deploy workflow is removed. A manual deployment is a
-  `workflow_dispatch` of CI on main.
+  `workflow_dispatch` of CI on main, which joins the same queue as pushes.
 - CI runs on main share one concurrency group that never cancels a running run,
   so a migration or upload always finishes. Main runs execute one at a time.
   GitHub keeps only the latest queued run in the group, which is the newest
@@ -78,7 +78,9 @@ bookmark, and the migration-compatibility rule exists.
   in progress may be cancelled while waiting and never run; the newest one runs.
 - If the newest main commit fails its checks, nothing newer is deployed and
   production stays on the last deployed commit until a fix merges or someone
-  re-runs CI on main.
+  starts CI on main with `workflow_dispatch`, which always uses the current main
+  head. Re-running an older main run instead joins the queue last, replaces a
+  newer waiting run and then skips, so it deploys nothing.
 - Provisioning D1, Email Routing changes, Cron activation (`deploy-triggers` stays
   `false`) and the archive-only cutover in
   [standalone ingress](../standalone-ingress.md) stay separate, explicitly
