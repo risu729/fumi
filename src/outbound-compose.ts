@@ -98,22 +98,69 @@ const entities: Record<string, string> = {
   nbsp: " ",
 };
 
-/** Minimal HTML-to-text for HTML-only parents; the result is only ever quoted as text. */
+const SKIPPED_ELEMENTS = new Set(["head", "style", "script", "title"]);
+const BREAK_ELEMENTS = new Set([
+  "br",
+  "/p",
+  "/div",
+  "/tr",
+  "/li",
+  "/h1",
+  "/h2",
+  "/h3",
+  "/h4",
+  "/h5",
+  "/h6",
+  "/blockquote",
+  "/table",
+  "/pre",
+]);
+
+function decodeEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, name: string) => {
+    if (name[0] !== "#") return entities[name.toLowerCase()] ?? match;
+    const code =
+      name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)
+      ? String.fromCodePoint(code)
+      : match;
+  });
+}
+
+/**
+ * Minimal HTML-to-text for HTML-only parents. A single scan keeps text outside
+ * tags, comments and head/style/script/title elements. The result is plain text
+ * that is only ever quoted as text or escaped into HTML, never trusted as markup.
+ */
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<(head|style|script|title)\b[\s\S]*?<\/\1\s*>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<br\b[^>]*>/gi, "\n")
-    .replace(/<\/(p|div|tr|li|h[1-6]|blockquote|table|pre)\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, name: string) => {
-      if (name[0] !== "#") return entities[name.toLowerCase()] ?? match;
-      const code =
-        name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
-      return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)
-        ? String.fromCodePoint(code)
-        : match;
-    })
+  const lower = html.toLowerCase();
+  const output: string[] = [];
+  let position = 0;
+  while (position < html.length) {
+    const open = html.indexOf("<", position);
+    if (open === -1) {
+      output.push(html.slice(position));
+      break;
+    }
+    output.push(html.slice(position, open));
+    if (lower.startsWith("<!--", open)) {
+      const close = lower.indexOf("-->", open + 4);
+      position = close === -1 ? html.length : close + 3;
+      continue;
+    }
+    const close = html.indexOf(">", open + 1);
+    if (close === -1) break;
+    const name = /^\/?[a-z0-9]+/.exec(lower.slice(open + 1, close))?.[0] ?? "";
+    position = close + 1;
+    if (SKIPPED_ELEMENTS.has(name)) {
+      const end = lower.indexOf(`</${name}`, position);
+      const after = end === -1 ? -1 : html.indexOf(">", end);
+      position = after === -1 ? html.length : after + 1;
+    } else if (BREAK_ELEMENTS.has(name)) {
+      output.push("\n");
+    }
+  }
+  return decodeEntities(output.join(""))
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

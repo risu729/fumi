@@ -138,6 +138,11 @@ describe("Gmail-style reply and forward composition", () => {
         "<html><head><style>p{}</style></head><body><p>One &amp; two</p><div>Three<br>&#x41;&lt;</div></body></html>",
       ),
     ).toBe("One & two\nThree\nA<");
+    expect(
+      htmlToText(
+        "a<!-- hidden <b> -->b<script>x<y</script>c<br/>&lt;script&gt;<header>d</header><x-y attr='>'>",
+      ),
+    ).toBe("abc\n<script>d'>");
   });
 
   it("quotes the parent below the reply, prefixes Re: and archives the composed message", async () => {
