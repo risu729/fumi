@@ -93,9 +93,10 @@ jobs:
       - name: Install locked dependencies
         run: mise deps
       # The deploy action uploads the Build Output; it does not build. Build
-      # before migrating, so that a build failure changes nothing.
-      - name: Build the checked Worker
-        run: mise run build
+      # with the production variables and validate the output before
+      # migrating, so that a build or config failure changes nothing.
+      - name: Build and validate the production Worker
+        run: mise run check:output
       - name: Diagnose deployment API access without changing resources
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
