@@ -104,9 +104,14 @@ document never overrides a rule here.
 
 - The initial runtime captures raw MIME in private R2 and preserves Gmail
   forwarding. Keep future features distinct from implemented and tested behavior.
-- Keep the scope of a task explicit. Code changes alone do not authorize
-  deploying Workers, changing email routes, backfilling real mail, or sending mail.
-  Honor explicit authorization already given in the active task.
+- Keep the scope of a task explicit. Merging to main deploys the Worker and
+  applies its migrations ([ADR 0002](docs/adr/0002-continuous-deployment.md)),
+  so merging is a production change. Code changes alone do not authorize changing
+  email routes, backfilling real mail, or sending mail. Honor explicit
+  authorization already given in the active task.
+- A migration must work with the Worker version that is already running,
+  because the deploy job applies it before the new version goes live. Never
+  edit or revert an applied migration; add a new one.
 - Keep tasks in mise rather than package.json scripts. Keep CI actions SHA-pinned.
 - Use the locked cf CLI and native cloudflare.config.ts configuration.
 - Use synthetic fixtures. Never commit messages, attachments, passwords, recipient

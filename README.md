@@ -100,8 +100,9 @@ mise run ci
 The foundation includes TypeScript, Oxlint, Oxfmt, hk, YAML/TOML and workflow
 validation, spelling/hygiene checks, secret scanning, and Renovate configuration.
 `package.json` is private to prevent accidental npm publication; the GitHub
-repository is public. Production deployment is manual through GitHub Actions,
-using a Worker-scoped account token in an Actions secret and an account-ID variable.
+repository is public. GitHub Actions deploys the newest main commit that passes
+CI, applying pending D1 migrations first, using an account token in an Actions
+secret and an account-ID variable.
 The shared deploy action verifies the active version; CodeQL checks TypeScript
 and workflows. See [repository conventions](docs/repository-conventions.md) for
 the comparison and intentional differences from the larger repositories.

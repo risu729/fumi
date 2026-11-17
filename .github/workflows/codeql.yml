@@ -1,8 +1,7 @@
 name: CodeQL
+# CI calls this on every main run before deploying, so main pushes need no own trigger.
 on:
   pull_request:
-  push:
-    branches: [main]
   schedule:
     - cron: "23 3 * * 2"
   workflow_dispatch:
