@@ -149,6 +149,8 @@ describe("Gmail-style reply and forward composition", () => {
         "a<!-- hidden <b> -->b<script>x<y</script>c<br/>&lt;script&gt;<header>d</header><x-y attr='>'>",
       ),
     ).toBe("abc\n<script>d'>");
+    expect(htmlToText("Price < 5 and a < b<br>c")).toBe("Price < 5 and a < b\nc");
+    expect(htmlToText("<p>İİİİ</p><script>secret</script>visible")).toBe("İİİİ\nvisible");
   });
 
   it("quotes the parent below the reply, prefixes Re: and archives the composed message", async () => {
@@ -263,6 +265,51 @@ describe("Gmail-style reply and forward composition", () => {
     expect(retry.operation_id).toBe(first.operation_id);
     await expect(
       sendMail(ctx, principal, { ...reply, include_attachments: true }, "retry"),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a prepared reply from its archived message without recomposing", async () => {
+    await seedParent();
+    const { ctx, send } = context();
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    let batches = 0;
+    const interrupted = {
+      ...ctx,
+      MAIL_CATALOG: {
+        withSession: () => ({
+          prepare: session.prepare.bind(session),
+          batch: async (statements: D1PreparedStatement[]) => {
+            batches++;
+            if (batches === 2) throw new Error("synthetic preclaim crash");
+            return session.batch(statements);
+          },
+        }),
+      } as unknown as D1Database,
+    };
+    await expect(sendMail(interrupted, principal, reply, "prepared-reply")).rejects.toThrow();
+    // Composition would now fail; the archived message is what gets sent.
+    await env.MAIL_ARCHIVE.delete(
+      (await env.MAIL_ARCHIVE.list({ prefix: `${prefix}/body-json/` })).objects.map((o) => o.key),
+    );
+    const resumed = await sendMail(ctx, principal, reply, "prepared-reply");
+    expect(resumed.state).toBe("accepted");
+    expect(sent(send).text).toContain(`${attribution}\n\n> First line`);
+  });
+
+  it("matches operations from before request_hash on their original digest", async () => {
+    const { ctx, send } = context();
+    const plain = {
+      from_address: "sender@example.invalid",
+      to: ["recipient@example.invalid"],
+      subject: "Plain",
+      payload: { text: "Plain body" },
+    };
+    const first = await sendMail(ctx, principal, plain, "legacy");
+    await env.MAIL_CATALOG.prepare("UPDATE outbound_operations SET request_hash = NULL").run();
+    expect((await sendMail(ctx, principal, plain, "legacy")).operation_id).toBe(first.operation_id);
+    await expect(
+      sendMail(ctx, principal, { ...plain, subject: "Changed" }, "legacy"),
     ).rejects.toMatchObject({ code: "idempotency_conflict" });
     expect(send).toHaveBeenCalledTimes(1);
   });

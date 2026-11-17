@@ -175,7 +175,8 @@ function decodeEntities(value: string): string {
  * that is only ever quoted as text or escaped into HTML, never trusted as markup.
  */
 export function htmlToText(html: string): string {
-  const lower = html.toLowerCase();
+  // ASCII-only lowercasing keeps indices aligned with the original string.
+  const lower = html.replace(/[A-Z]/g, (character) => character.toLowerCase());
   const output: string[] = [];
   let position = 0;
   while (position < html.length) {
@@ -185,6 +186,12 @@ export function htmlToText(html: string): string {
       break;
     }
     output.push(html.slice(position, open));
+    // A "<" that cannot start markup is text, as in "a < b".
+    if (!/[a-z/!?]/.test(lower[open + 1] ?? "")) {
+      output.push("<");
+      position = open + 1;
+      continue;
+    }
     if (lower.startsWith("<!--", open)) {
       const close = lower.indexOf("-->", open + 4);
       position = close === -1 ? html.length : close + 3;

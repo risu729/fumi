@@ -941,29 +941,48 @@ async function submit(
       forward_message_id: forward ?? null,
     }),
   );
+  // Rows from before request_hash stored only the digest of the uncomposed envelope.
+  const legacyHash = async () =>
+    digest(
+      JSON.stringify({
+        version: "outbound-v1",
+        input: authored,
+        draft: draft ?? null,
+        forward_message_id: forward ?? null,
+      }),
+    );
+  const sameRequest = async (row: Operation, composedHash?: string) =>
+    row.request_hash
+      ? row.request_hash === requestHash
+      : row.input_hash === (composedHash ?? (await legacyHash()));
   let operation = await session
     .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
     .bind(principal.id, key)
     .first<Operation>();
-  if (operation?.request_hash) {
-    if (operation.request_hash !== requestHash) fail("idempotency_conflict");
-    if (operation.state !== "prepared")
-      return getSendStatus(ctx, principal, operation.operation_id);
-  }
-  // The archived input is the composed message, so the sent record matches what was submitted.
-  const input = await compose(ctx, authored, forward);
-  const json = JSON.stringify({
-    version: "outbound-v1",
-    input,
-    draft: draft ?? null,
-    forward_message_id: forward ?? null,
-  });
-  const hash = await digest(json);
+  let input: NormalizedMail;
+  let json: string;
+  let hash: string;
   if (operation) {
-    // Rows from before request_hash, or a prepared row whose composition changed.
-    if (operation.input_hash !== hash) fail("idempotency_conflict");
+    if (!(await sameRequest(operation))) fail("idempotency_conflict");
     if (operation.state !== "prepared")
       return getSendStatus(ctx, principal, operation.operation_id);
+    // An unclaimed operation resumes from its archived message and is never recomposed.
+    const archived = await ctx.MAIL_ARCHIVE.get(operation.input_key);
+    if (!archived || archived.size > 6 * 1024 * 1024) fail("send_content_unavailable");
+    json = await archived.text();
+    hash = operation.input_hash;
+    if ((await digest(json)) !== hash) fail("send_content_unavailable");
+    input = (JSON.parse(json) as { input: NormalizedMail }).input;
+  } else {
+    // The archived input is the composed message, so the sent record matches what was submitted.
+    input = await compose(ctx, authored, forward);
+    json = JSON.stringify({
+      version: "outbound-v1",
+      input,
+      draft: draft ?? null,
+      forward_message_id: forward ?? null,
+    });
+    hash = await digest(json);
   }
   // Resolve and hash every attachment before writing an operation or claiming it.
   const message = await providerMessage(ctx, input);
@@ -1016,7 +1035,7 @@ async function submit(
       .first<Operation>();
   }
   if (!operation) fail("draft_conflict");
-  if (operation.input_hash !== hash) fail("idempotency_conflict");
+  if (!(await sameRequest(operation, hash))) fail("idempotency_conflict");
   if (operation.operation_id !== operationId)
     return getSendStatus(ctx, principal, operation.operation_id);
   const archived = await ctx.MAIL_ARCHIVE.get(operation.input_key);

@@ -190,7 +190,9 @@ revision and forwarded parent, before anything is composed. A same-key retry of 
 settled operation therefore returns its status even if the parent became
 unreadable or a later fumi release composes differently. `input_hash` remains the
 digest of the archived `input.json`. Operations created before `request_hash`
-existed (migration `0015`) still compare `input_hash`.
+existed (migration `0015`) compare `input_hash` with the digest of the uncomposed
+input, which is how they were hashed. A `prepared` operation resumes from its
+archived `input.json` and is never composed again.
 
 ## Sending and recovery
 
