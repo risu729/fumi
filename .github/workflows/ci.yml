@@ -194,7 +194,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
   actions-timeline:
     name: Generate Actions Timeline
-    needs: [checks, deploy]
+    needs: [deploy]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
