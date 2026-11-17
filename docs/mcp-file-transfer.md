@@ -215,6 +215,10 @@ What this shows:
   ([MCP server portals](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/)).
   Whether the Claude app offers file references for fumi can only be checked after a
   sync.
+- Re-check on 2026-11-17 at 19:02 UTC, after the portal had synced: the Claude app saw
+  `content_base64` with `format: "byte"` and the description, and still added no
+  file-reference note to the tool. `format: "byte"` alone does not turn the feature
+  on, and which connectors get it remains undocumented.
 - The Grok bot already keeps attachment bytes out of model output, so for Grok the
   1 MiB cap is the only limit, and a larger cap costs no context.
 - The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
