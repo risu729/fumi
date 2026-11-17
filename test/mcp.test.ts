@@ -293,11 +293,11 @@ describe("official MCP HTTP transport", () => {
       "issues",
     );
   });
-  it("marks attachment bytes as base64 so hosts can offer file references", () => {
-    const json = bridge(toolSchemas.upload_attachment)["~standard"].jsonSchema.input({
-      target: "draft-2020-12",
-    });
-    expect(json).toMatchObject({
+  it("lists attachment bytes as base64 so hosts can offer file references", async () => {
+    const { client } = await clientFor(mailer);
+    const { tools } = await client.listTools();
+    const upload = tools.find((tool) => tool.name === "upload_attachment");
+    expect(upload?.inputSchema).toMatchObject({
       properties: {
         content_base64: {
           type: "string",

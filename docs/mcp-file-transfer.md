@@ -228,8 +228,9 @@ still applies.
   `upload_attachment.content_base64` with `"format": "byte"`, the marker on the
   Gmail connector field where the Claude app offers file references. Then check
   whether the Claude app, Cursor and the Grok bot offer file references for fumi.
-  Raise the limits only for a client where they work. Which schema signal the
-  Claude app uses is inferred from that one connector, not documented.
+  The limits are server-wide, so raise them only if a client fumi uses offers file
+  references, accepting that clients without them see the same limit. Which schema
+  signal the Claude app uses is inferred from that one connector, not documented.
 - The draft is not stable. Revisit this page when a reference implementation lands,
   when the WG submits an Extensions Track SEP, or when a client fumi uses ships
   support.
