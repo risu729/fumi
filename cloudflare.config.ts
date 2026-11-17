@@ -72,7 +72,8 @@ export default defineConfig({
         exportName: "MailProcessing",
       }),
     },
-    workersDev: false,
+    // Set explicitly: for an unset value cf sends no preview setting at deploy
+    // (getSubdomainValues) and leaves it to the API.
     previewUrls: false,
     triggers: [
       triggers.scheduled({ schedule: "*/5 * * * *" }),
@@ -85,6 +86,7 @@ export default defineConfig({
     ],
     observability: {
       enabled: true,
+      // Set explicitly: cf omits an unset rate, and its default is set by the API.
       headSamplingRate: 1,
       issues: { enabled: true },
       traces: { enabled: true, headSamplingRate: 0.01 },
