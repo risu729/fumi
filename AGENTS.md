@@ -65,19 +65,23 @@ document never overrides a rule here.
 
 ## Dependencies
 
-- Only the mise deps provider `[deps.bun]` in `mise.toml` installs the npm
-  dependencies. With `auto = true`, `mise run` and `mise exec` (including the
-  `hk install --mise` git hooks) run its frozen `bun install` first, and skip
-  it while its sources are unchanged and `node_modules` exists.
+- Only the mise deps provider `[deps.bun]` in `mise.toml` installs the
+  `package.json` dependencies. With `auto = true`, `mise run` and `mise exec`
+  (including the `hk install --mise` git hooks) run its frozen `bun install` first,
+  and skip it while its sources are unchanged and `node_modules` exists.
 - Set only what differs from the provider's defaults. Its default sources are
   `bun.lock` and `package.json`; `bunfig.toml` is added because its linker
   decides the `node_modules` layout.
 - Do not add an install task, an install command inside a task, or a CI step
   that installs dependencies before `mise run`. Run `mise deps` explicitly only
+  when no earlier `mise run` or `mise exec` in the same job has installed them:
   before a step that needs `node_modules` without going through mise, or one
   that runs with `--no-deps`.
 - `[deps]` is experimental in mise, so `experimental = true` stays while it is
   used.
+- To update `bun.lock` after editing `package.json`, run
+  `mise exec --no-deps -- bun install`: without `--no-deps`, the frozen install
+  refuses the change before Bun runs.
 
 ## Pull requests and merging
 
