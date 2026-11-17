@@ -190,6 +190,37 @@ gives the client a URL to upload to. The Claude app's file reference removes the
 model's output tokens but not the base64 in JSON-RPC, so the server's JSON size limit
 still applies.
 
+## Client checks for fumi (2026-11-17)
+
+After [#88](https://github.com/risu729/fumi/pull/88) was deployed (16:34 UTC), each
+client was asked to show `upload_attachment` as it sees it, say whether it can pass
+a file without typing base64, say whether it can run code or send an HTTP PUT, and
+call `upload_attachment` once with the 17-byte text `fumi upload test\n`. Both
+calls that ran returned SHA-256 `89f71b11…0028812` and size 17. No mail was sent.
+
+| Client | Schema it saw | File without typing base64 | Code / HTTP PUT |
+| --- | --- | --- | --- |
+| fumi itself (`tools/list` on fumi.takuk.me through Access) | `content_base64` has `format: "byte"` and its description | n/a | n/a |
+| Claude app (claude.ai, through the Portal) | No `format` or description; no file-reference note | No. The model would have to type the base64 it computed in its sandbox | Runs code; its sandbox reaches only allowlisted hosts, so no PUT to an arbitrary URL |
+| Grok bot (through the Portal) | No `format` or description | Yes, by its own client feature: a string argument set to `"$file:/workspace/x.b64"` is replaced with that file's content when the call is sent | Both |
+| Cursor web agent (cursor.com/agents) | fumi tools not listed, other Portal tools were; probably its Portal connector was authorized before fumi was attached and needs a reconnect | Not checked | Runs code; PUT not checked |
+
+What this shows:
+
+- The Cloudflare MCP server portal serves a stored copy of each server's tools. Fields
+  added in #85 (14:48 UTC) were visible, the #88 schema was not. Portals refresh tools
+  on their own schedule (the docs say about every two hours for servers that use Dynamic
+  Client Registration), on "Sync capabilities" in the dashboard, or on
+  `POST /accounts/{account_id}/access/ai-controls/mcp/servers/{server_id}/sync`
+  ([MCP server portals](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/)).
+  Whether the Claude app offers file references for fumi can only be checked after a
+  sync.
+- The Grok bot already keeps attachment bytes out of model output, so for Grok the
+  1 MiB cap is the only limit, and a larger cap costs no context.
+- The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
+  of the proposal) does not help it unless fumi's host is allowed there. File
+  references are its realistic path.
+
 ## Implications for fumi
 
 - No surveyed client sends files through a standard mechanism today; Grok was not
