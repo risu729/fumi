@@ -72,6 +72,9 @@ export default defineConfig({
         exportName: "MailProcessing",
       }),
     },
+    // Set although cf leaves it unset otherwise: an unset value sends no preview
+    // setting at deploy (getSubdomainValues), so it would not turn preview URLs off.
+    previewUrls: false,
     triggers: [
       triggers.scheduled({ schedule: "*/5 * * * *" }),
       triggers.queue({
