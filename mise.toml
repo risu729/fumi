@@ -39,7 +39,7 @@ run = "bun install --frozen-lockfile"
 [tasks.typecheck]
 description = "Check TypeScript without emitting files."
 depends = ["types"]
-run = "tsc --noEmit"
+run = "tsc"
 
 [tasks.types]
 description = "Generate binding and runtime types from native Cloudflare configuration."

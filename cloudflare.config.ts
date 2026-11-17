@@ -72,8 +72,6 @@ export default defineConfig({
         exportName: "MailProcessing",
       }),
     },
-    workersDev: false,
-    previewUrls: false,
     triggers: [
       triggers.scheduled({ schedule: "*/5 * * * *" }),
       triggers.queue({
@@ -85,7 +83,6 @@ export default defineConfig({
     ],
     observability: {
       enabled: true,
-      headSamplingRate: 1,
       issues: { enabled: true },
       traces: { enabled: true, headSamplingRate: 0.01 },
     },
