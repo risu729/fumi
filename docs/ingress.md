@@ -91,20 +91,22 @@ limitation and keep broad cutover pending.
 
 ## Access and repeatable deployments
 
-The first Worker creation needs broader provisioning access. After it exists,
-use an account-owned token with **Workers Editor scoped to fumi only** for routine
-deployment. Binding the existing bucket does not need direct R2 API access on
-that token. Route changes and direct object inspection remain separate operations
-with their own authorized access. Store the deployment token in the repository's
-Actions secret, not source or logs.
+The first Worker creation needs broader provisioning access. After it exists, use an
+account-owned token with **Workers Editor scoped to fumi only** and account-level
+**D1 Write** for routine deployment, which applies catalog migrations
+([ADR 0002](adr/0002-continuous-deployment.md)). Binding the existing bucket does not
+need direct R2 API access on that token. Route changes and direct object inspection
+remain separate operations with their own authorized access. Store the deployment token
+in the repository's Actions secret, not source or logs.
 
-The manual production deployment workflow runs CodeQL, builds and checks the
-selected main commit, and refuses a stale dispatch if main has advanced before
-publication. The SHA-pinned shared deploy action validates that exact build,
-uploads a version, activates it, and verifies the returned deployment and active
-version at 100 percent traffic. It preserves existing secrets and leaves trigger
-synchronization disabled. See [repository conventions](repository-conventions.md)
-for the comparison with other repositories.
+The production deployment in CI runs for every main commit whose checks and CodeQL pass,
+applies pending catalog migrations, and skips a commit that is no longer the main head
+([ADR 0002](adr/0002-continuous-deployment.md)). The SHA-pinned shared deploy action
+validates that exact build, uploads a version, activates it, and verifies the returned
+deployment and active version at 100 percent traffic. It preserves existing secrets and
+leaves trigger synchronization disabled. See
+[repository conventions](repository-conventions.md) for the comparison with other
+repositories.
 
 `mise run deploy:bootstrap` retains the full `cf deploy --no-provision` path for
 explicit initial setup or maintenance. Routine production publishing uses the

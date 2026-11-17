@@ -108,18 +108,19 @@ D1 schema exists, then applies migrations locally and verifies scheduled recover
 and Workflow completion. A second message is cataloged without another scan.
 These checks do not access production mail.
 
-Do not dispatch deployment expecting it to provision or migrate D1. The existing
-Worker-scoped deploy token has not been verified for D1 provisioning or schema
-operations. Use separately authorized credentials and verify the exact target;
-do not widen the deploy token by assumption.
+The deploy job in CI applies pending migrations to the database that
+`FUMI_CATALOG_DATABASE_ID` names, after checking that it is `fumi-catalog`
+([ADR 0002](adr/0002-continuous-deployment.md)). It does not provision a
+database. Provisioning uses separately authorized credentials.
 
 1. Record the current Worker version and Email Routing configuration. Provision
    or identify the intended private `fumi-catalog` database and verify its UUID.
    Keep resource/account identifiers outside the public repository.
 2. Apply `migrations/0001_archive_catalog.sql` before activating the schedule.
-   With the pinned CLI, `cf d1 migrations apply <database-uuid> --dir ./migrations`
-   targets the remote database by default. It is a write even in noninteractive
-   execution; do not rely on a confirmation prompt.
+   With the pinned CLI, `cf d1 migrations apply <database-uuid>` reads
+   `./migrations` and targets the remote database by default. It is a write even
+   in noninteractive execution; do not rely on a confirmation prompt. After
+   provisioning, the deploy job applies later migrations.
 3. Read back the schema, migration record and initial scan checkpoint. CLI dry
    runs do not execute or validate SQL. Even `migrations list` may create its
    bookkeeping table; use explicit read-only queries for inspection.
@@ -129,7 +130,7 @@ do not widen the deploy token by assumption.
    Worker-scoped token does not need a D1 API lookup to resolve a name.
    Local tests and CI dry runs can omit it and use a local database.
    The
-   manual CI deployment uses the versions strategy with `deploy-triggers: false`;
+   CI deployment uses the versions strategy with `deploy-triggers: false`;
    it will not activate the Cron schedule. Verify resource resolution and
    deployment credentials separately.
 5. Activate the reviewed Cron trigger separately. Full `cf deploy` synchronizes

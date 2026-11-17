@@ -105,8 +105,10 @@ operator currently runs archive-only mode.
    alert delivery and operational response ownership.
 2. Save private route/version/configuration snapshots. Enumerate all routes
    handled by fumi and specialist Workers still forwarding independently.
-3. Apply and verify the catalog migration separately. Deploy v1/v2 readers while
-   retaining forwarding. Keep a rollback version with v2 support.
+3. Deploy v1/v2 readers while retaining forwarding. Keep a rollback version
+   with v2 support. Migration 0014 was applied and verified by hand on
+   2026-11-17 11:25 UTC; the deploy job applies later migrations
+   ([ADR 0002](adr/0002-continuous-deployment.md)).
 4. On an explicitly authorized test route/version, build archive-only mode and
    verify the artifact, bindings and deployed mode. Download controlled MIME and
    attachments and compare hashes. Verify receipt/catalog/MCP, absence of a

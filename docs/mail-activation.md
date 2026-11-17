@@ -115,8 +115,8 @@ association and verify unauthenticated access is blocked before owner testing.
 An existing Cloudflare One/WARP owner session can authenticate a direct request
 without an explicit token header. That request is not a negative authentication
 test; use a separate genuinely unauthenticated context to check denial.
-Leave the manual deployment workflow unchanged; a versions deployment does not
-apply these resource settings.
+Leave the CI deployment unchanged; a versions deployment does not apply these
+resource settings.
 
 ## Owner login and acceptance
 

@@ -8,13 +8,18 @@ conventions as the owner's other repositories, scaled to one Email Worker.
 - The shared
   [deploy action v3](https://github.com/risu729/wrangler-deploy-action/tree/c85532bf934238e9811676cbf10a4d08ff88ae12)
   uses the caller's pinned `cf` package despite its historical repository name. Fumi
-  uses it for credential-free CI validation and manual production publishing, matching
+  uses it for credential-free CI validation and production publishing, matching
   [github-notification-cleanup](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/.github/workflows/worker-deploy.yml).
-- Production runs CodeQL and the complete local CI graph before publishing the
-  same on-disk build. The versions strategy verifies the uploaded version at
-  100 percent traffic, preserves existing secrets and leaves triggers alone.
-  A serialized production job refuses a dispatch whose SHA is no longer main.
-  Version/deployment IDs, commit SHA and run URL appear in the job summaries.
+- Every main push or manual CI run on main whose checks and CodeQL pass deploys that
+  commit, as in
+  [Pateat's CI](https://github.com/risu729/pateat/blob/200756fda7054e4a7403311402b0ebf2e22dbe33/.github/workflows/ci.yml)
+  ([ADR 0002](adr/0002-continuous-deployment.md)). Main runs are serialized and never
+  cancelled once running. The deploy job skips a commit that is no longer the main head,
+  verifies the catalog database, records pending migrations and a Time Travel bookmark,
+  applies them and requires none to remain. The versions strategy then verifies the
+  uploaded version at 100 percent traffic, preserves existing secrets and leaves
+  triggers alone. Version/deployment IDs, commit SHA and run URL appear in the job
+  summaries.
 - [Pateat's CodeQL setup](https://github.com/risu729/pateat/blob/cf2be052bb580a65b92379f268252129bd8637c3/.github/workflows/codeql.yml)
   supplies the JavaScript/TypeScript and Actions analyses with extended security
   queries, no dependency or TRAP cache, and SHA-pinned actions. Fumi runs them on
@@ -49,18 +54,18 @@ private mail exclusions and generated Cloudflare type exclusions are retained.
 
 ## Intentional differences
 
-Production remains manually dispatched during staged mail migration. Automatic
-push deployment is a separate operational choice. PRs only validate locally:
-there is no preview mailbox or production-data binding exposed to a preview.
+PRs only validate locally: there is no preview mailbox or production-data
+binding exposed to a preview.
 
-The archive catalog migration is exercised against local D1 in CI; applying it to
-production is a separate step in the [catalog runbook](archive-catalog.md). There is no
-automatic remote database migration, Container rollout, multi-Worker release ledger,
-extension packaging, browser suite, package release or release attestation in this
-single-Worker slice. Those checks belong to the corresponding products in Pateat, Kogane
-or Kuebiko. No cross-job artifact transfer is needed for the deploy job because its
-checks, build, native email test, validation and publication use the same checkout and
-build output.
+The catalog migrations are exercised against local D1 in CI and applied to production by
+the deploy job before upload ([ADR 0002](adr/0002-continuous-deployment.md)).
+Provisioning the database stays a separate step in the
+[catalog runbook](archive-catalog.md). There is no Container rollout, multi-Worker
+release ledger, extension packaging, browser suite, package release or release
+attestation in this single-Worker slice. Those checks belong to the corresponding
+products in Pateat, Kogane or Kuebiko. The deploy job does not reuse an artifact from
+the `CI Check` job: it checks out the same commit after that job passes and rebuilds it
+for publication.
 
 Branch protection is separate GitHub repository configuration, not a workflow file. The
 aligned default-branch ruleset requires pull requests, the GitHub Actions `CI Check`,
