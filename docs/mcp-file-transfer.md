@@ -222,6 +222,15 @@ still applies.
 - For downloads, a short-lived URL (as in SEP-2532's redirect mode and ChatGPT's
   `download_url`) matches the direction of both drafts better than larger base64 tool
   results.
+- Raising the inline limit alone only spends more model context, because a client
+  without file references makes the model type every base64 byte, or copy it from
+  command output. Decision (owner, 2026-11-17 16:23 UTC): first mark
+  `upload_attachment.content_base64` with `"format": "byte"`, the marker on the
+  Gmail connector field where the Claude app offers file references. Then check
+  whether the Claude app, Cursor and the Grok bot offer file references for fumi.
+  The limits are server-wide, so raise them only if a client fumi uses offers file
+  references, accepting that clients without them see the same limit. Which schema
+  signal the Claude app uses is inferred from that one connector, not documented.
 - The draft is not stable. Revisit this page when a reference implementation lands,
   when the WG submits an Extensions Track SEP, or when a client fumi uses ships
   support.

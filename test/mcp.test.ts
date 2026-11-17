@@ -293,4 +293,19 @@ describe("official MCP HTTP transport", () => {
       "issues",
     );
   });
+  it("lists attachment bytes as base64 so hosts can offer file references", async () => {
+    const { client } = await clientFor(mailer);
+    const { tools } = await client.listTools();
+    const upload = tools.find((tool) => tool.name === "upload_attachment");
+    expect(upload?.inputSchema).toMatchObject({
+      properties: {
+        content_base64: {
+          type: "string",
+          format: "byte",
+          maxLength: 1_398_104,
+          description: "The base64-encoded content of the attachment.",
+        },
+      },
+    });
+  });
 });

@@ -119,7 +119,15 @@ export const toolSchemas = {
   upload_attachment: v.strictObject({
     filename: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
     content_type: v.pipe(v.string(), v.maxLength(100)),
-    content_base64: v.pipe(v.string(), v.maxLength(1_398_104)),
+    // format "byte" is the OpenAPI marker for base64. The Claude app offered
+    // file references (sha256:<hex>:<path>, filled in by the app) on a Gmail
+    // connector field marked this way; whether fumi gets them is being checked.
+    content_base64: v.pipe(
+      v.string(),
+      v.maxLength(1_398_104),
+      v.metadata({ format: "byte" }),
+      v.description("The base64-encoded content of the attachment."),
+    ),
   }),
   copy_attachment: v.strictObject({
     message_id: identifier,
