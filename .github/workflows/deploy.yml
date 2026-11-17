@@ -58,7 +58,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Validate the checked Worker with the shared deploy action
-        uses: risu729/wrangler-deploy-action@6bb27960f8e904e4961616a5b02e529df3a5a702 # v3.0.2
+        uses: risu729/wrangler-deploy-action@a371aa836e01c95d3928ba1a62b052229c7184c2 # v3.0.3
         with:
           mode: dry-run
           worker: fumi
@@ -118,7 +118,7 @@ jobs:
             exit 1
           fi
       - name: Deploy the checked Worker
-        uses: risu729/wrangler-deploy-action@6bb27960f8e904e4961616a5b02e529df3a5a702 # v3.0.2
+        uses: risu729/wrangler-deploy-action@a371aa836e01c95d3928ba1a62b052229c7184c2 # v3.0.3
         with:
           mode: production
           worker: fumi
