@@ -130,7 +130,10 @@ On Tue, Nov 17, 2026 at 11:13 PM Parent Sender <parent@example.invalid> wrote:
 - The date is the parent's `Date` header in that header's own UTC offset; the
   sender is the parent's header `From`. Both are untrusted display text.
 - The subject is prefixed with `Re:` and a space unless it already starts with `Re:`; an
-  empty subject reuses the parent's. Replies never carry the parent's attachments.
+  empty subject reuses the parent's.
+- Replies carry the parent's attachments only with `include_attachments: true`
+  (Gmail does not attach them to replies). The limits and SHA-256 verification
+  described for forwards below apply.
 - `quote: false` sends the author's text only (the subject still gets the `Re:` prefix).
 - The author's text is never shortened. When the total would exceed the 256 KiB
   body limit, the quoted original is cut at the largest prefix that fits and
@@ -159,7 +162,7 @@ First line
   control characters replaced with `_`.
 - A forward is never shortened: a body over 256 KiB fails with
   `forward_too_large`, and attachments over the send limits (eight, 1 MiB each,
-  4 MiB total, including uploaded ones) fail with `forward_attachments_too_large`.
+  4 MiB total, including uploaded ones) fail with `original_attachments_too_large`.
   The original is the content of a forward, so a cut copy would misrepresent it.
 - Inline blocks were chosen over attaching the original MIME as
   `message/rfc822`: they match Gmail's default and read the same in every client.

@@ -32,6 +32,8 @@ export interface MailInput {
   reply_message_id?: string;
   /** Replies quote the parent Gmail-style unless this is false. */
   quote?: boolean;
+  /** Attach the parent's attachments: off by default for replies, on for forwards. */
+  include_attachments?: boolean;
   reply_to?: string;
 }
 
@@ -44,6 +46,7 @@ interface NormalizedMail {
   payload: { text?: string; html?: string; attachments: AttachmentReference[] };
   reply_message_id?: string;
   quote?: boolean;
+  include_attachments?: boolean;
   reply_to?: string;
   headers: Record<string, string>;
 }
@@ -233,12 +236,20 @@ async function normalize(
     "payload",
     "reply_message_id",
     "quote",
+    "include_attachments",
     "reply_to",
   ]);
   const quote = item["quote"];
   if (
     quote !== undefined &&
     (typeof quote !== "boolean" || item["reply_message_id"] === undefined || options.forward)
+  )
+    fail("invalid_input");
+  const includeAttachments = item["include_attachments"];
+  if (
+    includeAttachments !== undefined &&
+    (typeof includeAttachments !== "boolean" ||
+      (item["reply_message_id"] === undefined && !options.forward))
   )
     fail("invalid_input");
   let sender = item["from_address"];
@@ -359,13 +370,14 @@ async function normalize(
     },
     ...(reply === undefined ? {} : { reply_message_id: reply }),
     ...(quote === undefined ? {} : { quote }),
+    ...(includeAttachments === undefined ? {} : { include_attachments: includeAttachments }),
     ...(item["reply_to"] === undefined ? {} : { reply_to: address(item["reply_to"]) }),
     headers,
   };
 }
 
-/** Original attachments join a forward the way Gmail attaches them by default. */
-function forwardAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
+/** Parent attachments join after the author's, under the same send limits. */
+function parentAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
   const originals = parent.attachments.map((original): AttachmentReference => ({
     attachment_id: `part_${original.index}`,
     sha256: original.sha256,
@@ -385,7 +397,7 @@ function forwardAttachments(input: NormalizedMail, parent: ParentMail): Attachme
     attachments.some((entry) => entry.size > OUTBOUND_LIMITS.attachmentBytes) ||
     attachments.reduce((sum, entry) => sum + entry.size, 0) > OUTBOUND_LIMITS.totalAttachmentBytes
   )
-    fail("forward_attachments_too_large");
+    fail("original_attachments_too_large");
   return attachments;
 }
 
@@ -397,9 +409,9 @@ function forwardAttachments(input: NormalizedMail, parent: ParentMail): Attachme
 async function compose(
   ctx: OutboundContext,
   input: NormalizedMail,
-  forward?: { rawKey: string; includeAttachments: boolean },
+  forward?: string,
 ): Promise<NormalizedMail> {
-  const parentKey = forward?.rawKey ?? input.reply_message_id;
+  const parentKey = forward ?? input.reply_message_id;
   if (parentKey === undefined) return input;
   let parent: ParentMail;
   try {
@@ -437,9 +449,11 @@ async function compose(
     subject: encoder.encode(subject).byteLength > 998 ? input.subject : subject,
     payload: {
       ...body,
-      attachments: forward?.includeAttachments
-        ? forwardAttachments(input, parent)
-        : input.payload.attachments,
+      // Gmail attaches originals to forwards, not replies; either can be switched.
+      attachments:
+        (input.include_attachments ?? forward !== undefined)
+          ? parentAttachments(input, parent)
+          : input.payload.attachments,
     },
   };
 }
@@ -577,6 +591,9 @@ function draftInput(input: NormalizedMail): MailInput {
     },
     ...(input.reply_message_id ? { reply_message_id: input.reply_message_id } : {}),
     ...(input.quote === undefined ? {} : { quote: input.quote }),
+    ...(input.include_attachments === undefined
+      ? {}
+      : { include_attachments: input.include_attachments }),
     ...(input.reply_to ? { reply_to: input.reply_to } : {}),
   };
 }
@@ -847,7 +864,6 @@ async function forwardMailImpl(
   parentRawKey: string,
   input: unknown,
   idempotencyKey: string,
-  options: { includeAttachments?: boolean } = {},
 ) {
   scope(principal, "mail:read");
   scope(principal, "mail:send");
@@ -862,7 +878,7 @@ async function forwardMailImpl(
     await normalize(ctx, principal, input, { forward: true }),
     idempotencyKey,
     undefined,
-    { rawKey: parentRawKey, includeAttachments: options.includeAttachments !== false },
+    parentRawKey,
   );
 }
 
@@ -910,7 +926,7 @@ async function submit(
   authored: NormalizedMail,
   key: string,
   draft?: { id: string; revision: number },
-  forward?: { rawKey: string; includeAttachments: boolean },
+  forward?: string,
 ) {
   if (typeof key !== "string" || !/^[\x21-\x7e]{1,160}$/.test(key)) fail("invalid_idempotency_key");
   const session = db(ctx);
@@ -920,7 +936,7 @@ async function submit(
     version: "outbound-v1",
     input,
     draft: draft ?? null,
-    forward_message_id: forward?.rawKey ?? null,
+    forward_message_id: forward ?? null,
   });
   const hash = await digest(json);
   let operation = await session

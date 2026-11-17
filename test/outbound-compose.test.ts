@@ -223,6 +223,25 @@ describe("Gmail-style reply and forward composition", () => {
     expect(encoder.encode(text).byteLength).toBeGreaterThan(OUTBOUND_LIMITS.bodyBytes - 200);
   });
 
+  it("attaches the parent's attachments to a reply only when asked", async () => {
+    const content = encoder.encode("synthetic reply attachment");
+    await seedParent(undefined, [{ filename: "notes.txt", mimeType: "text/plain", content }]);
+    const { ctx, send } = context();
+    await sendMail(ctx, principal, reply, "reply-default");
+    expect(sent(send).attachments).toEqual([]);
+    await sendMail(ctx, principal, { ...reply, include_attachments: true }, "reply-attached");
+    expect(sent(send, 1).attachments).toHaveLength(1);
+    expect(sent(send, 1).attachments?.[0]).toMatchObject({ filename: "notes.txt" });
+    expect(new Uint8Array(sent(send, 1).attachments?.[0]?.content as ArrayBuffer)).toEqual(content);
+    const draft = await createDraft(ctx, principal, { ...reply, include_attachments: true });
+    expect(draft.input.include_attachments).toBe(true);
+    expect(draft.input.payload.attachments).toEqual([]);
+    const { reply_message_id: _parent, ...newMail } = reply;
+    await expect(
+      previewMail(ctx, principal, { ...newMail, include_attachments: true }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
   it("forwards Gmail-style with the original attachments", async () => {
     const content = encoder.encode("synthetic report");
     await seedParent(undefined, [{ filename: "dir/report.txt", mimeType: "text/plain", content }]);
@@ -275,9 +294,8 @@ describe("Gmail-style reply and forward composition", () => {
       ctx,
       principal,
       rawKey,
-      { ...forward, subject: "Fw: kept", payload: { text: "FYI" } },
+      { ...forward, subject: "Fw: kept", payload: { text: "FYI" }, include_attachments: false },
       "forward-without-attachments",
-      { includeAttachments: false },
     );
     expect(sent(send, 1).subject).toBe("Fw: kept");
     expect(sent(send, 1).text?.startsWith(`FYI\n\n${FORWARD_SEPARATOR}\n`)).toBe(true);
@@ -306,15 +324,19 @@ describe("Gmail-style reply and forward composition", () => {
       })),
     );
     await expect(forwardMail(ctx, principal, rawKey, forward, "too-many")).rejects.toMatchObject({
-      code: "forward_attachments_too_large",
+      code: "original_attachments_too_large",
     });
     await expect(
       forwardMail(ctx, principal, rawKey, { ...forward, quote: true }, "quoted-forward"),
     ).rejects.toMatchObject({ code: "invalid_input" });
     expect(send).not.toHaveBeenCalled();
-    await forwardMail(ctx, principal, rawKey, forward, "too-many-dropped", {
-      includeAttachments: false,
-    });
+    await forwardMail(
+      ctx,
+      principal,
+      rawKey,
+      { ...forward, include_attachments: false },
+      "too-many-dropped",
+    );
     expect(send).toHaveBeenCalledTimes(1);
   });
 });

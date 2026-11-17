@@ -97,7 +97,7 @@ const descriptions: Record<ToolName, string> = {
   copy_attachment:
     "Copy a selected archived attachment into immutable outgoing attachment storage for this principal. Supply exact parent message_id, part_N attachment_id and SHA-256 returned by read_email. Returns an attachment_id/hash usable in drafts and sends. Does not send mail.",
   create_draft:
-    'Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. When sent, replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and the subject gets "Re: " (empty subject reuses the parent\'s). Do not quote the parent yourself; set quote false to send without it. The draft stores your own text; preview_email shows the composed message. Returns saved input and revision for review. Does not send.',
+    'Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. When sent, replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and the subject gets "Re: " (empty subject reuses the parent\'s). Do not quote the parent yourself; set quote false to send without it. Replies attach the parent attachments only with include_attachments true. The draft stores your own text; preview_email shows the composed message. Returns saved input and revision for review. Does not send.',
   get_draft:
     "Read this principal's saved draft, including current revision and complete payload, for review before sending.",
   list_drafts:
@@ -105,7 +105,7 @@ const descriptions: Record<ToolName, string> = {
   update_draft:
     "Patch a saved draft using expected_revision for conflict protection. Omitted fields preserve the current value; provided payload replaces the whole MIME payload, including attachment references. Arrays may be empty to clear cc/bcc. Returns the newly saved revision.",
   send_email:
-    'Submit the explicit message using a required stable idempotency_key. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Use only after user authorization to send. Replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and the subject gets "Re: " (empty subject reuses the parent\'s). Do not quote the parent yourself; set quote false to send without it. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.',
+    'Submit the explicit message using a required stable idempotency_key. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. Use only after user authorization to send. Replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and the subject gets "Re: " (empty subject reuses the parent\'s). Do not quote the parent yourself; set quote false to send without it. Replies attach the parent attachments only with include_attachments true. Retries must reuse the identical input/key. accepted is provider acceptance, never proof of recipient delivery; unknown must not be retried with a new key.',
   send_draft:
     "Send the reviewed draft at expected_revision with a stable idempotency_key. Requires both draft and send scopes. A changed revision is rejected. accepted is not delivery proof.",
   forward_emails:
@@ -394,17 +394,13 @@ export async function dispatchMailTool(
       return sendDraft(env, p, a.draft_id, a.expected_revision, a.idempotency_key);
     }
     case "forward_emails": {
-      const { message_id, idempotency_key, include_attachments, ...mail } = v.parse(
-        toolSchemas.forward_emails,
-        input,
-      );
+      const { message_id, idempotency_key, ...mail } = v.parse(toolSchemas.forward_emails, input);
       return forwardMail(
         env,
         p,
         await resolveMailRawKey(env, p, message_id),
         await inputWithReply(env, p, mail),
         idempotency_key,
-        include_attachments === undefined ? {} : { includeAttachments: include_attachments },
       );
     }
     case "get_send_status":
