@@ -108,9 +108,10 @@ sends and later replies use the outbound API, not the live Email Routing
 DMARC and reply-count restrictions.
 [Inbound reply API](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/).
 
-Ongoing Gmail Sent synchronization is out of scope. fumi stores its own sent
-records; it neither inserts future sends into Gmail nor maintains a mirror of
-future Gmail Sent changes. Historical Gmail backfill explicitly includes SENT
+fumi stores its own sent records and does not insert its sends into Gmail. Mail
+the owner sends by hand from Gmail is not in those records; ongoing read-only
+capture of Gmail SENT is planned in the [roadmap](roadmap.md) (owner, 2026-11-17
+17:37 UTC) and is not implemented. Historical Gmail backfill explicitly includes SENT
 messages, their original MIME/attachments and labels. That import is read-only
 and does not require Gmail write access.
 

@@ -100,7 +100,9 @@ as received mail. Preserve labels, thread IDs and internalDate; one Gmail messag
 with multiple labels is still one source message. Define spam/trash inclusion
 explicitly. Commit checkpoints only after durable storage. Read-only history sync,
 if used, is limited to completing the bounded historical import. It does not repair
-live archival gaps or maintain an ongoing Gmail mirror. Restart the relevant import
+live archival gaps or maintain an ongoing Gmail mirror. The one planned exception is
+ongoing capture of Gmail SENT mail only, which is not implemented; see the
+[roadmap](roadmap.md) (owner, 2026-11-17 17:37 UTC). Restart the relevant import
 scan when a history cursor expires and stop synchronization when import completes.
 [Gmail messages](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages),
 [sync guide](https://developers.google.com/workspace/gmail/api/guides/sync).
@@ -163,8 +165,9 @@ Record closed outcome codes and IDs in logs, not bodies, codes, passwords or tok
 MCP also gains a separate [outbound send capability](outbound-mcp.md), with
 optional drafts/previews, explicit sender authorization and a durable outbox.
 The selected transport is the native Cloudflare Email Sending binding on Workers
-Paid. Future sent records stay in fumi; ongoing Gmail Sent synchronization is out
-of scope, while historical SENT messages remain part of backfill.
+Paid. Sent records for sends made through fumi stay in fumi. Historical SENT
+messages remain part of backfill, and ongoing capture of mail the owner sends from
+Gmail is planned in the [roadmap](roadmap.md) (owner, 2026-11-17 17:37 UTC).
 It is independent of incoming classification and specialist plugin ownership.
 Submission inputs and delivery receipts join the archive with their own
 provenance; receiving mail never implicitly authorizes sending a reply.

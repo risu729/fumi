@@ -76,10 +76,10 @@ predicates. WASM would be a separate evaluated option, not a presumed drop-in.
 ## Outbound and mailbox reuse
 
 Cloudflare Email Sending's native binding is selected; see
-[outbound MCP](outbound-mcp.md). Historical Gmail SENT backfill is included, ongoing
-Gmail Sent sync is excluded. For mailbox and UI reuse rather than individual backend
-libraries, see [existing projects](existing-projects.md) and
-[maintained UI options](web-client-options.md).
+[outbound MCP](outbound-mcp.md). Historical Gmail SENT backfill is included, and ongoing
+Gmail SENT capture is planned (owner, 2026-11-17 17:37 UTC). For mailbox and UI reuse
+rather than individual backend libraries, see [existing projects](existing-projects.md)
+and [maintained UI options](web-client-options.md).
 
 ## Schema boundaries and attachment representations
 
