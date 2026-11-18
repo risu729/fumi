@@ -1,5 +1,6 @@
 import * as v from "valibot";
 import { toStandardJsonSchema } from "@valibot/to-json-schema";
+import { INLINE_ATTACHMENT_BASE64_CHARACTERS } from "./outbound.ts";
 
 export const identifier = v.pipe(v.string(), v.minLength(1), v.maxLength(200));
 const shortText = v.pipe(v.string(), v.maxLength(1000));
@@ -119,12 +120,11 @@ export const toolSchemas = {
   upload_attachment: v.strictObject({
     filename: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
     content_type: v.pipe(v.string(), v.maxLength(100)),
-    // format "byte" is the OpenAPI marker for base64. The Claude app offered
-    // file references (sha256:<hex>:<path>, filled in by the app) on a Gmail
-    // connector field marked this way; whether fumi gets them is being checked.
+    // format "byte" is the OpenAPI marker for base64. It did not make the Claude
+    // app offer file references (docs/mcp-file-transfer.md), but it is accurate.
     content_base64: v.pipe(
       v.string(),
-      v.maxLength(1_398_104),
+      v.maxLength(INLINE_ATTACHMENT_BASE64_CHARACTERS),
       v.metadata({ format: "byte" }),
       v.description("The base64-encoded content of the attachment."),
     ),

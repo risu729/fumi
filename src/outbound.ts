@@ -109,10 +109,25 @@ export function withOutboundErrors<Args extends unknown[], Result>(
 export const OUTBOUND_LIMITS = {
   recipients: 50,
   bodyBytes: 256 * 1024,
-  attachmentBytes: 1024 * 1024,
-  totalAttachmentBytes: 4 * 1024 * 1024,
+  /** Decoded bytes in one upload_attachment call, which carries them as base64 text. */
+  inlineAttachmentBytes: 10 * 1024 * 1024,
+  /** One staged attachment, uploaded or copied from the archive. */
+  attachmentBytes: 10 * 1024 * 1024,
+  /** Raw attachment bytes in one message: 16 MiB is about 21.9 MiB once encoded. */
+  totalAttachmentBytes: 16 * 1024 * 1024,
+  /** Estimated size of the encoded message, below the provider's 25 MiB limit. */
+  encodedMessageBytes: 24 * 1024 * 1024,
   attachments: 8,
 } as const;
+
+const inlineBase64 = Math.ceil(OUTBOUND_LIMITS.inlineAttachmentBytes / 3) * 4;
+/**
+ * The cap on upload_attachment's argument: base64 for the inline limit, plus room
+ * for CRLF line breaks every 76 characters and a final newline, as `base64` writes
+ * them. The decoded size is checked separately.
+ */
+export const INLINE_ATTACHMENT_BASE64_CHARACTERS =
+  inlineBase64 + Math.ceil(inlineBase64 / 76) * 2 + 2;
 
 const encoder = new TextEncoder();
 const digestPattern = /^[a-f0-9]{64}$/;
@@ -378,13 +393,58 @@ async function normalize(
   };
 }
 
-/** Parent attachments join after the author's, under the same send limits. */
-function parentAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
-  const originals = parent.attachments.map((original): AttachmentReference => ({
-    attachment_id: `part_${original.index}`,
-    sha256: original.sha256,
-    size: original.size,
-    // The same filename and type limits as upload_attachment.
+/** MIME base64 with a CRLF after every 76 characters. */
+function base64Lines(bytes: number): number {
+  const characters = Math.ceil(bytes / 3) * 4;
+  return characters + Math.ceil(characters / 76) * 2;
+}
+
+/**
+ * An upper estimate of the message as the provider encodes it: attachments as
+ * base64 lines, bodies as quoted-printable at worst (three bytes per byte plus
+ * soft line breaks), header values at twice their bytes, and a fixed allowance
+ * for MIME boundaries and the headers the provider adds.
+ */
+export function encodedMessageEstimate(input: NormalizedMail): number {
+  const bodies = [input.payload.text, input.payload.html].reduce((sum, body) => {
+    const bytes = body === undefined ? 0 : encoder.encode(body).byteLength;
+    return sum + bytes * 3 + Math.ceil((bytes * 3) / 73) * 3;
+  }, 0);
+  const headerValues = [
+    ...input.to,
+    ...input.cc,
+    ...input.bcc,
+    input.from_address,
+    input.subject,
+    ...(input.reply_to === undefined ? [] : [input.reply_to]),
+    ...Object.values(input.headers),
+  ].reduce((sum, value) => sum + encoder.encode(value).byteLength * 2 + 16, 0);
+  const attachments = input.payload.attachments.reduce(
+    (sum, entry) =>
+      sum +
+      base64Lines(entry.size) +
+      encoder.encode(entry.filename).byteLength * 6 +
+      entry.content_type.length +
+      512,
+    0,
+  );
+  return bodies + headerValues + attachments + 16 * 1024;
+}
+
+/** Reject at preview what the provider would reject as too large at send. */
+function withinMessageSize(input: NormalizedMail): NormalizedMail {
+  if (encodedMessageEstimate(input) > OUTBOUND_LIMITS.encodedMessageBytes)
+    fail("message_too_large");
+  return input;
+}
+
+/** The same filename and type limits as upload_attachment, for archived parts. */
+function archivedAttachmentName(original: {
+  index: number;
+  filename: string | null;
+  mimeType: string;
+}) {
+  return {
     filename:
       truncateBytes(controlFree(original.filename ?? "", "_").replace(/[/\\]/g, "_"), 200) ||
       `attachment-${original.index}`,
@@ -393,6 +453,16 @@ function parentAttachments(input: NormalizedMail, parent: ParentMail): Attachmen
       /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(original.mimeType)
         ? original.mimeType
         : "application/octet-stream",
+  };
+}
+
+/** Parent attachments join after the author's, under the same send limits. */
+function parentAttachments(input: NormalizedMail, parent: ParentMail): AttachmentReference[] {
+  const originals = parent.attachments.map((original): AttachmentReference => ({
+    attachment_id: `part_${original.index}`,
+    sha256: original.sha256,
+    size: original.size,
+    ...archivedAttachmentName(original),
     object_key: original.key,
   }));
   const attachments = [...input.payload.attachments, ...originals];
@@ -416,7 +486,7 @@ async function compose(
   forward?: string,
 ): Promise<NormalizedMail> {
   const parentKey = forward ?? input.reply_message_id;
-  if (parentKey === undefined) return input;
+  if (parentKey === undefined) return withinMessageSize(input);
   let parent: ParentMail;
   try {
     parent = await loadParent(
@@ -444,7 +514,7 @@ async function compose(
     if (error instanceof ComposeError) fail(error.code);
     throw error;
   }
-  return {
+  return withinMessageSize({
     ...input,
     subject: forward ? forwardSubject(input.subject, parent) : replySubject(input.subject, parent),
     payload: {
@@ -455,7 +525,7 @@ async function compose(
           ? parentAttachments(input, parent)
           : input.payload.attachments,
     },
-  };
+  });
 }
 
 function publicMail(input: NormalizedMail) {
@@ -480,28 +550,16 @@ async function previewMailImpl(ctx: OutboundContext, principal: MailPrincipal, i
   };
 }
 
-async function uploadAttachmentImpl(
+/** Store immutable bytes as this principal's outgoing attachment. */
+async function stageAttachment(
   ctx: OutboundContext,
   principal: MailPrincipal,
-  input: { filename: string; content_type: string; content_base64: string },
+  bytes: Uint8Array,
+  sha256: string,
+  filename: string,
+  contentType: string,
 ) {
-  if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
-    fail("forbidden");
-  const filename = text(input.filename, 200, true);
-  const contentType = text(input.content_type, 100, true);
-  if (
-    !filename ||
-    /[/\\]/.test(filename) ||
-    !/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(contentType)
-  )
-    fail("invalid_attachment");
-  const encoded = text(input.content_base64, Math.ceil(OUTBOUND_LIMITS.attachmentBytes / 3) * 4);
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))
-    fail("invalid_attachment");
-  const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-  if (!bytes.length || bytes.length > OUTBOUND_LIMITS.attachmentBytes) fail("attachment_limit");
   const attachmentId = `att_${crypto.randomUUID()}`;
-  const sha256 = await digest(bytes);
   const objectKey = `outbound/attachments/${attachmentId}`;
   await ctx.MAIL_ARCHIVE.put(objectKey, bytes, { sha256, customMetadata: { sha256 } });
   await db(ctx)
@@ -526,6 +584,41 @@ async function uploadAttachmentImpl(
     filename,
     content_type: contentType,
   };
+}
+
+/** Decode base64, line breaks and missing padding allowed, without a binary string copy. */
+function decodeBase64(encoded: string): Uint8Array {
+  try {
+    return Uint8Array.fromBase64(encoded);
+  } catch {
+    fail("invalid_attachment");
+  }
+}
+
+async function uploadAttachmentImpl(
+  ctx: OutboundContext,
+  principal: MailPrincipal,
+  input: { filename: string; content_type: string; content_base64: string },
+) {
+  if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
+    fail("forbidden");
+  const filename = text(input.filename, 200, true);
+  const contentType = text(input.content_type, 100, true);
+  if (
+    !filename ||
+    /[/\\]/.test(filename) ||
+    !/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(contentType)
+  )
+    fail("invalid_attachment");
+  if (
+    typeof input.content_base64 !== "string" ||
+    input.content_base64.length > INLINE_ATTACHMENT_BASE64_CHARACTERS
+  )
+    fail("attachment_limit");
+  const bytes = decodeBase64(input.content_base64);
+  if (!bytes.length || bytes.length > OUTBOUND_LIMITS.inlineAttachmentBytes)
+    fail("attachment_limit");
+  return stageAttachment(ctx, principal, bytes, await digest(bytes), filename, contentType);
 }
 
 /** Grant an immutable extracted original attachment to this principal. */
@@ -559,19 +652,14 @@ async function bindArchivedAttachmentImpl(
   const original = originals.find((entry) => entry.index === index && entry.sha256 === sha256);
   if (!original) fail("attachment_not_found");
   if (original.size > OUTBOUND_LIMITS.attachmentBytes) fail("attachment_limit");
-  // Copy through the same bounded upload path. Later extraction/storage changes
-  // cannot silently alter an already-authorized attachment reference.
+  // Copy the verified bytes, not a reference: later extraction or storage changes
+  // cannot silently alter an already-authorized attachment.
   const object = await ctx.MAIL_ARCHIVE.get(original.key);
   if (!object || object.size !== original.size) fail("attachment_unavailable");
   const bytes = new Uint8Array(await object.arrayBuffer());
   if ((await digest(bytes)) !== sha256) fail("attachment_unavailable");
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return uploadAttachment(ctx, principal, {
-    filename: original.filename ?? `attachment-${index}`,
-    content_type: original.mimeType,
-    content_base64: btoa(binary),
-  });
+  const { filename, content_type } = archivedAttachmentName(original);
+  return stageAttachment(ctx, principal, bytes, sha256, filename, content_type);
 }
 
 function draftInput(input: NormalizedMail): MailInput {

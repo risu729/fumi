@@ -49,7 +49,7 @@ only from server to client, apart from results of the deprecated Sampling featur
 Base64 costs about 33% on top of the file and keeps the whole payload in JSON-RPC
 messages. When a model writes the argument, it costs about one output token per file
 byte (see discussion #3325 below). Fumi's `upload_attachment.content_base64` is
-capped at 1 MiB per file ([agent mail API](agent-mail.md)).
+capped at 10 MiB per file ([agent mail API](agent-mail.md#attachment-limits)).
 
 ## Proposals and their status
 
@@ -220,12 +220,12 @@ What this shows:
   file-reference note to the tool. `format: "byte"` alone does not turn the feature
   on, and which connectors get it remains undocumented. The same schema without a note
   also appears in a Claude Code web session on 2026-11-18.
-- The Grok bot already keeps attachment bytes out of model output, so for Grok the
-  1 MiB cap is the only limit, and a larger cap costs no context. Confirmed on
+- The Grok bot already keeps attachment bytes out of model output, so for Grok the 1 MiB
+  cap at the time was the only limit, and a larger cap costs no context. Confirmed on
   2026-11-18 at 11:47 UTC: Grok wrote a 17-byte file and its base64 (24 bytes) to
   `/workspace`, called `upload_attachment` with
-  `content_base64: "$file:/workspace/fumi-file-test.b64"`, and fumi returned the
-  same SHA-256 and size as the file. Grok then also saw `format: "byte"` and no
+  `content_base64: "$file:/workspace/fumi-file-test.b64"`, and fumi returned the same
+  SHA-256 and size as the file. Grok then also saw `format: "byte"` and no
   file-reference note.
 - The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
   of the proposal) does not help it unless fumi's host is allowed there. File
@@ -272,6 +272,12 @@ What this shows:
   The limits are server-wide, so raise them only if a client fumi uses offers file
   references, accepting that clients without them see the same limit. Which schema
   signal the Claude app uses is inferred from that one connector, not documented.
+- Decision (owner, 2026-11-18 12:07 UTC), after the client checks above: support
+  the Grok bot, whose `$file:` substitution keeps the bytes out of model output.
+  The limits rise to 10 MiB per attachment and 16 MiB per message
+  ([attachment limits](agent-mail.md#attachment-limits)). No upload endpoint (option
+  B) is built: no client fumi uses needs one. The Claude app still has no practical
+  path for large files.
 - The draft is not stable. Revisit this page when a reference implementation lands,
   when the WG submits an Extensions Track SEP, or when a client fumi uses ships
   support.

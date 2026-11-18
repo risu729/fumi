@@ -96,8 +96,48 @@ limits, phrase syntax and activation. Metadata search semantics are unchanged.
 Search pages contain at most 50 records; batches contain at most ten messages;
 thread reads contain at most 20. Bodies inline at most 16,000 characters per
 representation, with authenticated full-content links when truncated. Attachments
-use descriptors rather than embedding arbitrary bytes in model context. Uploads
-are limited to 1 MiB each, eight attachments and 4 MiB total per send.
+use descriptors rather than embedding arbitrary bytes in model context.
+
+## Attachment limits
+
+Decision by the owner, 2026-11-18 12:07 UTC: raise the limits for clients that
+keep attachment bytes out of model output (the Grok bot's `$file:` substitution,
+see [MCP file transfer](mcp-file-transfer.md)). No upload endpoint is added.
+
+| Limit | Value |
+| --- | --- |
+| One `upload_attachment` call | 10 MiB decoded, 14,348,940 base64 characters |
+| One staged attachment (uploaded or `copy_attachment`) | 10 MiB |
+| Attachments per message | 8 |
+| Attachment bytes per message | 16 MiB |
+| MCP request body | 14,873,228 bytes |
+| Estimated encoded message | 24 MiB |
+
+- Cloudflare Email Sending rejects messages over 25 MiB including attachments.
+  16 MiB of attachments is about 21.9 MiB as base64 with line breaks, which leaves
+  room for a 256 KiB body (about 800 KiB as worst-case quoted-printable), 50 recipients
+  and headers. 18 MiB would encode to about 24.6 MiB and leave none.
+- `preview_email` and the send tools also check an upper estimate of the encoded
+  message (attachments as base64 lines, bodies as worst-case quoted-printable,
+  header values at twice their bytes, plus a fixed allowance) against 24 MiB and
+  fail with `message_too_large`. Within the limits above the estimate stays under
+  24 MiB, so this check guards later limit changes.
+- Many receiving servers refuse messages over 10 to 20 MB, so a message under the
+  provider limit can still bounce.
+- A model that types base64 spends about one token per byte, so these limits
+  matter only for clients that substitute file contents into the call.
+- The base64 cap is 13,981,016 characters for 10 MiB plus room for a CRLF every
+  76 characters and a final newline, so plain `base64 file` output fits. Line
+  breaks and missing padding are accepted; the decoded size is what counts.
+- `get_profile` reports every limit in the table except the request body.
+- `copy_attachment` copies the archived object inside fumi after checking its
+  SHA-256, without base64. Archived attachments are themselves at most 4 MiB
+  ([MIME extraction](mime-extraction.md)). It names the copy with the forward rules
+  below instead of failing on an unusual filename or type, and copies 0-byte parts,
+  as forwards already include them.
+- Not yet checked in production: that the MCP portal passes a 14.9 MB request, and
+  the Worker's peak memory (128 MB limit) for a 10 MiB upload and a 16 MiB send.
+  Decoding uses `Uint8Array.fromBase64`, which avoids a 10 MB binary string.
 
 ## Reply quoting and forwarding
 
@@ -166,13 +206,13 @@ First line
   control characters replaced with `_` and are cut to 200 bytes; a MIME type that
   is not a valid token or is over 100 bytes becomes `application/octet-stream`.
 - A forward is never shortened: a body over 256 KiB fails with
-  `forward_too_large`, and attachments over the send limits (eight, 1 MiB each,
-  4 MiB total, including uploaded ones) fail with `original_attachments_too_large`.
+  `forward_too_large`, and attachments over the send limits (eight, 10 MiB each,
+  16 MiB total, including uploaded ones) fail with `original_attachments_too_large`.
   The original is the content of a forward, so a cut copy would misrepresent it.
-- A parent with more than eight attachments, or one over 1 MiB, used to forward
-  without them and now fails unless `include_attachments: false` is set. Keeping
-  only the attachments that fit would forward an incomplete original without
-  saying so.
+- A parent with more than eight attachments, or one over the per-attachment limit (then
+  1 MiB), used to forward without them and now fails unless `include_attachments: false`
+  is set. Keeping only the attachments that fit would forward an incomplete original
+  without saying so.
 - Inline blocks were chosen over attaching the original MIME as
   `message/rfc822`: they match Gmail's default and read the same in every client.
 - `preview_email` has no forward mode and there are no forward drafts, so a

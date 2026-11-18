@@ -3,6 +3,7 @@ import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   OUTBOUND_LIMITS,
+  bindArchivedAttachment,
   createDraft,
   forwardMail,
   getSentMail,
@@ -491,5 +492,28 @@ describe("Gmail-style reply and forward composition", () => {
       "too-many-dropped",
     );
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("copies an archived attachment inside fumi with the forward naming rules", async () => {
+    const { ctx } = context();
+    const content = encoder.encode("synthetic archived attachment");
+    await seedParent(undefined, [
+      { filename: "dir/name\u0007.txt", mimeType: "not a type", content },
+    ]);
+    const digest = await sha256(content);
+    const copied = await bindArchivedAttachment(ctx, principal, rawKey, 0, digest);
+    expect(copied).toMatchObject({
+      sha256: digest,
+      size: content.byteLength,
+      filename: "dir_name_.txt",
+      content_type: "application/octet-stream",
+    });
+    const object = await env.MAIL_ARCHIVE.get(`outbound/attachments/${copied.attachment_id}`);
+    expect(new Uint8Array((await object?.arrayBuffer()) ?? new ArrayBuffer(0))).toEqual(content);
+    // Same size, different bytes: only the SHA-256 check can catch it.
+    await env.MAIL_ARCHIVE.put(`${prefix}/attachment/${digest}`, "x".repeat(content.byteLength));
+    await expect(bindArchivedAttachment(ctx, principal, rawKey, 0, digest)).rejects.toMatchObject({
+      code: "attachment_unavailable",
+    });
   });
 });

@@ -31,6 +31,8 @@ import {
   getSentMail,
   listSentMail,
   bindArchivedAttachment,
+  INLINE_ATTACHMENT_BASE64_CHARACTERS,
+  OUTBOUND_LIMITS,
   OutboundError,
   type OutboundContext,
 } from "./outbound.ts";
@@ -46,6 +48,8 @@ export interface McpEnvironment extends OutboundContext, ManagedMailEnvironment 
   API_ORIGIN?: string;
 }
 type ToolName = keyof typeof toolSchemas;
+/** One upload_attachment call at the inline limit, plus room for the JSON-RPC envelope. */
+export const MAX_MCP_REQUEST_BYTES = INLINE_ATTACHMENT_BASE64_CHARACTERS + 512 * 1024;
 const scopes: Record<ToolName, readonly string[]> = {
   get_mail_health: ["mail:read"],
   search_mail_semantic: ["mail:read"],
@@ -93,9 +97,9 @@ const descriptions: Record<ToolName, string> = {
   preview_email:
     "Validate and normalize a proposed message without submitting it. to/cc/bcc are arrays; payload has text and/or html plus uploaded attachment IDs and SHA-256. New mail and replies to imported Gmail require an explicit permitted from_address. Live replies can default to the trusted SMTP envelope recipient, never MIME To. An explicit override must satisfy the sender grant. Returns the composed message as it would be sent, including any reply quote or forward block.",
   upload_attachment:
-    "Stage up to 1 MiB of base64 attachment bytes for this principal. Returns attachment_id and SHA-256; include both in a draft/message payload. Does not send mail.",
+    "Stage one attachment of up to 10 MiB, sent as base64 in content_base64 (line breaks allowed), for this principal. A message carries at most 8 attachments and 16 MiB in total. Returns attachment_id and SHA-256; include both in a draft/message payload. Does not send mail.",
   copy_attachment:
-    "Copy a selected archived attachment into immutable outgoing attachment storage for this principal. Supply exact parent message_id, part_N attachment_id and SHA-256 returned by read_email. Returns an attachment_id/hash usable in drafts and sends. Does not send mail.",
+    "Copy a selected archived attachment into immutable outgoing attachment storage for this principal. Supply exact parent message_id, part_N attachment_id and SHA-256 returned by read_email. The bytes are copied inside Fumi and never pass through the call. Returns an attachment_id/hash usable in drafts and sends. Does not send mail.",
   create_draft:
     'Store a draft from explicit recipients, permitted sender, subject and text/html payload. New mail and imported Gmail replies require from_address; live replies can default to the trusted SMTP envelope recipient, with permitted explicit override. When sent, replies (reply_message_id) quote the parent Gmail-style below your text: an "On <date> <sender> wrote:" line, then "> " lines (an HTML blockquote in html), and an empty subject, or the parent\'s own, becomes "Re: <parent subject>"; a changed subject is kept. Do not quote the parent yourself; set quote false to send without it. Replies attach the parent attachments only with include_attachments true. The draft stores your own text; preview_email shows the composed message. Returns saved input and revision for review. Does not send.',
   get_draft:
@@ -267,6 +271,14 @@ export async function dispatchMailTool(
           batch_read: 10,
           thread_messages: 20,
           inline_body_characters: 16000,
+          recipients: OUTBOUND_LIMITS.recipients,
+          body_bytes: OUTBOUND_LIMITS.bodyBytes,
+          attachments: OUTBOUND_LIMITS.attachments,
+          inline_attachment_bytes: OUTBOUND_LIMITS.inlineAttachmentBytes,
+          attachment_bytes: OUTBOUND_LIMITS.attachmentBytes,
+          total_attachment_bytes: OUTBOUND_LIMITS.totalAttachmentBytes,
+          inline_attachment_base64_characters: INLINE_ATTACHMENT_BASE64_CHARACTERS,
+          encoded_message_bytes: OUTBOUND_LIMITS.encodedMessageBytes,
         },
         search_coverage:
           "live/imported archive metadata and retained Gmail labels; bounded text phrases via search_mail_content; optional managed body vector/hybrid retrieval via search_mail_semantic; SENT without archive_source lists principal outgoing operations",
@@ -491,7 +503,7 @@ export async function handleMcp(
     return new Response("origin_not_allowed", { status: 403 });
   const handler = createMcpHandler(
     () => createMailMcpServer(env, principal, env.API_ORIGIN ?? request.url),
-    { legacy: "stateless", responseMode: "json", maxRequestBodySize: 1_600_000 },
+    { legacy: "stateless", responseMode: "json", maxRequestBodySize: MAX_MCP_REQUEST_BYTES },
   );
   try {
     return await handler.fetch(request);
