@@ -135,9 +135,18 @@ see [MCP file transfer](mcp-file-transfer.md)). No upload endpoint is added.
   ([MIME extraction](mime-extraction.md)). It names the copy with the forward rules
   below instead of failing on an unusual filename or type, and copies 0-byte parts,
   as forwards already include them.
-- Not yet checked in production: that the MCP portal passes a 14.9 MB request, and
-  the Worker's peak memory (128 MB limit) for a 10 MiB upload and a 16 MiB send.
-  Decoding uses `Uint8Array.fromBase64`, which avoids a 10 MB binary string.
+- The Grok bot substitutes at most 8,388,608 bytes per `$file:` argument (checked
+  on 2026-11-18 at 13:06 UTC), so from Grok one attachment is at most 6 MiB, written
+  with `base64 -w0`. Wrapped `base64` output for 6 MiB is 8,498,985 bytes and is
+  refused by Grok before the call. 16 MiB from Grok takes three attachments, for
+  example 6, 6 and 4 MiB. fumi keeps 10 MiB for clients without this cap.
+- Grok keeps its own copy of the tool list, so it may show an older description and
+  `maxLength` after the portal has synced. It does not enforce that `maxLength`: a
+  3 MiB upload passed while Grok listed 1,398,104 characters.
+- Not yet checked in production: that the MCP portal passes a 14.9 MB request (no
+  client fumi uses sends one), and the Worker's peak memory (128 MB limit) for a
+  10 MiB upload and a 16 MiB send. Decoding uses `Uint8Array.fromBase64`, which
+  avoids a 10 MB binary string.
 
 ## Reply quoting and forwarding
 
