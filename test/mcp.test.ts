@@ -3,7 +3,12 @@ import { applyD1Migrations } from "cloudflare:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import * as v from "valibot";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { dispatchMailTool, handleMcp, type McpEnvironment } from "../src/mcp.ts";
+import {
+  MAX_MCP_REQUEST_BYTES,
+  dispatchMailTool,
+  handleMcp,
+  type McpEnvironment,
+} from "../src/mcp.ts";
 import { bridge, toolSchemas } from "../src/mcp-schemas.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
@@ -302,9 +307,56 @@ describe("official MCP HTTP transport", () => {
         content_base64: {
           type: "string",
           format: "byte",
-          maxLength: 1_398_104,
+          maxLength: 14_348_940,
           description: "The base64-encoded content of the attachment.",
         },
+      },
+    });
+  });
+  it("refuses a request body over the transport limit", async () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "upload_attachment", arguments: { content_base64: "" } },
+    });
+    const padded = body.replace('""', `"${"A".repeat(MAX_MCP_REQUEST_BYTES - body.length + 1)}"`);
+    expect(padded.length).toBe(MAX_MCP_REQUEST_BYTES + 1);
+    const response = await handleMcp(
+      new Request("https://fumi.example.invalid/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: padded,
+      }),
+      context(),
+      mailer,
+    );
+    expect(response.status).toBe(413);
+  });
+  it("accepts a 10 MiB attachment in one call and reports the limits", async () => {
+    const { client } = await clientFor(mailer);
+    // 10 MiB of zero bytes: 10,485,760 = 3 * 3,495,253 + 1, so one padded group ends it.
+    const content_base64 = `${"A".repeat(13_981_012)}AA==`;
+    const upload = await client.callTool({
+      name: "upload_attachment",
+      arguments: {
+        filename: "synthetic.bin",
+        content_type: "application/octet-stream",
+        content_base64,
+      },
+    });
+    expect(upload.isError).toBeFalsy();
+    expect(upload.structuredContent).toMatchObject({ size: 10 * 1024 * 1024 });
+    const profile = await client.callTool({ name: "get_profile", arguments: {} });
+    expect(profile.structuredContent).toMatchObject({
+      limits: {
+        attachments: 8,
+        inline_attachment_bytes: 10 * 1024 * 1024,
+        attachment_bytes: 10 * 1024 * 1024,
+        total_attachment_bytes: 16 * 1024 * 1024,
       },
     });
   });

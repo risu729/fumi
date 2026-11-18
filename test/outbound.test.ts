@@ -2,7 +2,10 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  INLINE_ATTACHMENT_BASE64_CHARACTERS,
+  OUTBOUND_LIMITS,
   createDraft,
+  encodedMessageEstimate,
   getDraft,
   getSendStatus,
   getSentMail,
@@ -437,6 +440,119 @@ describe("durable outbound submission in workerd", () => {
       code: "attachment_unavailable",
     });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("enforces the attachment limits on upload and per message", async () => {
+    const { ctx, send } = context();
+    const upload = (content_base64: string) =>
+      uploadAttachment(ctx, principal, {
+        filename: "synthetic.bin",
+        content_type: "application/octet-stream",
+        content_base64,
+      });
+    // Zero bytes: 4 * 3,495,253 characters hold 10 MiB - 1 bytes, and the last group
+    // adds one byte (AA==) or two (AAA=).
+    const full = "A".repeat(4 * 3_495_253);
+    const atLimit = await upload(`${full}AA==`);
+    expect(atLimit.size).toBe(OUTBOUND_LIMITS.inlineAttachmentBytes);
+    await expect(upload(`${full}AAA=`)).rejects.toMatchObject({ code: "attachment_limit" });
+    await expect(upload(`${full}AAAA`)).rejects.toMatchObject({ code: "attachment_limit" });
+    // `base64` output: CRLF (or LF) every 76 characters and a final newline.
+    const wrapped = `${full}AA==`.replace(/.{76}/g, "$&\r\n");
+    expect(wrapped.length).toBeLessThanOrEqual(INLINE_ATTACHMENT_BASE64_CHARACTERS);
+    await expect(upload(`${wrapped}\n`)).resolves.toMatchObject({ sha256: atLimit.sha256 });
+    await expect(upload("A".repeat(INLINE_ATTACHMENT_BASE64_CHARACTERS + 1))).rejects.toMatchObject(
+      { code: "attachment_limit" },
+    );
+    await expect(upload("AA")).resolves.toMatchObject({ size: 1 });
+    await expect(upload("not base64!")).rejects.toMatchObject({ code: "invalid_attachment" });
+    await expect(upload("A")).rejects.toMatchObject({ code: "invalid_attachment" });
+    await expect(upload("")).rejects.toMatchObject({ code: "attachment_limit" });
+    const reference = ({ attachment_id, sha256 }: { attachment_id: string; sha256: string }) => ({
+      attachment_id,
+      sha256,
+    });
+    const withAttachments = (attachments: { attachment_id: string; sha256: string }[]) => ({
+      ...input,
+      payload: { text: "Body", attachments: attachments.map(reference) },
+    });
+    // 10 MiB + 6 MiB is exactly the 16 MiB per-message total; one more byte is over.
+    const six = await upload("A".repeat(8_388_608));
+    const sixAndOne = await upload(`${"A".repeat(8_388_608)}AA==`);
+    await expect(
+      previewMail(ctx, principal, withAttachments([atLimit, six])),
+    ).resolves.toMatchObject({ submitted: false });
+    await expect(
+      previewMail(ctx, principal, withAttachments([atLimit, sixAndOne])),
+    ).rejects.toMatchObject({ code: "attachment_limit" });
+    await expect(
+      sendMail(ctx, principal, withAttachments([atLimit, sixAndOne]), "over-total"),
+    ).rejects.toMatchObject({ code: "attachment_limit" });
+    const small = await upload(btoa("synthetic"));
+    await expect(
+      previewMail(ctx, principal, withAttachments(Array.from({ length: 9 }, () => small))),
+    ).rejects.toMatchObject({ code: "invalid_attachments" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects a message over the encoded-size cap before the provider sees it", async () => {
+    const { ctx, send } = context();
+    const limits = OUTBOUND_LIMITS as { encodedMessageBytes: number };
+    const original = limits.encodedMessageBytes;
+    // No message within the other limits reaches 24 MiB, so lower the cap.
+    limits.encodedMessageBytes = 1024;
+    try {
+      const long = { ...input, payload: { text: "x".repeat(2048) } };
+      await expect(previewMail(ctx, principal, long)).rejects.toMatchObject({
+        code: "message_too_large",
+      });
+      await expect(sendMail(ctx, principal, long, "too-large")).rejects.toMatchObject({
+        code: "message_too_large",
+      });
+      const draft = await createDraft(ctx, principal, long);
+      await expect(
+        sendDraft(ctx, principal, draft.draft_id, draft.revision, "too-large-draft"),
+      ).rejects.toMatchObject({ code: "message_too_large" });
+    } finally {
+      limits.encodedMessageBytes = original;
+    }
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the largest allowed message under the encoded-size cap", () => {
+    // 254 bytes: a 64-byte local part and a 189-byte domain.
+    const longAddress = (index: number) =>
+      `${"r".repeat(61)}${String(index).padStart(3, "0")}@${"d".repeat(63)}.${"d".repeat(63)}.${"d".repeat(53)}.invalid`;
+    const attachment = (size: number) => ({
+      attachment_id: "att_synthetic",
+      sha256: "0".repeat(64),
+      size,
+      filename: "\u00e9".repeat(100),
+      content_type: "application/octet-stream",
+      object_key: "outbound/attachments/att_synthetic",
+    });
+    const largest = (attachmentSizes: number[]) => ({
+      to: Array.from({ length: OUTBOUND_LIMITS.recipients - 1 }, (_, index) => longAddress(index)),
+      cc: [],
+      bcc: [longAddress(99)],
+      from_address: "sender@example.invalid",
+      subject: "\u3042".repeat(332),
+      payload: {
+        text: "=".repeat(OUTBOUND_LIMITS.bodyBytes / 2),
+        html: "=".repeat(OUTBOUND_LIMITS.bodyBytes / 2),
+        attachments: attachmentSizes.map(attachment),
+      },
+      reply_to: longAddress(100),
+      headers: { "In-Reply-To": `<${"m".repeat(990)}@x>`, References: "<r@x> ".repeat(340) },
+    });
+    const eighth = OUTBOUND_LIMITS.totalAttachmentBytes / OUTBOUND_LIMITS.attachments;
+    expect(encodedMessageEstimate(largest(Array.from({ length: 8 }, () => eighth)))).toBeLessThan(
+      OUTBOUND_LIMITS.encodedMessageBytes,
+    );
+    // 18 MiB of attachments, the rejected alternative, does not fit.
+    expect(
+      encodedMessageEstimate(largest(Array.from({ length: 8 }, () => (eighth * 18) / 16))),
+    ).toBeGreaterThan(OUTBOUND_LIMITS.encodedMessageBytes);
   });
 
   it("retains early unmapped provider events and projects mixed recipients without regressions", async () => {
