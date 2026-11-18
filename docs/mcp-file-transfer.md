@@ -227,6 +227,9 @@ What this shows:
   `content_base64: "$file:/workspace/fumi-file-test.b64"`, and fumi returned the same
   SHA-256 and size as the file. Grok then also saw `format: "byte"` and no
   file-reference note.
+- Grok's `$file:` substitution is capped at 8,388,608 bytes per file (Grok's own
+  error, 2026-11-18 13:06 UTC), so Grok can send attachments of up to 6 MiB each
+  as unwrapped base64 ([attachment limits](agent-mail.md#attachment-limits)).
 - The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
   of the proposal) does not help it unless fumi's host is allowed there. File
   references are its realistic path.
