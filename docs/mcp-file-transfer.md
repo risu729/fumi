@@ -203,7 +203,7 @@ calls that ran returned SHA-256 `89f71b11…0028812` and size 17. No mail was se
 | fumi itself (`tools/list` on fumi.takuk.me through Access) | `content_base64` has `format: "byte"` and its description | n/a | n/a |
 | Claude app (claude.ai, through the Portal) | No `format` or description; no file-reference note | No. The model would have to type the base64 it computed in its sandbox | Runs code; its sandbox reaches only allowlisted hosts, so no PUT to an arbitrary URL |
 | Grok bot (through the Portal) | No `format` or description | Yes, by its own client feature: a string argument set to `"$file:/workspace/x.b64"` is replaced with that file's content when the call is sent | Both |
-| Cursor web agent (cursor.com/agents) | fumi tools not listed, other Portal tools were; probably its Portal connector was authorized before fumi was attached and needs a reconnect | Not checked | Runs code; PUT not checked |
+| Cursor web agent (cursor.com/agents) | fumi tools not listed, other Portal tools were (also on 2026-11-18 04:59 UTC); its Portal connector probably needs a reconnect | No file-reference mechanism | Runs code; its sandbox egress is unrestricted, so a PUT to fumi.takuk.me is allowed |
 
 What this shows:
 
@@ -218,7 +218,8 @@ What this shows:
 - Re-check on 2026-11-17 at 19:02 UTC, after the portal had synced: the Claude app saw
   `content_base64` with `format: "byte"` and the description, and still added no
   file-reference note to the tool. `format: "byte"` alone does not turn the feature
-  on, and which connectors get it remains undocumented.
+  on, and which connectors get it remains undocumented. The same schema without a note
+  also appears in a Claude Code web session on 2026-11-18.
 - The Grok bot already keeps attachment bytes out of model output, so for Grok the
   1 MiB cap is the only limit, and a larger cap costs no context.
 - The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
