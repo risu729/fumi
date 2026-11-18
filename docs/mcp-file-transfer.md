@@ -221,7 +221,12 @@ What this shows:
   on, and which connectors get it remains undocumented. The same schema without a note
   also appears in a Claude Code web session on 2026-11-18.
 - The Grok bot already keeps attachment bytes out of model output, so for Grok the
-  1 MiB cap is the only limit, and a larger cap costs no context.
+  1 MiB cap is the only limit, and a larger cap costs no context. Confirmed on
+  2026-11-18 at 11:47 UTC: Grok wrote a 17-byte file and its base64 (24 bytes) to
+  `/workspace`, called `upload_attachment` with
+  `content_base64: "$file:/workspace/fumi-file-test.b64"`, and fumi returned the
+  same SHA-256 and size as the file. Grok then also saw `format: "byte"` and no
+  file-reference note.
 - The Claude app's sandbox reaches only allowlisted hosts, so an upload URL (option B
   of the proposal) does not help it unless fumi's host is allowed there. File
   references are its realistic path.
