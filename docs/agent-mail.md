@@ -143,10 +143,16 @@ see [MCP file transfer](mcp-file-transfer.md)). No upload endpoint is added.
 - Grok keeps its own copy of the tool list, so it may show an older description and
   `maxLength` after the portal has synced. It does not enforce that `maxLength`: a
   3 MiB upload passed while Grok listed 1,398,104 characters.
+- Checked in production on 2026-11-18: from Grok, three uploads (6, 6 and 4 MiB,
+  each about 8.4 MB or 5.6 MB of base64 through the portal) and one send of all
+  16 MiB to a fumi address. The provider accepted the send and reported it
+  delivered 15 seconds later. The received raw message was 22,964,018 bytes (about
+  21.9 MiB), under the estimate fumi computes for it (about 23.4 MB). The received
+  copy is archived with extraction blocked as `input_too_large`, because MIME
+  extraction stops at 4 MiB of input ([MIME extraction](mime-extraction.md)).
 - Not yet checked in production: that the MCP portal passes a 14.9 MB request (no
-  client fumi uses sends one), and the Worker's peak memory (128 MB limit) for a
-  10 MiB upload and a 16 MiB send. Decoding uses `Uint8Array.fromBase64`, which
-  avoids a 10 MB binary string.
+  client fumi uses sends one), and the Worker's peak memory for a 10 MiB upload.
+  Decoding uses `Uint8Array.fromBase64`, which avoids a 10 MB binary string.
 
 ## Reply quoting and forwarding
 
