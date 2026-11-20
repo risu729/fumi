@@ -101,19 +101,21 @@ configuration policy hash, generated remote item key and provider item ID. Remot
 are derived from immutable source/part/text/policy identities; filenames or message
 content cannot choose URLs, remote destinations or object paths.
 
-Each conditional source lease precedes asynchronous work. An atomic D1 batch
-reserves one upload and marks `uploading` before the remote call. A crash or timeout
-after that point becomes `unknown`, which never resubmits automatically. A unique
-upload-attempt identity remains in the call ledger even if MIME invalidation
-removes its rebuildable projection. Rediscovering the same original MIME/part/text
-and policy therefore preserves uncertainty even if re-extraction changes the
-manifest or derivative keys. If the prior
-response durably recorded a provider item ID, rediscovery can poll that same item.
-Received
-item IDs are persisted as `submitted`; later runs poll that exact ID/key until
-`completed`, a fixed failure, or a 24-hour indexing deadline. Submitted polling
-never uploads again. Source invalidation removes the local projection and prevents
-late completion or search results from becoming visible.
+Each conditional source lease precedes asynchronous work. An atomic D1 batch reserves
+one upload and marks `uploading` before the remote call. A crash or timeout after that
+point becomes `unknown`, which never resubmits automatically. A unique upload-attempt
+identity remains in the call ledger even if MIME invalidation removes its rebuildable
+projection. Rediscovering the same original MIME/part/text and policy therefore
+preserves uncertainty even if re-extraction changes the manifest or derivative keys. If
+the prior response durably recorded a provider item ID, rediscovery can poll that same
+item. Received item IDs are persisted as `submitted`; later runs poll that exact ID/key
+until `completed`, a fixed failure, or a 24-hour indexing deadline. Each run polls
+before it applies the deadline, so an item that is already `completed` becomes ready
+even when rediscovery happens more than 24 hours after its upload. Past the deadline, a
+`queued` or `running` status or a failed poll blocks the part with
+`managed_search_indexing_timeout`. Submitted polling never uploads again. Source
+invalidation removes the local projection and prevents late completion or search results
+from becoming visible.
 
 If a projection is rebuilt while an older upload remains in flight, it can remain
 quarantined even if the old response later records an item ID. This conservative

@@ -273,12 +273,20 @@ async function processDocument(
     if (row.state === "submitted") {
       if (!row.item_id || row.submitted_at === null)
         throw new ManagedSearchError("invalid_search_provider_response");
-      if (now - row.submitted_at > 86400000)
-        throw new ManagedSearchError("managed_search_indexing_timeout");
-      const info = record(await bounded(() => runtime.binding.items.get(row.item_id!).info()));
+      // A rediscovered item can be older than the deadline yet already completed,
+      // so poll first; the deadline bounds only unfinished or unpollable items.
+      const expired = now - row.submitted_at > 86400000;
+      let info: Record<string, unknown>;
+      try {
+        info = record(await bounded(() => runtime.binding.items.get(row.item_id!).info()));
+      } catch (error) {
+        if (expired) throw new ManagedSearchError("managed_search_indexing_timeout");
+        throw error;
+      }
       if (info["id"] !== row.item_id || info["key"] !== row.item_key)
         throw new ManagedSearchError("invalid_search_provider_response");
       if (["queued", "running"].includes(String(info["status"]))) {
+        if (expired) throw new ManagedSearchError("managed_search_indexing_timeout");
         await update("lease_token=NULL,lease_until=0,next_attempt_at=?", now + 300000);
         return;
       }
