@@ -237,6 +237,35 @@ function lifecycle(
   );
 }
 
+/** Message IDs in a stored, untrusted header value; no whitespace or other controls. */
+function messageIds(value: unknown): string[] {
+  return typeof value === "string" ? (value.match(/<[^\s<>\p{Cc}]+@[^\s<>\p{Cc}]+>/gu) ?? []) : [];
+}
+
+/**
+ * In-Reply-To and References for a reply, as RFC 5322 section 3.6.4 builds them:
+ * the parent's References (or its In-Reply-To when that names a single message)
+ * followed by its Message-ID. A chain over 21 IDs or 2048 bytes keeps the thread
+ * root and the newest IDs that fit, as RFC 5537 section 3.4.4 does for News.
+ */
+function replyHeaders(metadata: Record<string, unknown>) {
+  const messageId = metadata["messageId"];
+  if (
+    typeof messageId !== "string" ||
+    encoder.encode(messageId).byteLength > 998 ||
+    messageIds(messageId)[0] !== messageId
+  )
+    fail("reply_headers_unavailable");
+  const references = messageIds(metadata["references"]);
+  const inReplyTo = messageIds(metadata["inReplyTo"]);
+  let chain = [...(references.length ? references : inReplyTo.length === 1 ? inReplyTo : [])];
+  if (chain.length > 20) chain = [...chain.slice(0, 1), ...chain.slice(-19)];
+  const size = () => encoder.encode([...chain, messageId].join(" ")).byteLength;
+  // Drop the oldest ID after the root, and the root last; the Message-ID always fits.
+  while (chain.length && size() > 2048) chain.splice(chain.length > 1 ? 1 : 0, 1);
+  return { "In-Reply-To": messageId, References: [...chain, messageId].join(" ") };
+}
+
 async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
@@ -363,16 +392,7 @@ async function normalize(
       .bind(reply)
       .first<{ metadata_json: string }>();
     if (!parent) fail("reply_not_found");
-    const metadata = record(JSON.parse(parent.metadata_json));
-    const messageId = text(metadata["messageId"], 998, true);
-    if (!/^<[^\s<>]+@[^\s<>]+>$/.test(messageId)) fail("reply_headers_unavailable");
-    const previous =
-      typeof metadata["references"] === "string"
-        ? (metadata["references"].match(/<[^\s<>]+@[^\s<>]+>/g) ?? [])
-        : [];
-    headers["In-Reply-To"] = messageId;
-    headers["References"] = [...previous.slice(-20), messageId].join(" ");
-    if (encoder.encode(headers["References"]).byteLength > 2048) fail("reply_headers_unavailable");
+    Object.assign(headers, replyHeaders(record(JSON.parse(parent.metadata_json))));
   }
   return {
     to,

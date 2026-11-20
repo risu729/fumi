@@ -189,6 +189,11 @@ On Tue, Nov 17, 2026 at 11:13 PM Parent Sender <parent@example.invalid> wrote:
 - Like Gmail's prefilled subject, an empty subject or the parent's own subject
   becomes `Re:` and a space plus the parent's subject (unchanged when it already
   starts with `Re:`). A subject the caller changed is sent as written.
+- `In-Reply-To` is the parent's `Message-ID`. `References` follows RFC 5322
+  section 3.6.4: the parent's `References`, or its `In-Reply-To` when that holds
+  exactly one message ID, then the parent's `Message-ID`. A chain over 21 IDs or
+  2048 bytes keeps the first (thread root) ID and the newest IDs that fit. A
+  parent without a valid `Message-ID` fails with `reply_headers_unavailable`.
 - Replies carry the parent's attachments only with `include_attachments: true`
   (Gmail does not attach them to replies). The limits and SHA-256 verification
   described for forwards below apply.
@@ -248,6 +253,13 @@ digest of the archived `input.json`. Operations created before `request_hash`
 existed (migration `0015`) compare `input_hash` with the digest of the uncomposed
 input, which is how they were hashed. A `prepared` operation resumes from its
 archived `input.json` and is never composed again.
+
+The digest includes the reply's `In-Reply-To` and `References`, which are derived
+from the parent's stored headers. The `References` rule above changed on
+2026-11-20 for parents whose own `References` is missing or holds more than 20
+IDs. A same-key retry of such a reply submitted before that change fails with
+`idempotency_conflict` and does not send; `get_send_status` with the original
+operation ID still returns its status.
 
 ## Sending and recovery
 
