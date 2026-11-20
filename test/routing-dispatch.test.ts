@@ -230,6 +230,50 @@ async function rows() {
 async function advance() {
   clock += 100_000;
 }
+const signingSecret = `whsec_${btoa(String.fromCharCode(...new Uint8Array(32).fill(7)))}`;
+const otherSigningSecret = `whsec_${btoa(String.fromCharCode(...new Uint8Array(32).fill(9)))}`;
+function webhookAdapter(url: string, authRef = "synthetic") {
+  return { kind: "webhook" as const, url, authRef, timeoutMs: 1000 };
+}
+function webhookRuntime(
+  auth: Record<string, string>,
+  handle: (request: globalThis.Request) => Promise<Response>,
+): RoutingDispatchRuntime {
+  return {
+    ...runtime({}),
+    transport: {
+      auth,
+      fetch: async (input, init) =>
+        handle(input instanceof globalThis.Request ? input : new globalThis.Request(input, init)),
+    },
+  };
+}
+/** Independent Standard Webhooks verification of one captured request. */
+async function verifiedWebhook(request: globalThis.Request, secret: string, id: string) {
+  expect(request.headers.get("webhook-id")).toBe(id);
+  const timestamp = request.headers.get("webhook-timestamp")!;
+  const body = await request.clone().text();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    Uint8Array.from(atob(secret.slice(6)), (character) => character.charCodeAt(0)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = btoa(
+    String.fromCharCode(
+      ...new Uint8Array(
+        await crypto.subtle.sign(
+          "HMAC",
+          key,
+          new TextEncoder().encode(`${id}.${timestamp}.${body}`),
+        ),
+      ),
+    ),
+  );
+  expect(request.headers.get("webhook-signature")).toBe(`v1,${expected}`);
+  return body;
+}
 
 // Run `inject` once, just before (or with `after`, just after) the first statement
 // whose SQL starts with `prefix` runs, to model a concurrent worker's write.
@@ -511,6 +555,7 @@ describe("durable routing dispatch in workerd", () => {
     const request = destination.requests[0]!;
     expect(request.operationId).toBe(await routingOperationId(item.rawKey, "action"));
     expect(request.input).toEqual({ subject: "合成の確認" });
+    expect(request.messageId).toBeUndefined();
     expect(JSON.stringify(request)).not.toContain(item.rawKey);
     expect(request.classification).toMatchObject({
       outcome: "review",
@@ -620,81 +665,242 @@ describe("durable routing dispatch in workerd", () => {
     await configure(config);
     await expect(loadDispatchConfiguration(env.MAIL_ARCHIVE)).rejects.toThrow();
   });
-  it("records ordinary webhook HTTP acceptance once without claiming provider delivery", async () => {
+  it("signs one accepted webhook with identifiers and classification only", async () => {
     const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://notification.example.com/notify",
-      authRef: "synthetic",
-      timeoutMs: 1000,
-    };
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
     await configure(config);
     await source();
-    let calls = 0;
-    const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth: { synthetic: "synthetic-webhook-auth-0000000" },
-        fetch: async () => {
-          calls++;
-          return new Response(null, { status: 202 });
-        },
-      },
-    };
-    await repairRoutingDispatch(env, run);
-    await advance();
-    await repairRoutingDispatch(env, run);
-    expect(calls).toBe(1);
-    expect((await rows())[0]).toMatchObject({
-      state: "accepted",
-      failure_code: "http_acceptance_only",
+    const sent: globalThis.Request[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      sent.push(request);
+      return new Response(null, { status: 202 });
     });
-  });
-  it("holds generic webhook ambiguity without reoffer or invented status polling", async () => {
-    const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://notification.example.com/notify",
-      authRef: "synthetic",
-      timeoutMs: 1000,
-    };
-    await configure(config);
-    await source();
-    let calls = 0;
-    const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth: { synthetic: "synthetic-webhook-auth-0000000" },
-        fetch: async () => {
-          calls++;
-          throw new Error("Synthetic lost response");
-        },
-      },
-    };
     await repairRoutingDispatch(env, run);
     await advance();
+    await repairRoutingDispatch(env, run);
+    expect(sent).toHaveLength(1);
+    const row = (await rows())[0]!;
+    expect(row).toMatchObject({ state: "accepted", failure_code: "http_acceptance_only" });
+    const body = await verifiedWebhook(sent[0]!, signingSecret, row.operation_id);
+    expect(body).toBe(row.payload_json);
+    const payload = JSON.parse(body) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      kind: "notification",
+      messageId: "mail_synthetic-0001",
+      input: {},
+    });
+    expect(body).not.toContain("合成");
+    expect(sent[0]!.headers.get("Authorization")).toBeNull();
+  });
+  it("resends a failed webhook with the same id and body until accepted", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const sent: globalThis.Request[] = [];
+    let status = 503;
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      sent.push(request);
+      if (status === 0) throw new Error("Synthetic lost response");
+      return new Response(null, { status });
+    });
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({
+      state: "retry",
+      attempts: 1,
+      failure_code: "webhook_not_accepted",
+    });
+    status = 0;
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({ state: "retry", attempts: 2 });
+    status = 200;
+    clock += 300_000;
     await repairRoutingDispatch(env, run);
     const row = (await rows())[0]!;
-    expect(calls).toBe(1);
-    expect(row.state).toBe("uncertain");
-    await expect(
-      recordRoutingDispatchReceipt(env.MAIL_CATALOG, {
-        schemaVersion: 1,
-        operationId: row.operation_id,
-        requestSha256: row.request_sha256,
-        result: "not_found",
-      }),
-    ).rejects.toThrow();
-    await recordRoutingDispatchReceipt(env.MAIL_CATALOG, {
-      schemaVersion: 1,
-      operationId: row.operation_id,
-      requestSha256: row.request_sha256,
-      result: "handled",
+    expect(row).toMatchObject({ state: "accepted", attempts: 3 });
+    expect(sent).toHaveLength(3);
+    const bodies = await Promise.all(
+      sent.map((request) => verifiedWebhook(request, signingSecret, row.operation_id)),
+    );
+    expect(new Set(bodies)).toEqual(new Set([row.payload_json]));
+  });
+  it("ends an unaccepted webhook dead after the attempt budget", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: signingSecret }, async () => {
+      calls++;
+      return new Response(null, { status: 500 });
     });
+    for (let index = 0; index < 7; index++) {
+      // oxlint-disable-next-line no-await-in-loop -- Sequential repairs model successive cron runs.
+      await repairRoutingDispatch(env, run);
+      clock += 3_700_000;
+    }
+    expect(calls).toBe(5);
     expect((await rows())[0]).toMatchObject({
-      state: "accepted",
-      failure_code: "http_acceptance_only",
+      state: "dead",
+      attempts: 5,
+      failure_code: "retry_exhausted",
     });
+  });
+  it("retries an interrupted webhook attempt instead of holding it uncertain", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let accept = false;
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: signingSecret }, async () => {
+      calls++;
+      return new Response(null, { status: accept ? 204 : 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE routing_dispatch_outbox SET state='sending',lease_token='lost',lease_until=1 WHERE state='retry'",
+    ).run();
+    accept = true;
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(calls).toBe(2);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", attempts: 2 });
+  });
+  it("keeps an attempted webhook on its destination across a rule revision", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    let status = 500;
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status });
+    });
+    await repairRoutingDispatch(env, run);
+    config.revision = 2;
+    await configure(config);
+    status = 200;
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["notification.example.com", "notification.example.com"]);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", attempts: 2 });
+  });
+  it("never re-targets an attempted webhook to a new destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["old.example.com"]);
+    expect((await rows())[0]).toMatchObject({
+      state: "dead",
+      failure_code: "destination_changed",
+    });
+  });
+  it("ends an attempted webhook that reaches retry after a newer generation activated", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    // Model the race: the observation that activates generation 2 does not see the
+    // row as retry, and the old attempt's result lands as retry afterwards.
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='accepted'").run();
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    await repairRoutingDispatch(env, run);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT generation FROM routing_dispatch_control").first(),
+    ).toEqual({ generation: 2 });
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='retry'").run();
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["old.example.com"]);
+    expect((await rows())[0]).toMatchObject({
+      state: "dead",
+      generation: 1,
+      failure_code: "destination_changed",
+    });
+  });
+  it("rebuilds a never-attempted webhook row for a new destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 202 });
+    });
+    let gate = false;
+    run.gateNotification = async () =>
+      gate
+        ? { outcome: "allow", evidenceCode: "synthetic_allow" }
+        : { outcome: "hold", evidenceCode: "synthetic_hold" };
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({ state: "ready", attempts: 0 });
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    gate = true;
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["new.example.com"]);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", generation: 2 });
+  });
+  it("rejects mail field grants on a generic webhook destination", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = ["subject"];
+    await configure(config);
+    await expect(loadDispatchConfiguration(env.MAIL_ARCHIVE)).rejects.toThrow();
+  });
+  it("holds a webhook whose secret is not a whsec signing secret", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: "synthetic-webhook-auth-0000000" }, async () => {
+      calls++;
+      return new Response(null, { status: 202 });
+    });
+    await repairRoutingDispatch(env, run);
+    expect(calls).toBe(0);
+    expect(await rows()).toHaveLength(0);
   });
   it("cannot reconcile old-endpoint uncertainty through a replaced credential reference", async () => {
     const config = artifact();
@@ -745,35 +951,25 @@ describe("durable routing dispatch in workerd", () => {
   });
   it("keeps an immutable per-invocation credential snapshot across asynchronous gates", async () => {
     const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://adapter.example.com/notify",
-      authRef: "active",
-      timeoutMs: 1000,
-    };
+    config.destination.adapter = webhookAdapter("https://adapter.example.com/notify", "active");
+    config.destination.offerFields = [];
     await configure(config);
     await source();
-    const original = "synthetic-original-account-secret-0000";
-    const auth: Record<string, string> = { active: original };
-    let authorization: string | null = null;
+    const auth: Record<string, string> = { active: signingSecret };
+    let sent: globalThis.Request | undefined;
     const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth,
-        fetch: async (input, init) => {
-          const request =
-            input instanceof globalThis.Request ? input : new globalThis.Request(input, init);
-          authorization = request.headers.get("Authorization");
-          return new Response(null, { status: 202 });
-        },
-      },
+      ...webhookRuntime(auth, async (request) => {
+        sent = request;
+        return new Response(null, { status: 202 });
+      }),
       gateNotification: async () => {
-        auth["active"] = "synthetic-replacement-account-secret-1111";
+        auth["active"] = otherSigningSecret;
         return { outcome: "allow", evidenceCode: "synthetic_allowed" };
       },
     };
     await repairRoutingDispatch(env, run);
-    expect(authorization).toBe(`Bearer ${original}`);
+    const row = (await rows())[0]!;
+    await verifiedWebhook(sent!, signingSecret, row.operation_id);
   });
   it("reconciles with a retained old-endpoint credential before activating a distinct new endpoint", async () => {
     const config = artifact();

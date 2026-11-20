@@ -1,6 +1,8 @@
 import * as v from "valibot";
 import type { RoutingMetadata, ShadowDecision } from "./routing.ts";
 import { parseReceipt } from "./receipt-schema.ts";
+import { inboundMessageId } from "./mail-read.ts";
+import { validSigningSecret } from "./webhook-signature.ts";
 import {
   notificationAdapterSchema,
   canonicalOfferJson,
@@ -20,6 +22,8 @@ import type { DispatchConfiguration, OfferField } from "./routing-dispatch-confi
 
 export interface RoutingDispatchSource {
   rawKey: string;
+  /** The `read_email` ID of this live message, `mail_<ingestId>`. */
+  messageId: string;
   rawSha256: string;
   extractionUpdatedAt: number;
   receivedAt: string | null;
@@ -117,12 +121,20 @@ interface SourceRow {
   manifest_key: string;
   received_at: string | null;
   receipt_snapshot: string | null;
+  external_id: string;
 }
 type Session = D1DatabaseSession;
 const LIMIT = 3;
 const LEASE = 180_000;
 const MAX_ATTEMPTS = 5;
 const MAX_RECONCILIATIONS = 5;
+/** A generic webhook row that has been sent at least once stays with the
+ * destination generation that received it (ADR 0003): its receiver holds the
+ * `webhook-id` deduplication state, a new destination would not. */
+const ATTEMPTED_WEBHOOK = "attempts>0 AND json_extract(adapter_json,'$.kind')='webhook'";
+function webhookRetryDelay(attempts: number) {
+  return Math.min(3_600_000, 60_000 * 4 ** Math.max(0, attempts - 1));
+}
 const reasonPattern = /^[a-z][a-z0-9_]{0,63}$/;
 const fieldText = v.pipe(v.string(), v.maxLength(4096));
 const mailbox = v.object({ address: fieldText });
@@ -210,16 +222,15 @@ function snapshotRuntime(
 function ready(adapter: NotificationAdapter, transport: OfferTransport) {
   if (adapter.kind === "rpc") return !!transport.rpcServices?.[adapter.serviceRef];
   const secret = transport.auth[adapter.authRef];
+  if (adapter.kind === "webhook") return validSigningSecret(secret);
   return (
     typeof secret === "string" &&
     secret.length >= 24 &&
     secret.length <= 4096 &&
     !/[\r\n]/.test(secret) &&
-    (adapter.kind === "webhook"
-      ? true
-      : adapter.kind === "https"
-        ? adapter.serviceRef === null
-        : !!adapter.serviceRef && !!transport.services?.[adapter.serviceRef])
+    (adapter.kind === "https"
+      ? adapter.serviceRef === null
+      : !!adapter.serviceRef && !!transport.services?.[adapter.serviceRef])
   );
 }
 async function credentialIdentity(
@@ -269,7 +280,7 @@ export async function routingOperationId(rawKey: string, lane: string): Promise<
 async function source(db: Session, rawKey: string): Promise<RoutingDispatchSource | null> {
   const row = await db
     .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at,e.metadata_json,e.attachment_count,
-    e.body_json_key,e.body_text_key,e.manifest_key,s.received_at,s.receipt_snapshot
+    e.body_json_key,e.body_text_key,e.manifest_key,s.received_at,s.receipt_snapshot,s.external_id
     FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
     WHERE e.raw_key=? AND e.extractor_version='mime-v1' AND e.status='complete' AND s.raw_state='present'
     AND s.source_kind='email_routing' AND s.notify_events=1 AND s.raw_sha256=e.raw_sha256`)
@@ -297,6 +308,7 @@ async function source(db: Session, rawKey: string): Promise<RoutingDispatchSourc
     }
     return {
       rawKey: row.raw_key,
+      messageId: inboundMessageId(row.external_id),
       rawSha256: row.raw_sha256,
       extractionUpdatedAt: row.updated_at,
       receivedAt: row.received_at,
@@ -384,9 +396,12 @@ async function observe(
       db
         .prepare(`UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND ${replaceable}`)
         .bind(...fence),
+      // An attempted webhook row stays bound to its generation: it is never revoked
+      // and rebuilt for another destination. It ends below once a newer generation
+      // is active.
       db
         .prepare(`UPDATE routing_dispatch_outbox SET state='revoked',failure_code='configuration_revoked',updated_at=?
-        WHERE state IN ('ready','retry') AND revision<?`)
+        WHERE state IN ('ready','retry') AND revision<? AND NOT (${ATTEMPTED_WEBHOOK})`)
         .bind(Date.now(), a.revision),
     ]);
     // The generation fence is part of the statement: another Worker may have
@@ -405,6 +420,14 @@ async function observe(
       )
       .run();
   }
+  // Checked on every observation, not only on the call that activates a newer
+  // generation: a row still `sending` during handoff may reach `retry` later.
+  await db
+    .prepare(`UPDATE routing_dispatch_outbox SET state='dead',failure_code='destination_changed',updated_at=?
+    WHERE state IN ('ready','retry') AND ${ATTEMPTED_WEBHOOK}
+    AND generation<(SELECT generation FROM routing_dispatch_control WHERE id=1)`)
+    .bind(Date.now())
+    .run();
   const active = await db
     .prepare("SELECT * FROM routing_dispatch_control WHERE id=1")
     .first<Control>();
@@ -576,6 +599,15 @@ export async function reconcileRoutingDispatch(
   const now = runtime.now?.() ?? Date.now();
   const db = env.MAIL_CATALOG.withSession("first-primary");
   const transport = transportFor(env, runtime);
+  // A signed webhook resend reuses its `webhook-id`, so an interrupted attempt is
+  // retried rather than held for manual reconciliation.
+  await db
+    .prepare(`UPDATE routing_dispatch_outbox SET state=CASE WHEN attempts>=? THEN 'dead' ELSE 'retry' END,
+    failure_code=CASE WHEN attempts>=? THEN 'retry_exhausted' ELSE 'interrupted_attempt' END,
+    lease_token=NULL,lease_until=0,next_attempt_at=?,updated_at=? WHERE state='sending' AND lease_until<=?
+    AND json_extract(adapter_json,'$.kind')='webhook' AND (? IS NULL OR raw_key=?)`)
+    .bind(MAX_ATTEMPTS, MAX_ATTEMPTS, now, now, now, rawKey ?? null, rawKey ?? null)
+    .run();
   await db
     .prepare(`UPDATE routing_dispatch_outbox SET state='uncertain',failure_code='interrupted_attempt',lease_token=NULL,
     lease_until=0 WHERE operation_id IN (SELECT operation_id FROM routing_dispatch_outbox
@@ -826,6 +858,7 @@ async function attempt(
       schemaVersion: 1,
       kind: lane === "action" ? "notification" : "owner",
       operationId,
+      ...(lane === "action" && adapter.kind === "webhook" ? { messageId: item.messageId } : {}),
       source: {
         eventId: await dispatchDigest(JSON.stringify(["fumi-event-v1", item.rawKey])),
         rawSha256: item.rawSha256,
@@ -906,7 +939,7 @@ async function attempt(
     .prepare(`UPDATE routing_dispatch_outbox SET state='sending',lease_token=?,lease_until=?,attempts=attempts+1,attempt_expires_at=?,
     revision=?,generation=?,target_id=?,adapter_json=?,credential_sha256=?,updated_at=? WHERE operation_id=? AND request_sha256=?
     AND source_sha256=? AND extraction_updated_at=? AND manifest_key=? AND grant_fields_json=?
-    AND state IN ('ready','retry','revoked') AND attempts<? AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
+    AND state IN ('ready','retry','revoked') AND attempts<? AND NOT (${ATTEMPTED_WEBHOOK} AND generation<>?) AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
       JOIN mail_extractions e ON e.raw_key=j.raw_key JOIN archive_sources s ON s.raw_key=e.raw_key
       WHERE c.id=1 AND c.accepting=1 AND c.paused=0 AND j.lease_token=? AND c.configuration_sha256=? AND j.lease_until>?
       AND e.extractor_version='mime-v1' AND e.status='complete' AND e.raw_sha256=? AND e.updated_at=? AND e.manifest_key=?
@@ -928,6 +961,7 @@ async function attempt(
       item.manifestKey,
       JSON.stringify(fields),
       MAX_ATTEMPTS,
+      config.artifact.generation,
       item.rawKey,
       globalToken,
       config.configurationSha256,
@@ -940,26 +974,28 @@ async function attempt(
   if (claimed.meta.changes !== 1) return "held";
   budget.remaining--;
   if (adapter.kind === "webhook") {
-    const state = await exchangeWebhook(
-      adapter,
-      transport,
-      operationId,
-      row.request_sha256,
-      row.payload_json,
-    );
-    await db
+    const result = await exchangeWebhook(adapter, transport, operationId, row.payload_json);
+    const attempts = row.attempts + 1;
+    const state = result === "accepted" ? "accepted" : attempts >= MAX_ATTEMPTS ? "dead" : "retry";
+    const written = await db
       .prepare(`UPDATE routing_dispatch_outbox SET state=?,failure_code=?,lease_token=NULL,lease_until=0,updated_at=?,next_attempt_at=?
       WHERE operation_id=? AND lease_token=? AND state='sending'`)
       .bind(
         state,
-        state === "accepted" ? "http_acceptance_only" : "manual_reconciliation_required",
+        state === "accepted"
+          ? "http_acceptance_only"
+          : state === "dead"
+            ? "retry_exhausted"
+            : "webhook_not_accepted",
         Date.now(),
-        state === "uncertain" ? Number.MAX_SAFE_INTEGER : now,
+        state === "retry" ? now + webhookRetryDelay(attempts) : now,
         operationId,
         token,
       )
       .run();
-    return state;
+    // A lost lease means recovery already moved the row; the job must not settle on
+    // this attempt's result.
+    return written.meta.changes === 1 ? state : "held";
   }
   // No configuration, authorization or data lookup is started after this claim.
   // Interruption or missing acknowledgement leaves the durable sending row uncertain.

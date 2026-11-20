@@ -171,7 +171,7 @@ establish production delivery.
       proxy selects the active Grok Bot A/B account; fumi sends to that one URL and
       does not select accounts (owner, 2026-11-12 22:50 UTC). The proxy is built by
       this project's agents (owner, 2026-11-20 17:13 UTC).
-- [ ] Sign the generic webhook with Standard Webhooks, retry it with a stable
+- [x] Sign the generic webhook with Standard Webhooks, retry it with a stable
       `webhook-id`, and send identifiers and classification only
       ([ADR 0003](adr/0003-signed-notification-webhooks.md)).
 - [ ] Design and build the Grok Bot webhook proxy: signature check, `webhook-id`

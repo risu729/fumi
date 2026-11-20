@@ -144,16 +144,34 @@ endpoint/owner identity requires the same deliberate generation handoff.
 
 The ordinary destination additionally accepts `{kind: "webhook", url, authRef,
 timeoutMs}` for a provider that consumes the bounded notification JSON without the
-owner receipt protocol. It makes one bounded authenticated POST without following
-redirects. HTTP 2xx records the distinct terminal outbox state `accepted`, meaning
-HTTP acceptance only; it does not establish delivery, reading or durable downstream
-processing. Any non-2xx, timeout or transport loss is uncertain and is never
-automatically resubmitted. No status endpoint is invented: verified operator evidence
-is required to reconcile uncertainty, which blocks destination handoff meanwhile.
-Manual `not_found` or `retryable_error` cannot reset a generic webhook. Actual
-endpoint, authentication and input semantics require separate verification before
-activation. No real receiver endpoint is configured here. Fumi owns this configurable
-outbound handler only.
+owner receipt protocol ([ADR 0003](adr/0003-signed-notification-webhooks.md)):
+
+- **Signing.** `authRef` resolves to a `whsec_` secret (24 to 64 random bytes). Each
+  POST carries Standard Webhooks headers: `webhook-id` (the stable `operationId`),
+  `webhook-timestamp` and `webhook-signature` over the exact frozen body. There is no
+  bearer header. A reference whose value is not a valid `whsec_` secret holds the
+  notification.
+- **Body.** It carries `messageId` (`mail_<ingestId>`, the `read_email` ID), the
+  source identity and the classification, with `input: {}`. Configuration with a
+  non-empty `offerFields` for a webhook destination is invalid. The receiver reads
+  mail through fumi's MCP tools.
+- **Acceptance.** HTTP 2xx records the terminal state `accepted`, meaning HTTP
+  acceptance only; it does not establish delivery, reading or durable downstream
+  processing.
+- **Retry.** A non-2xx response, a timeout, a transport failure or an interrupted
+  attempt resends the same body with the same `webhook-id`. The attempt budget is the
+  same five attempts as other lanes, 1, 4, 16 and then 60 minutes apart (repair runs
+  every five minutes). An exhausted row ends `dead` with `retry_exhausted`.
+  Receivers must deduplicate by `webhook-id` for at least 24 hours.
+- **Handoff.** A webhook row that was attempted stays bound to the destination
+  generation that received it. A revision without a new generation keeps retrying it
+  to the same destination. It is never revoked and rebuilt for another destination.
+  Once a newer generation is active, it ends `dead` with `destination_changed`
+  instead of re-targeting it to a receiver without the old deduplication state.
+  Only webhook bodies carry `messageId`; strict adapters keep their protocol body.
+
+Rows written before this change keep their frozen body; a legacy `uncertain` webhook
+row still needs a verified manual `handled` or `rejected` receipt.
 
 Decision (owner, 2026-11-12 22:50 UTC): the receiver for Grok Bot notifications is a
 webhook proxy that the Grok Bot side builds and operates. The proxy, not fumi, chooses
@@ -166,12 +184,8 @@ generation and drain handoff above; an A/B switch inside the proxy does not touc
 fumi configuration.
 
 Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this project's
-agents, because the Grok Bot side has no runtime. The `webhook` adapter becomes signed
-with Standard Webhooks, retries with the same `webhook-id` instead of staying
-uncertain, and sends identifiers and classification only. Attempted webhook rows stay
-bound to their generation and block handoff until accepted or dead. See
-[ADR 0003](adr/0003-signed-notification-webhooks.md); until it is implemented, the
-behavior on this page is current.
+agents, because the Grok Bot side has no runtime. The signed, retrying `webhook`
+adapter above implements [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
 ## Input disclosure and source integrity
 
@@ -260,14 +274,13 @@ claim gate to avoid competing consumption.
 ## Handoff, revocation and recovery
 
 Observing a new desired revision first closes new claims. Ready/retry operations from
-the old revision are revoked without action. Once implemented,
-[ADR 0003](adr/0003-signed-notification-webhooks.md) keeps attempted generic webhook
-rows bound to their generation instead. A new active generation cannot activate
-while any previous operation is sending or uncertain. Both activation and claim
-conditions are enforced in D1 statements. The source, extraction revision, manifest,
-live provenance, active config and exact source lease are checked again after
-asynchronous policy work. New configuration is reloaded just before the final claim. The
-destination never comes from a payload or classifier result.
+the old revision are revoked without action, except attempted generic webhook rows,
+which stay bound to their generation as described above. A new active generation
+cannot activate while any previous operation is sending or uncertain. Both activation
+and claim conditions are enforced in D1 statements. The source, extraction revision,
+manifest, live provenance, active config and exact source lease are checked again
+after asynchronous policy work. New configuration is reloaded just before the final
+claim. The destination never comes from a payload or classifier result.
 
 Already transmitted actions cannot be recalled. Revocation stops new offers, while
 minimal identity/hash status queries may reconcile a previous uncertain action

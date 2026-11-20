@@ -1,6 +1,7 @@
 # ADR 0003: Signed notification webhooks with identifiers only
 
-Status: accepted. On 2026-11-16 the owner asked, at 12:00 UTC, that MCP Events
+Status: accepted, implemented for the routing webhook (points 1 to 3); amended
+2026-11-20 (see Amendment). On 2026-11-16 the owner asked, at 12:00 UTC, that MCP Events
 subscriptions carry only the routing-filtered result. In the same minute they
 asked that both webhook senders share their sending code ("結局送るのってwebhookなら、
 そこは共通化すべき", "if both send webhooks in the end, that part should be
@@ -8,7 +9,7 @@ shared"). At 12:01 UTC they asked that subscribe tools be made permanent if
 `events/subscribe` cannot be used.
 
 On 2026-11-20 at 17:13 UTC the owner accepted the re-verified recommendations below
-("はい、そうして", "yes, do that"). Not implemented yet. This ADR amends the routing
+("はい、そうして", "yes, do that"). This ADR amends the routing
 dispatch decision of 2026-11-12 22:50 UTC (who builds the Grok Bot proxy) and the
 generic `webhook` adapter's no-retry behavior in
 [routing dispatch](../routing-dispatch.md).
@@ -77,9 +78,8 @@ agent specified to make them implementable; they are not confirmed by the owner.
      attempts and its backoff. An exhausted row ends `dead`, so a timeout no longer
      needs a manual receipt.
    - Agent: a webhook row that was already attempted stays bound to the generation
-     and credential it was first sent with. Until it is `accepted` or `dead`, it
-     blocks handoff, just as `uncertain` rows do today. It is never re-targeted to a
-     new destination, whose receiver lacks the old deduplication state. Rows never
+     and credential it was first sent with. It is never re-targeted to a new
+     destination, whose receiver lacks the old deduplication state. Rows never
      attempted are still revoked and rebuilt as today.
    - Agent: the receiver keeps deduplication state for at least 24 hours, which is
      longer than the retry span.
@@ -148,3 +148,19 @@ agent specified to make them implementable; they are not confirmed by the owner.
   could not read fumi. It now can, through the Portal.
 - **Make the routing destination an MCP Events subscription.** Subscriptions expire
   after 24 hours and need a renewing client. The Portal does not proxy `events/*`.
+
+## Amendment 2026-11-20: generation change ends attempted webhook rows
+
+Status: agent decision while implementing, not confirmed by the owner.
+
+The accepted text said an attempted webhook row blocks handoff until it is
+`accepted` or `dead`. Implementing it showed that such a row cannot progress during
+a handoff: a newer revision closes claims, and the old destination's configuration is
+no longer the one loaded. Handoff would wait forever.
+
+Instead, an attempted webhook row is never revoked by a revision. Once a newer
+destination generation is active, such a row in `ready` or `retry` ends `dead` with
+`destination_changed`. It is still never re-targeted. Rows that are `sending` block
+handoff as before until their attempt finishes or is recovered as interrupted. The
+check runs on every observation, so an attempt that finishes as `retry` after the
+handoff also ends `dead`.

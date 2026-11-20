@@ -8,12 +8,8 @@ import {
   type EventName,
   type Subscription,
 } from "./event-store.ts";
-import {
-  decodeSigningSecret,
-  validateCallback,
-  verifyCallback,
-  type EventRuntime,
-} from "./event-delivery.ts";
+import { validateCallback, verifyCallback, type EventRuntime } from "./event-delivery.ts";
+import { decodeSigningSecret } from "./webhook-signature.ts";
 import type { MailPrincipal } from "./principal.ts";
 
 const idSchema = v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/));

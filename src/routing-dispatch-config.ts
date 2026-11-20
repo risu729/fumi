@@ -77,6 +77,13 @@ export async function loadDispatchConfiguration(bucket: R2Bucket) {
   ).adoptions;
   if (new Set(artifact.owners.map((owner) => owner.handlerRef)).size !== artifact.owners.length)
     throw new Error("Invalid dispatch configuration");
+  // A generic webhook carries identifiers and classification only; its receiver
+  // reads mail through fumi's MCP tools (ADR 0003).
+  if (
+    artifact.destination?.adapter.kind === "webhook" &&
+    artifact.destination.offerFields.length > 0
+  )
+    throw new Error("Invalid dispatch configuration");
   const enabledRefs = adoptions
     .filter((adoption) => adoption.enabled)
     .map((adoption) => adoption.handlerRef);
