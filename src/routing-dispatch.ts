@@ -796,6 +796,9 @@ async function attempt(
       .prepare("SELECT * FROM routing_dispatch_outbox WHERE operation_id=?")
       .bind(operationId)
       .first<Outbox>();
+    // A row that survived the delete was claimed or inserted by a concurrent worker
+    // whose decision was never checked here; the next pass reads it from the start.
+    if (row) return "held";
   }
   if (row && sourceChanged(row)) return "held";
   const now = runtime.now?.() ?? Date.now();
@@ -860,6 +863,10 @@ async function attempt(
       .prepare("SELECT * FROM routing_dispatch_outbox WHERE operation_id=?")
       .bind(operationId)
       .first<Outbox>();
+    // A concurrent worker inserted a different payload first. Its decision was never
+    // checked here, so hold; the next pass sends it if the decision is unchanged and
+    // rebuilds it if it changed and the row is still unattempted.
+    if (row?.request_sha256 !== hash) return "held";
   }
   if (!row) return "held";
   const ignore = async (evidenceCode: string) => {
