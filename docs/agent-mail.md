@@ -257,9 +257,10 @@ archived `input.json` and is never composed again.
 The digest includes the reply's `In-Reply-To` and `References`, which are derived
 from the parent's stored headers. The `References` rule above changed on
 2026-11-20 for parents whose own `References` is missing or holds more than 20
-IDs. A same-key retry of such a reply submitted before that change fails with
-`idempotency_conflict` and does not send; `get_send_status` with the original
-operation ID still returns its status.
+IDs. Before then, `References` was the parent's newest 20 `References` IDs and
+its `Message-ID`. A same-key retry of a reply submitted under that rule is also
+compared with a digest that uses those headers, so it still matches its
+operation.
 
 ## Sending and recovery
 

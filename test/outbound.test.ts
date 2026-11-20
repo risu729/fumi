@@ -385,6 +385,71 @@ describe("durable outbound submission in workerd", () => {
       .run();
   });
 
+  it("matches a same-key retry of a reply hashed with the earlier References rule", async () => {
+    const { ctx, send } = context(vi.fn(async () => ({ messageId: crypto.randomUUID() })));
+    const rawKey = "ingest/synthetic/earlier-rule.eml";
+    const replyInput = { ...input, reply_message_id: rawKey, quote: false };
+    const ids = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) => `<${from + index}@example.invalid>`).join(
+        " ",
+      );
+    const cases = [
+      // Before 2026-11-20 a parent's single In-Reply-To was ignored without References...
+      [{}, { inReplyTo: "<grand@example.invalid>" }],
+      // ...and only the newest 20 References were kept, dropping the thread root.
+      [{ references: ids(5, 25) }, { references: ids(0, 25) }],
+    ] as const;
+    for (const [index, [earlier, stored]] of cases.entries()) {
+      const parent = { messageId: "<parent@example.invalid>" };
+      // The current rule over `earlier` yields what the earlier rule built from `stored`.
+      // oxlint-disable-next-line no-await-in-loop -- Each case reseeds the same parent row.
+      await env.MAIL_CATALOG.prepare(`INSERT OR REPLACE INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
+        metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
+        VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
+        .bind(
+          rawKey,
+          "0".repeat(64),
+          JSON.stringify({ ...parent, ...earlier }),
+          // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+          await storeBody("Parent"),
+        )
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      const first = await sendMail(ctx, principal, replyInput, `earlier-rule-${index}`);
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+      await env.MAIL_CATALOG.prepare(
+        "UPDATE mail_extractions SET metadata_json = ? WHERE raw_key = ?",
+      )
+        .bind(JSON.stringify({ ...parent, ...stored }), rawKey)
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, replyInput, `earlier-rule-${index}`),
+      ).resolves.toMatchObject({ operation_id: first.operation_id, state: "accepted" });
+      // Rows from before request_hash compare input_hash, the digest of the uncomposed
+      // input; this reply composes to its own input, so the archived digest stands in.
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+      await env.MAIL_CATALOG.prepare(
+        "UPDATE outbound_operations SET request_hash = NULL WHERE operation_id = ?",
+      )
+        .bind(first.operation_id)
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, replyInput, `earlier-rule-${index}`),
+      ).resolves.toMatchObject({ operation_id: first.operation_id, state: "accepted" });
+      // A different request under the same key is still a conflict.
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, { ...replyInput, subject: "Other" }, `earlier-rule-${index}`),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    }
+    expect(send).toHaveBeenCalledTimes(2);
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions WHERE raw_key = ?")
+      .bind(rawKey)
+      .run();
+  });
+
   it("allows configured sender domains exactly and defaults replies from the captured envelope", async () => {
     const { ctx, send } = context(vi.fn(async () => ({ messageId: crypto.randomUUID() })));
     const domainPrincipal = { ...principal, fromAddresses: [], fromDomains: ["example.invalid"] };

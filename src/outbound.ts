@@ -266,6 +266,27 @@ function replyHeaders(metadata: Record<string, unknown>) {
   return { "In-Reply-To": messageId, References: [...chain, messageId].join(" ") };
 }
 
+/**
+ * Reply headers as releases before 2026-11-20 built them (the parent's newest 20
+ * References and its Message-ID), when they differ from the current ones. They are
+ * only hashed, so a same-key retry of a reply submitted then still matches.
+ */
+const earlierReplyHeaders = new WeakMap<NormalizedMail, Record<string, string>>();
+
+function earlierHeaders(
+  metadata: Record<string, unknown>,
+  current: ReturnType<typeof replyHeaders>,
+): Record<string, string> | undefined {
+  const previous =
+    typeof metadata["references"] === "string"
+      ? (metadata["references"].match(/<[^\s<>]+@[^\s<>]+>/g) ?? [])
+      : [];
+  const references = [...previous.slice(-20), current["In-Reply-To"]].join(" ");
+  return references === current.References || encoder.encode(references).byteLength > 2048
+    ? undefined
+    : { "In-Reply-To": current["In-Reply-To"], References: references };
+}
+
 async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
@@ -382,6 +403,7 @@ async function normalize(
     fail("attachment_limit");
   const headers: Record<string, string> = {};
   let reply: string | undefined;
+  let earlier: Record<string, string> | undefined;
   if (item["reply_message_id"] !== undefined) {
     scope(principal, "mail:read");
     reply = text(item["reply_message_id"], 512, true);
@@ -392,9 +414,12 @@ async function normalize(
       .bind(reply)
       .first<{ metadata_json: string }>();
     if (!parent) fail("reply_not_found");
-    Object.assign(headers, replyHeaders(record(JSON.parse(parent.metadata_json))));
+    const metadata = record(JSON.parse(parent.metadata_json));
+    const current = replyHeaders(metadata);
+    Object.assign(headers, current);
+    earlier = earlierHeaders(metadata, current);
   }
-  return {
+  const normalized: NormalizedMail = {
     to,
     cc,
     bcc,
@@ -411,6 +436,8 @@ async function normalize(
     ...(item["reply_to"] === undefined ? {} : { reply_to: address(item["reply_to"]) }),
     headers,
   };
+  if (earlier) earlierReplyHeaders.set(normalized, earlier);
+  return normalized;
 }
 
 /** MIME base64 with a CRLF after every 76 characters. */
@@ -1041,28 +1068,31 @@ async function submit(
   // The caller's request identifies the operation; the composed message is what is
   // archived and sent. Composition reads the parent and can change between
   // releases, so a same-key retry is matched on the request before composing.
-  const requestHash = await digest(
-    JSON.stringify({
-      version: "outbound-request-v1",
-      input: authored,
-      draft: draft ?? null,
-      forward_message_id: forward ?? null,
-    }),
-  );
-  // Rows from before request_hash stored only the digest of the uncomposed envelope.
-  const legacyHash = async () =>
-    digest(
-      JSON.stringify({
-        version: "outbound-v1",
-        input: authored,
-        draft: draft ?? null,
-        forward_message_id: forward ?? null,
-      }),
+  // A reply submitted under the earlier References rule also matches its request.
+  const earlier = earlierReplyHeaders.get(authored);
+  const requests = earlier ? [authored, { ...authored, headers: earlier }] : [authored];
+  const hashes = async (version: string) =>
+    Promise.all(
+      requests.map(async (request) =>
+        digest(
+          JSON.stringify({
+            version,
+            input: request,
+            draft: draft ?? null,
+            forward_message_id: forward ?? null,
+          }),
+        ),
+      ),
     );
+  const requestHashes = await hashes("outbound-request-v1");
+  const requestHash = requestHashes[0] ?? "";
+  // Rows from before request_hash stored only the digest of the uncomposed envelope.
   const sameRequest = async (row: Operation, composedHash?: string) =>
     row.request_hash
-      ? row.request_hash === requestHash
-      : row.input_hash === (composedHash ?? (await legacyHash()));
+      ? requestHashes.includes(row.request_hash)
+      : composedHash
+        ? row.input_hash === composedHash
+        : (await hashes("outbound-v1")).includes(row.input_hash);
   let operation = await session
     .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
     .bind(principal.id, key)
