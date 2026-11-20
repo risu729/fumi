@@ -15,12 +15,12 @@ import {
   documentFormats,
   itemKey,
   ocrFormats,
-  isEncryptedPdf,
   remoteId,
   verifyOcr,
   type ConversionBindings,
   record,
 } from "./attachment-conversion-backends.ts";
+import { isEncryptedPdf } from "./attachment-conversion-pdf-encryption.ts";
 import { unlockPdf } from "./attachment-conversion-pdf.ts";
 import { archiveCandidate } from "./archive-key.ts";
 

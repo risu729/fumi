@@ -68,18 +68,6 @@ export async function verifyOcr(binding: ManagedOcr) {
   if (record(info["indexing_options"])["use_ocr"] !== true)
     throw new ConversionBlocked("ocr_not_enabled");
 }
-export function isEncryptedPdf(bytes: Uint8Array, mime: string) {
-  return (
-    mime === "application/pdf" &&
-    /\/Encrypt\b/.test(
-      new TextDecoder("latin1")
-        .decode(bytes)
-        .replace(/#([a-f0-9]{2})/gi, (_, hex: string) =>
-          String.fromCharCode(Number.parseInt(hex, 16)),
-        ),
-    )
-  );
-}
 export async function convertDocument(
   binding: ManagedDocuments,
   bytes: Uint8Array,

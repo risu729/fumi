@@ -34,11 +34,13 @@ function metadata(json: string): Metadata | null {
     return null;
   }
 }
+/** ASCII-only, matching the SQLite lower() prefilter; non-ASCII case variants stay distinct. */
+const fold = (address: string) => address.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
 function participants(item: Metadata) {
   if (!item.from?.address || !item.to.length) return null;
   return JSON.stringify([
-    item.from.address.toLowerCase(),
-    [...new Set([...item.to, ...(item.cc ?? [])].map((x) => x.address.toLowerCase()))].sort(),
+    fold(item.from.address),
+    [...new Set([...item.to, ...(item.cc ?? [])].map((x) => fold(x.address)))].sort(),
   ]);
 }
 function subject(value: string | null) {
@@ -165,7 +167,7 @@ export async function resolveAttachmentPasswords(
         source.source_kind,
         after,
         before,
-        selected.from!.address.toLowerCase(),
+        fold(selected.from!.address),
         input.rawKey,
         source.received_at,
       )
