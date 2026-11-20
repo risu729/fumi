@@ -748,13 +748,31 @@ async function attempt(
   if (row && ["handled", "accepted", "not_applicable", "rejected", "dead"].includes(row.state))
     return row.state;
   if (row?.state === "uncertain" || row?.state === "sending") return row.state;
+  const sourceChanged = (existing: Outbox) =>
+    existing.source_sha256 !== item.rawSha256 ||
+    existing.extraction_updated_at !== item.extractionUpdatedAt ||
+    existing.manifest_key !== item.manifestKey;
+  const grantChanged = (existing: Outbox) => JSON.stringify(fields) !== existing.grant_fields_json;
+  const classificationChanged = (existing: Outbox) => {
+    if (lane !== "action" || !resolution) return false;
+    const frozen = JSON.parse(existing.payload_json) as {
+      classification?: { category: string | null; urgent: boolean };
+    };
+    return (
+      !frozen.classification ||
+      frozen.classification.category !== resolution.category ||
+      frozen.classification.urgent !== resolution.urgent
+    );
+  };
+  // A payload that no attempt has claimed has never left fumi, so it is rebuilt
+  // from the current decision. Only an attempted payload stays frozen and holds.
   if (
     row &&
     row.attempts === 0 &&
     (row.revision !== config.artifact.revision ||
-      row.source_sha256 !== item.rawSha256 ||
-      row.extraction_updated_at !== item.extractionUpdatedAt ||
-      row.manifest_key !== item.manifestKey)
+      sourceChanged(row) ||
+      grantChanged(row) ||
+      classificationChanged(row))
   ) {
     await db
       .prepare(
@@ -767,13 +785,7 @@ async function attempt(
       .bind(operationId)
       .first<Outbox>();
   }
-  if (
-    row &&
-    (row.source_sha256 !== item.rawSha256 ||
-      row.extraction_updated_at !== item.extractionUpdatedAt ||
-      row.manifest_key !== item.manifestKey)
-  )
-    return "held";
+  if (row && sourceChanged(row)) return "held";
   const now = runtime.now?.() ?? Date.now();
   if (row && row.next_attempt_at > now && row.state !== "revoked") return row.state;
   const transport = transportFor(env, runtime);
@@ -792,18 +804,7 @@ async function attempt(
     )
       return "held";
   }
-  if (row && JSON.stringify(fields) !== row.grant_fields_json) return "held";
-  if (row && lane === "action" && resolution) {
-    const frozen = JSON.parse(row.payload_json) as {
-      classification?: { category: string | null; urgent: boolean };
-    };
-    if (
-      !frozen.classification ||
-      frozen.classification.category !== resolution.category ||
-      frozen.classification.urgent !== resolution.urgent
-    )
-      return "held";
-  }
+  if (row && (grantChanged(row) || classificationChanged(row))) return "held";
   if (!row) {
     const input = await projectedInput(env, item, fields);
     const body = canonicalOfferJson({
@@ -878,10 +879,15 @@ async function attempt(
   }
   const token = crypto.randomUUID();
   const attemptExpiresAt = Date.now() + adapter.timeoutMs;
+  // The claim binds the exact row read above. A worker whose source lease
+  // expired may still rebuild a never-attempted row: the bytes sent must be the
+  // bytes whose hash D1 keeps for receipts and reconciliation, and the source and
+  // grant identity a retry compares must be the ones checked above.
   const claimed = await db
     .prepare(`UPDATE routing_dispatch_outbox SET state='sending',lease_token=?,lease_until=?,attempts=attempts+1,attempt_expires_at=?,
-    revision=?,generation=?,target_id=?,adapter_json=?,credential_sha256=?,updated_at=? WHERE operation_id=? AND state IN ('ready','retry','revoked')
-    AND attempts<? AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
+    revision=?,generation=?,target_id=?,adapter_json=?,credential_sha256=?,updated_at=? WHERE operation_id=? AND request_sha256=?
+    AND source_sha256=? AND extraction_updated_at=? AND manifest_key=? AND grant_fields_json=?
+    AND state IN ('ready','retry','revoked') AND attempts<? AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
       JOIN mail_extractions e ON e.raw_key=j.raw_key JOIN archive_sources s ON s.raw_key=e.raw_key
       WHERE c.id=1 AND c.accepting=1 AND c.paused=0 AND j.lease_token=? AND c.configuration_sha256=? AND j.lease_until>?
       AND e.extractor_version='mime-v1' AND e.status='complete' AND e.raw_sha256=? AND e.updated_at=? AND e.manifest_key=?
@@ -897,6 +903,11 @@ async function attempt(
       fingerprint,
       now,
       operationId,
+      row.request_sha256,
+      item.rawSha256,
+      item.extractionUpdatedAt,
+      item.manifestKey,
+      JSON.stringify(fields),
       MAX_ATTEMPTS,
       item.rawKey,
       globalToken,
