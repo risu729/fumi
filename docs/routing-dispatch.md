@@ -160,6 +160,12 @@ without a runtime. A proxy URL or credential change still uses the revision,
 generation and drain handoff above; an A/B switch inside the proxy does not touch
 fumi configuration.
 
+Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker written in this project's
+work, because the Grok Bot side has no runtime. The `webhook` adapter becomes signed
+with Standard Webhooks, retries with the same `webhook-id`, and sends identifiers and
+classification only. See [ADR 0003](adr/0003-signed-notification-webhooks.md); until
+it is implemented, the behavior above is current.
+
 ## Input disclosure and source integrity
 
 Match `inputFields` remain the four bounded metadata fields. The owner manifest

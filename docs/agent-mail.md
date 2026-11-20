@@ -326,6 +326,11 @@ delivered. The temporary receiver from
 [#64](https://github.com/risu729/fumi/pull/64) was removed without being used.
 Grok Bot is the primary notification target through the routing webhook.
 
+Decision (owner, 2026-11-20 17:13 UTC): when MCP Events resumes, subscriptions carry
+the routing result as `email.review_required` instead of `email.received` and
+`email.ready`, and no permanent subscribe tools are added until a subscriber exists.
+See [ADR 0003](adr/0003-signed-notification-webhooks.md).
+
 ## Activation checklist
 
 Follow the [activation runbook](mail-activation.md) for targeted Queue and
