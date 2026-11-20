@@ -46,9 +46,9 @@ moves one unit earlier to leave it out, and a start inside a pair moves one unit
 to include it. A chunk can therefore hold 3,501 units, and an overlap 199 to 201, which
 still holds any 200-unit phrase. Citations name the chunk ordinal, not offsets, so they
 still point to the chunk that holds the text. Documents indexed before this rule keep
-their stored chunks until a new manifest rebuilds them. One source can produce multiple
-hits. Results are ordered by index entry, not relevance, with at most 50 chunks per
-page.
+their stored chunks until an extraction or conversion change invalidates their
+projection and repair rebuilds it. One source can produce multiple hits. Results are
+ordered by index entry, not relevance, with at most 50 chunks per page.
 
 Completed searchable conversion derivatives add at most four attachments and 64,000
 UTF-16 code units per message; a derivative cut one unit short to keep a pair whole
