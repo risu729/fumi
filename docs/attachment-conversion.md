@@ -143,18 +143,19 @@ Conversion emits no mail events, sends or historical notifications.
 
 The trusted `AttachmentPasswordResolver` callback receives only canonical raw key,
 attachment SHA-256 and candidate limit eight. The scheduled pipeline supplies the
-bounded related-mail resolver: same source kind/namespace, sender and recipient set,
-within 30 days, and the same parsed RFC thread, normalized subject or an exact
-attachment-filename reference. It checks at most 12 metadata candidates and reads at
-most four verified UTF-8 bodies, each at most 24 KiB, with one-second get/stream
-deadlines and a four-second lookup window. Password-shaped English or Japanese hints
-remain guesses until cryptographic verification. Untrusted message text never grants
-archive access. A private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original
-SHA-256 supplies optional manual candidates. Both sources are validated and combined
-with at most eight distinct strings of 1–128 characters. No credential is accepted
-through MCP or attachment HTTP routes. Password lookup has a five-second deadline.
-Candidate strings and provider/parser exceptions are never persisted in the ledger,
-exposed through MCP or logged.
+bounded related-mail resolver: same source kind/namespace, sender and recipient set
+(addresses compared with ASCII-only case folding, as SQLite `lower()` does), within 30
+days, and the same parsed RFC thread, normalized subject or an exact attachment-filename
+reference. It checks at most 12 metadata candidates and reads at most four verified
+UTF-8 bodies, each at most 24 KiB, with one-second get/stream deadlines and a
+four-second lookup window. Password-shaped English or Japanese hints remain guesses
+until cryptographic verification. Untrusted message text never grants archive access. A
+private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original SHA-256 supplies
+optional manual candidates. Both sources are validated and combined with at most eight
+distinct strings of 1–128 characters. No credential is accepted through MCP or
+attachment HTTP routes. Password lookup has a five-second deadline. Candidate strings
+and provider/parser exceptions are never persisted in the ledger, exposed through MCP or
+logged.
 
 Cryptographic verification decides success. ZIP processing permits eight entries,
 2 MiB per member, 4 MiB total expansion, a maximum 40:1 declared expansion ratio,
@@ -226,6 +227,13 @@ decryption/R2 path. Controlled production acceptance also verified the isolated
 decryption path. Hostile-input limit enforcement still needs separate synthetic
 production acceptance; no CPU or OOM enforcement is claimed from a successful
 decryption. No brittle PDF token filter substitutes for isolation.
+
+The parent routes a PDF to decryption when an `/Encrypt` name, after `#xx` unescaping,
+appears outside comments, literal and hex strings and stream data. That covers classic
+and incremental trailers and cross-reference stream dictionaries, so the same token in
+page content, a metadata stream or a string does not block OCR of an unencrypted PDF.
+Unterminated string or stream data falls back to any mention in the remaining bytes.
+This is routing, not a security check: the isolated parser still decides authentication.
 
 Without OCR the decrypted PDF is downloadable and explicitly excluded from text
 indexing. With opted-in OCR, the managed service receives the verified decrypted

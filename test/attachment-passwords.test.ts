@@ -91,6 +91,30 @@ describe("ephemeral related-mail password hints", () => {
     await insert("account", "Password: wrong-account", { namespace: "other-account", references });
     expect(await resolveAttachmentPasswords(env, input)).toEqual([]);
   });
+  it("folds sender and recipient case the same way as the SQLite lower() prefilter", async () => {
+    const sender = "Ünïcode.Sender@Example.invalid";
+    const to = "Řecipient@example.invalid";
+    await insert("target", "Password: same-message", { sender, to });
+    await insert("related", "Password: related-message", {
+      sender: "Ünïcode.SENDER@example.INVALID",
+      to: "Řecipient@EXAMPLE.invalid",
+      subject: "Re: Invoice",
+    });
+    await insert("sender-case", "Password: non-ascii-sender-case", {
+      sender: "ünïcode.sender@example.invalid",
+      to,
+      subject: "Re: Invoice",
+    });
+    await insert("recipient-case", "Password: non-ascii-recipient-case", {
+      sender,
+      to: "řecipient@example.invalid",
+      subject: "Re: Invoice",
+    });
+    expect(await resolveAttachmentPasswords(env, input)).toEqual([
+      "same-message",
+      "related-message",
+    ]);
+  });
   it("requires exact attachment filename for unrelated subjects and respects date range", async () => {
     await insert("target", "No hint here");
     await insert("unrelated", "Password: unrelated", { subject: "Other topic" });

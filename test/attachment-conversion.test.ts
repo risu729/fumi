@@ -350,10 +350,30 @@ describe("private bounded attachment conversion", () => {
     expect(await row()).toMatchObject({ state: "blocked", failure_code: "ocr_not_enabled" });
     expect(upload).not.toHaveBeenCalled();
   });
+  it("submits an unencrypted PDF to OCR when only its content stream mentions encryption", async () => {
+    const original = await source(
+      "application/pdf",
+      encode(
+        "%PDF-1.7\n1 0 obj << /Length 31 >>\nstream\nBT (/Encrypt 2 0 R) Tj ET\nendstream\nendobj\ntrailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n",
+      ),
+    );
+    const key = `fumi-${original.sha256}.pdf`;
+    const upload = vi.fn(async (_name: string, _content: Blob) => ({ id: "synthetic-item", key }));
+    const ocr = {
+      info: vi.fn(async () => ({ indexing_options: { use_ocr: true } })),
+      items: { upload, get: vi.fn() },
+    };
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "synthetic-item" });
+    expect(await digest(await upload.mock.calls[0]![1].arrayBuffer())).toBe(original.sha256);
+  });
   it("records encrypted PDF and oversized/unsupported coverage without provider calls", async () => {
     const upload = vi.fn();
     const ocr = { info: vi.fn(), items: { upload, get: vi.fn() } };
-    await source("application/pdf", encode("%PDF synthetic /En#63rypt 2 0 R"));
+    await source(
+      "application/pdf",
+      encode("%PDF-1.7 synthetic\ntrailer << /Root 1 0 R /En#63rypt 2 0 R >>"),
+    );
     await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
     expect(await row()).toMatchObject({ state: "blocked", failure_code: "encrypted_pdf" });
     expect(ocr.info).not.toHaveBeenCalled();
