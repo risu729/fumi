@@ -309,7 +309,7 @@ interface SearchInput {
 }
 function excerpt(text: string, query: string, fallback: string) {
   const at = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text)?.index ?? -1;
-  if (at < 0) return fallback.slice(0, 1000);
+  if (at < 0) return truncateCodeUnits(fallback, 1000);
   const start = pairBoundary(text, Math.max(0, at - 150));
   const end = pairBoundary(text, Math.min(text.length, at + query.length + 150));
   return `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
