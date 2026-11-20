@@ -293,7 +293,9 @@ not create duplicate event IDs.
 Subscriptions require `mail:events` plus the event's read/send scope. Callback
 verification and delivery use Standard Webhooks signatures; subscriptions default
 to 24 hours and are owner-bound. Requested `ttlMs` is bounded to one minute through
-24 hours; `null` still receives a finite 24-hour grant. Rotation signs with both
+24 hours; `null` still receives a finite 24-hour grant. A principal holds at most
+100 live subscriptions. Expired and stopped ones keep their identity and cursor for
+refresh but free their slot; reviving one needs a free slot. Rotation signs with both
 keys for five minutes. Unsubscribe accepts the original event name, arguments
 and webhook URL. Refresh supports replay from an acknowledged
 subscription cursor, never skipping pending events. Delivery is at least once:
