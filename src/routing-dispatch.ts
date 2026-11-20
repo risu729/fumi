@@ -879,10 +879,13 @@ async function attempt(
   }
   const token = crypto.randomUUID();
   const attemptExpiresAt = Date.now() + adapter.timeoutMs;
+  // The claim binds the exact payload read above. A worker whose source lease
+  // expired may still rebuild a never-attempted row, and the bytes sent must be
+  // the bytes whose hash D1 keeps for receipts and reconciliation.
   const claimed = await db
     .prepare(`UPDATE routing_dispatch_outbox SET state='sending',lease_token=?,lease_until=?,attempts=attempts+1,attempt_expires_at=?,
-    revision=?,generation=?,target_id=?,adapter_json=?,credential_sha256=?,updated_at=? WHERE operation_id=? AND state IN ('ready','retry','revoked')
-    AND attempts<? AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
+    revision=?,generation=?,target_id=?,adapter_json=?,credential_sha256=?,updated_at=? WHERE operation_id=? AND request_sha256=?
+    AND state IN ('ready','retry','revoked') AND attempts<? AND EXISTS(SELECT 1 FROM routing_dispatch_control c JOIN routing_dispatch_jobs j ON j.raw_key=?
       JOIN mail_extractions e ON e.raw_key=j.raw_key JOIN archive_sources s ON s.raw_key=e.raw_key
       WHERE c.id=1 AND c.accepting=1 AND c.paused=0 AND j.lease_token=? AND c.configuration_sha256=? AND j.lease_until>?
       AND e.extractor_version='mime-v1' AND e.status='complete' AND e.raw_sha256=? AND e.updated_at=? AND e.manifest_key=?
@@ -898,6 +901,7 @@ async function attempt(
       fingerprint,
       now,
       operationId,
+      row.request_sha256,
       MAX_ATTEMPTS,
       item.rawKey,
       globalToken,

@@ -1147,6 +1147,53 @@ describe("durable routing dispatch in workerd", () => {
     expect(destination.requests[0]?.classification).toMatchObject({ category: "finance" });
     expect((await rows())[0]?.state).toBe("handled");
   });
+  it("claims only the exact payload it read when another worker rebuilds the row", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category: "billing",
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    let rebuilt = false;
+    run.gateNotification = async () => {
+      if (!rebuilt) {
+        // A worker whose source lease expired classifies differently and rebuilds
+        // the never-attempted row between this worker's read and its claim.
+        rebuilt = true;
+        const [row] = await rows();
+        const body = JSON.parse(row!.payload_json) as { classification: { category: string } };
+        body.classification.category = "finance";
+        const json = canonicalOfferJson(body);
+        await env.MAIL_CATALOG.prepare(
+          "UPDATE routing_dispatch_outbox SET payload_json=?,request_sha256=? WHERE operation_id=?",
+        )
+          .bind(json, await dispatchDigest(json), row!.operation_id)
+          .run();
+      }
+      return { outcome: "allow", evidenceCode: "synthetic_gate" };
+    };
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect(destination.requests[0]?.classification).toMatchObject({ category: "billing" });
+    const [row] = await rows();
+    expect(row?.state).toBe("handled");
+    expect(row?.request_sha256).toBe(destination.requests[0]?.requestSha256);
+  });
   it("keeps an attempted notification frozen when its classification changes", async () => {
     const config = artifact();
     config.routing.configJson = JSON.stringify({
