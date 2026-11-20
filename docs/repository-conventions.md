@@ -6,9 +6,10 @@ conventions as the owner's other repositories, scaled to one Email Worker.
 ## CI and deployment
 
 - The shared
-  [deploy action v3](https://github.com/risu729/wrangler-deploy-action/tree/c85532bf934238e9811676cbf10a4d08ff88ae12)
-  uses the caller's pinned `cf` package despite its historical repository name. Fumi
-  uses it for credential-free CI validation and production publishing, matching
+  [deploy action v4](https://github.com/risu729/wrangler-deploy-action/tree/52b0bb0f6c0969897cb84b47f4d5ebc3650f2d0c)
+  uses the caller's pinned `cf` package despite its historical repository name, and
+  reads Build Output v1 (`.cloudflare/output/v1`), which `cf` writes from 1.0.0-rc.0.
+  Fumi uses it for credential-free CI validation and production publishing, matching
   [github-notification-cleanup](https://github.com/risu729/github-notification-cleanup/blob/5ca3542b39ffb8df563773c54b181a18073f849a/.github/workflows/worker-deploy.yml).
 - Every main push or manual CI run on main whose checks and CodeQL pass deploys that
   commit, as in
