@@ -994,6 +994,56 @@ describe("durable routing dispatch in workerd", () => {
       ).first(),
     ).toEqual({ revision: 2, generation: 2 });
   });
+  it("leaves acceptance open when a concurrent worker activated first", async () => {
+    await configure(artifact());
+    await repairRoutingDispatch(env);
+    let interleaved = false;
+    // Hold this worker's pre-activation batch until another worker, which read
+    // `winner`, has activated it; this worker still holds `stored`.
+    const race = async (winner: Artifact, stored: Artifact) => {
+      interleaved = false;
+      const session = env.MAIL_CATALOG.withSession("first-primary");
+      const catalog = {
+        withSession: () => ({
+          prepare: session.prepare.bind(session),
+          async batch(statements: D1PreparedStatement[]) {
+            if (!interleaved) {
+              interleaved = true;
+              await configure(winner);
+              expect(await activateRoutingDispatch(env)).toBe("active");
+              await configure(stored);
+            }
+            return session.batch(statements);
+          },
+        }),
+      } as unknown as D1Database;
+      await configure(stored);
+      const { status } = await repairRoutingDispatch({
+        MAIL_ARCHIVE: env.MAIL_ARCHIVE,
+        MAIL_CATALOG: catalog,
+      });
+      expect(interleaved).toBe(true);
+      return status;
+    };
+    const control = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation,accepting FROM routing_dispatch_control WHERE id=1",
+      ).first();
+    const same = artifact();
+    same.revision = 2;
+    expect(await race(same, same)).not.toBe("draining");
+    expect(await control()).toEqual({ revision: 2, generation: 1, accepting: 1 });
+    const winner = artifact();
+    winner.revision = 3;
+    winner.generation = 2;
+    winner.destination.id = "active-b";
+    const loser = artifact();
+    loser.revision = 4;
+    loser.generation = 2;
+    loser.destination.id = "active-c";
+    expect(await race(winner, loser)).toBe("stale");
+    expect(await control()).toEqual({ revision: 3, generation: 2, accepting: 1 });
+  });
   it("revocation during asynchronous gating prevents the pending notification", async () => {
     const config = artifact();
     await configure(config);

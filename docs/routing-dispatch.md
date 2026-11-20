@@ -78,11 +78,13 @@ Its strict v1 fields are:
 Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires a
 larger revision. A destination change requires a larger generation as well. Lower/stale
 revisions, generation rollback and same-generation destination changes are rejected. The
-D1 statement that activates a revision repeats the generation and destination check
-against the stored control row, so two Workers holding different artifacts cannot both
-activate one generation with different destinations. Missing, disabled, invalid or
-uncredentialed configuration cannot send. Keep private rule sets, real endpoint details
-and credentials outside Git.
+D1 statements that close acceptance before activation and then activate a revision
+repeat the revision, generation and destination check against the stored control row.
+Two Workers holding different artifacts cannot both activate one generation with
+different destinations, and a Worker that finds the row already at its revision or
+replaced by a competing activation leaves that row's acceptance open. Missing, disabled,
+invalid or uncredentialed configuration cannot send. Keep private rule sets, real
+endpoint details and credentials outside Git.
 
 With `destination: null`, adopted owners still receive only their granted inputs.
 An owner claim remains exclusive; declined or unmatched mail is durably held with

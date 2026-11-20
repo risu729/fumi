@@ -376,10 +376,14 @@ async function observe(
   }
   if (staleAgainst(config, current)) return "stale";
   if (a.revision > current.revision || !a.enabled) {
+    // Both control statements carry the same fence: a Worker that lost a race to
+    // another activation must not close acceptance on the revision now active.
+    const replaceable = "revision<? AND (generation<? OR (generation=? AND destination_sha256=?))";
+    const fence = [a.revision, a.generation, a.generation, config.destinationSha256];
     await db.batch([
       db
-        .prepare("UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND revision<=?")
-        .bind(a.revision),
+        .prepare(`UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND ${replaceable}`)
+        .bind(...fence),
       db
         .prepare(`UPDATE routing_dispatch_outbox SET state='revoked',failure_code='configuration_revoked',updated_at=?
         WHERE state IN ('ready','retry') AND revision<?`)
@@ -389,7 +393,7 @@ async function observe(
     // activated a different artifact since `current` was read.
     await db
       .prepare(`UPDATE routing_dispatch_control SET revision=?,generation=?,configuration_sha256=?,destination_sha256=?,accepting=?
-      WHERE id=1 AND revision<? AND (generation<? OR (generation=? AND destination_sha256=?))
+      WHERE id=1 AND ${replaceable}
       AND NOT EXISTS(SELECT 1 FROM routing_dispatch_outbox WHERE state IN ('sending','uncertain'))`)
       .bind(
         a.revision,
@@ -397,10 +401,7 @@ async function observe(
         config.configurationSha256,
         config.destinationSha256,
         a.enabled ? 1 : 0,
-        a.revision,
-        a.generation,
-        a.generation,
-        config.destinationSha256,
+        ...fence,
       )
       .run();
   }
