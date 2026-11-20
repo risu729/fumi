@@ -51,6 +51,9 @@ export const eventRequestSchemas = {
     v.strictObject({ id: v.pipe(v.string(), v.regex(/^sub_[a-f0-9]{64}$/)) }),
   ]),
 };
+const SUBSCRIPTION_LIMIT = 100;
+/** Binds principal ID, then the current time; expects the table alias `l`. */
+const liveSlots = "l.principal_id=? AND l.state='active' AND l.expires_at>?";
 export class EventProtocolError extends Error {
   readonly code: number;
   readonly data: Record<string, string> | undefined;
@@ -189,12 +192,16 @@ export async function handleEventRequest(
     .prepare("SELECT * FROM event_subscriptions WHERE id=? AND principal_id=?")
     .bind(id, principal.id)
     .first<Subscription>();
-  if (!existing) {
+  // Only live subscriptions hold one of the principal's slots. Expired and stopped
+  // rows stay stored for refresh, so counting them would exhaust the limit forever.
+  const checkedAt = runtime.now?.() ?? Date.now();
+  if (!existing || existing.state !== "active" || existing.expires_at <= checkedAt) {
     const count = await db
-      .prepare("SELECT COUNT(*) AS count FROM event_subscriptions WHERE principal_id=?")
-      .bind(principal.id)
+      .prepare(`SELECT COUNT(*) AS count FROM event_subscriptions l WHERE ${liveSlots}`)
+      .bind(principal.id, checkedAt)
       .first<number>("count");
-    if ((count ?? 0) >= 100) throw new EventProtocolError(-32001, "Subscription limit reached");
+    if ((count ?? 0) >= SUBSCRIPTION_LIMIT)
+      throw new EventProtocolError(-32001, "Subscription limit reached");
   }
   const high = await db
     .prepare("SELECT COALESCE(MAX(sequence),0) AS sequence FROM mail_events")
@@ -258,7 +265,7 @@ export async function handleEventRequest(
         : 0;
     const result = await db
       .prepare(
-        `UPDATE event_subscriptions SET signing_secret=?,previous_signing_secret=?,previous_secret_until=?,expires_at=?,cursor=?,state='active',revision=revision+1,attempts=0,next_attempt_at=0,lease_until=0,lease_token=NULL,stop_reason=NULL WHERE id=? AND principal_id=? AND revision=?`,
+        `UPDATE event_subscriptions SET signing_secret=?,previous_signing_secret=?,previous_secret_until=?,expires_at=?,cursor=?,state='active',revision=revision+1,attempts=0,next_attempt_at=0,lease_until=0,lease_token=NULL,stop_reason=NULL WHERE id=? AND principal_id=? AND revision=? AND ((state='active' AND expires_at>?) OR (SELECT COUNT(*) FROM event_subscriptions l WHERE ${liveSlots})<${SUBSCRIPTION_LIMIT})`,
       )
       .bind(
         request.delivery.secret,
@@ -269,6 +276,9 @@ export async function handleEventRequest(
         id,
         principal.id,
         existing.revision,
+        now,
+        principal.id,
+        now,
       )
       .run();
     if (result.meta.changes !== 1)
@@ -276,7 +286,7 @@ export async function handleEventRequest(
   } else {
     const result = await db
       .prepare(
-        `INSERT OR IGNORE INTO event_subscriptions (id,principal_id,name,arguments_json,callback_url,signing_secret,expires_at,start_sequence,cursor,state) SELECT ?,?,?,?,?,?,?,?,?,'active' WHERE (SELECT COUNT(*) FROM event_subscriptions WHERE principal_id=?)<100`,
+        `INSERT OR IGNORE INTO event_subscriptions (id,principal_id,name,arguments_json,callback_url,signing_secret,expires_at,start_sequence,cursor,state) SELECT ?,?,?,?,?,?,?,?,?,'active' WHERE (SELECT COUNT(*) FROM event_subscriptions l WHERE ${liveSlots})<${SUBSCRIPTION_LIMIT}`,
       )
       .bind(
         id,
@@ -289,6 +299,7 @@ export async function handleEventRequest(
         start,
         cursor,
         principal.id,
+        now,
       )
       .run();
     if (result.meta.changes !== 1)

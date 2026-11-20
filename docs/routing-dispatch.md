@@ -75,11 +75,16 @@ Its strict v1 fields are:
 - `owners: [{handlerRef, adapter, offerFields}]`: administrator-provisioned adapters
   for enabled owner adoptions. There are at most sixteen.
 
-Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires
-a larger revision. A destination change requires a larger generation as well.
-Lower/stale revisions, generation rollback and same-generation destination changes
-are rejected. Missing, disabled, invalid or uncredentialed configuration cannot send.
-Keep private rule sets, real endpoint details and credentials outside Git.
+Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires a
+larger revision. A destination change requires a larger generation as well. Lower/stale
+revisions, generation rollback and same-generation destination changes are rejected. The
+D1 statements that close acceptance before activation and then activate a revision
+repeat the revision, generation and destination check against the stored control row.
+Two Workers holding different artifacts cannot both activate one generation with
+different destinations, and a Worker that finds the row already at its revision or
+replaced by a competing activation leaves that row's acceptance open. Missing, disabled,
+invalid or uncredentialed configuration cannot send. Keep private rule sets, real
+endpoint details and credentials outside Git.
 
 With `destination: null`, adopted owners still receive only their granted inputs.
 An owner claim remains exclusive; declined or unmatched mail is durably held with
@@ -160,6 +165,14 @@ without a runtime. A proxy URL or credential change still uses the revision,
 generation and drain handoff above; an A/B switch inside the proxy does not touch
 fumi configuration.
 
+Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this project's
+agents, because the Grok Bot side has no runtime. The `webhook` adapter becomes signed
+with Standard Webhooks, retries with the same `webhook-id` instead of staying
+uncertain, and sends identifiers and classification only. Attempted webhook rows stay
+bound to their generation and block handoff until accepted or dead. See
+[ADR 0003](adr/0003-signed-notification-webhooks.md); until it is implemented, the
+behavior on this page is current.
+
 ## Input disclosure and source integrity
 
 Match `inputFields` remain the four bounded metadata fields. The owner manifest
@@ -188,8 +201,13 @@ An accepted operation therefore cannot replay when a plugin or endpoint is upgra
 The first bounded payload and its request hash are frozen before any network call.
 Retries reuse them. A changed source revision, grant or symbolic decision is held
 when it conflicts with an attempted payload; it cannot silently send stale content
-or mutate the meaning of an idempotency key. Current source revisions are retained
-in the source job even when such a conflict is held.
+or mutate the meaning of an idempotency key. A frozen payload that no attempt has
+claimed has never left fumi; it is rebuilt from the current revision, source, grant
+and decision instead of being held. The sending claim compares the stored request
+hash, source identity and grant with the row the worker read, so a row another
+worker rebuilt meanwhile is held, not sent under a hash or source D1 does not
+keep, and the next pass rebuilds or sends it. Current source revisions are
+retained in the source job even when such a conflict is held.
 
 An immutable owner request contains `schemaVersion: 1`, `kind: "owner"`,
 `operationId`, `source: {eventId, rawSha256, receivedAt}`, `pluginId`, manifest version
@@ -238,7 +256,9 @@ claim gate to avoid competing consumption.
 ## Handoff, revocation and recovery
 
 Observing a new desired revision first closes new claims. Ready/retry operations from
-the old revision are revoked without action. A new active generation cannot activate
+the old revision are revoked without action. Once implemented,
+[ADR 0003](adr/0003-signed-notification-webhooks.md) keeps attempted generic webhook
+rows bound to their generation instead. A new active generation cannot activate
 while any previous operation is sending or uncertain. Both activation and claim
 conditions are enforced in D1 statements. The source, extraction revision, manifest,
 live provenance, active config and exact source lease are checked again after
@@ -256,7 +276,10 @@ Unknown outcomes receive at most five automatic status queries, then remain
 quarantined with `reconciliation_exhausted`; they still block handoff. Permanent or
 retry-exhausted operations remain visible as dead letters. Source jobs preserve
 fixed failure codes without logging mail, endpoint details, credentials or raw
-adapter error text. Invalid-source jobs yield to later sources.
+adapter error text. Invalid-source jobs yield to later sources. Such a job records
+the source SHA, extraction time and configuration revision it was checked against,
+so a re-extracted source that is still invalid waits for the held retry time
+instead of being selected as changed on every pass.
 
 Administrative functions are intended only for root wiring behind `mail:routing`:
 `activateRoutingDispatch`, `drainRoutingDispatch`, `routingDispatchStatus`,

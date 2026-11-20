@@ -270,6 +270,16 @@ describe("optional managed body corpus and semantic retrieval", () => {
       await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_events").first(),
     ).toEqual({ count: 0 });
   });
+  it("never splits a surrogate pair at the 800-unit excerpt limit", async () => {
+    const original = await source("emoji", `${"x".repeat(799)}\u{1f600}tail`);
+    const remote = provider(),
+      context = runtime(remote.binding);
+    await ready(context);
+    const result = await searchManagedMail(context, reader, { query: "x", mode: "semantic" }, base);
+    expect(result.matches).toHaveLength(1);
+    // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
+    expect(result.matches[0]!.excerpt === original.text.slice(0, 799)).toBe(true);
+  });
   it("rejects hallucinated provider text and unmapped remote keys and does not expose stale/corrupt sources", async () => {
     const original = await source();
     const remote = provider(),
