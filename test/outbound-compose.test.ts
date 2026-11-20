@@ -16,6 +16,7 @@ import type { MailInput, OutboundContext } from "../src/outbound.ts";
 import {
   FORWARD_SEPARATOR,
   QUOTE_TRUNCATED,
+  composeReply,
   formatMailDate,
   htmlToText,
   quoteLines,
@@ -377,6 +378,22 @@ describe("Gmail-style reply and forward composition", () => {
     expect(encoder.encode(text).byteLength).toBeGreaterThan(OUTBOUND_LIMITS.bodyBytes - 200);
   });
 
+  it("never splits a surrogate pair where the quoted original is cut", () => {
+    const parent = {
+      subject: "Synthetic",
+      from: "parent@example.invalid",
+      to: [],
+      cc: [],
+      date: null,
+      text: "\u{1f600}".repeat(200),
+      attachments: [],
+    };
+    // An odd byte limit also ends the initial code-unit cut inside a pair.
+    const text = composeReply({ text: "Author" }, parent, 201).text ?? "";
+    expect(text.isWellFormed()).toBe(true);
+    expect(text.endsWith(`\u{1f600}\n> ${QUOTE_TRUNCATED}\n`)).toBe(true);
+    expect(encoder.encode(text).byteLength).toBeLessThanOrEqual(201);
+  });
   it("attaches the parent's attachments to a reply only when asked", async () => {
     const content = encoder.encode("synthetic reply attachment");
     await seedParent(undefined, [{ filename: "notes.txt", mimeType: "text/plain", content }]);

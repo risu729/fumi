@@ -97,11 +97,11 @@ bodies and supported UTF-8 text attachments. It returns citations and explicit
 indexing/representation coverage. See [content search](content-search.md) for
 limits, phrase syntax and activation. Metadata search semantics are unchanged.
 
-Search pages contain at most 50 records; batches contain at most ten messages;
-thread reads contain at most 20. Bodies inline at most 16,000 UTF-16 code units per
-representation, one fewer when the cut would split a surrogate pair, with
-authenticated full-content links when truncated. Attachments
-use descriptors rather than embedding arbitrary bytes in model context.
+Search pages contain at most 50 records; batches contain at most ten messages; thread
+reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
+UTF-16 code units per representation, one fewer when the cut would split a surrogate
+pair, with authenticated full-content links when truncated. Attachments use descriptors
+rather than embedding arbitrary bytes in model context.
 
 ## Attachment limits
 
