@@ -110,6 +110,7 @@ member instead.
    `server/discover` response.
    `maxInlineBytes` is the total decoded inline bytes per request; 0 or absent means
    no inline files.
+
 2. A file argument is an object schema marked with `x-mcp-file`:
 
    ```jsonc
@@ -124,8 +125,10 @@ member instead.
    Its value has `id` (unique per call), an optional `name`, `mimeType`, `size`, an
    optional `digest` (SHA-256, base64url) and an optional `data` (base64). With `data`
    the file is inline; without it the file goes out of band.
+
 3. For an out-of-band file the client first calls the tool with metadata only:
    `{"id": "file-1", "name": "Q3 report.pdf", "mimeType": "application/pdf", "size": 41204133}`.
+
 4. The server answers `"resultType": "upload_required"` with one upload target per
    file and an opaque `requestState`:
 
@@ -143,6 +146,7 @@ member instead.
    `POST` with `form` fields for multipart-only storage), `headers`, `credentials`
    (`omit` for a signed URL, `include` to send the MCP session's credentials) and an
    advisory `expiresAt`.
+
 5. The client uploads the bytes, then retries the same tool name and arguments with a
    new JSON-RPC id and the echoed `requestState`. The retry does not prove the upload
    arrived; the server checks its storage (for example with HEAD) before running.
