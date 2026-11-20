@@ -147,6 +147,15 @@ describe("bounded private mail reads", () => {
     expect(await ids("subject:\u00c4NDERUNG")).toEqual(["mail_latin"]);
     expect(await ids("subject:report")).toEqual(["mail_fullwidth"]);
   });
+  it("keeps matching stored lowercase non-ASCII text for uppercase filters", async () => {
+    await insert("fullwidth", "2026-11-11T00:00:00.000Z", { subject: "\uff50\uff44\uff46 report" });
+    await insert("latin", "2026-11-10T00:00:00.000Z", { subject: "\u00e4nderung" });
+    const ids = async (query: string) =>
+      (await searchMail(env, principal, { query })).emails.map((m) => m.id);
+    expect(await ids("subject:\uff30\uff24\uff26")).toEqual(["mail_fullwidth"]);
+    expect(await ids("subject:\u00c4nderung")).toEqual(["mail_latin"]);
+    expect(await ids("subject:\u00e4nderung")).toEqual(["mail_latin"]);
+  });
   it("never splits a surrogate pair at the inline preview limit", async () => {
     const id = await insert("emoji", "2026-11-11T00:00:00.000Z");
     const text = `${"x".repeat(15_999)}\u{1f600}tail`;

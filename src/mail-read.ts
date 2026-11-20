@@ -439,12 +439,17 @@ export function parseMailSearch(query: string) {
       values.push(`${value}T00:00:00.000Z`);
     } else {
       const path = operator === "from" ? "$.from" : operator === "to" ? "$.to" : "$.subject";
-      clauses.push(
-        `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),'')) LIKE ? ESCAPE '\\'`,
-      );
-      // SQLite LOWER() folds ASCII only; folding more here would miss stored non-ASCII text.
-      const folded = value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-      values.push(`%${folded.replace(/[\\%_]/g, "\\$&")}%`);
+      // SQLite LOWER() folds ASCII only, so match non-ASCII as written and, when that
+      // differs, also in lowercase (the form earlier versions matched).
+      const patterns = [
+        ...new Set([
+          value.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+          value.toLowerCase(),
+        ]),
+      ].map((pattern) => `%${pattern.replace(/[\\%_]/g, "\\$&")}%`);
+      const column = `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),''))`;
+      clauses.push(`(${patterns.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+      values.push(...patterns);
     }
   }
   return { clauses, values };

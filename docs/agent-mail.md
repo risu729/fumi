@@ -76,8 +76,10 @@ are client hints, not authorization.
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
 `after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
 `has:attachment`. Quote values containing spaces. `from:`, `to:` and `subject:`
-match substrings and ignore letter case for ASCII only; other characters, such as
-full-width `ＰＤＦ` or `Ä`, match exactly as stored. It searches extracted metadata,
+match substrings and ignore ASCII letter case. Other characters, such as full-width
+`ＰＤＦ` or `Ä`, match stored text as written in the filter or in lowercase:
+`subject:Änderung` matches `Änderung` and `änderung`, but `subject:änderung` does not
+match `Änderung`. It searches extracted metadata,
 not full bodies or attachments. Without a source filter it includes live and
 imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
 Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
