@@ -946,6 +946,54 @@ describe("durable routing dispatch in workerd", () => {
     await configure(config);
     expect((await repairRoutingDispatch(env)).status).toBe("stale");
   });
+  it("cannot activate a same-generation destination change after a concurrent activation", async () => {
+    await configure(artifact());
+    await repairRoutingDispatch(env);
+    const first = artifact();
+    first.revision = 2;
+    first.generation = 2;
+    first.destination.id = "active-b";
+    const second = artifact();
+    second.revision = 3;
+    second.generation = 2;
+    second.destination.id = "active-c";
+    await configure(second);
+    let interleaved = false;
+    // Hold this worker's activation statement until another worker, which read
+    // the artifact with revision 2, has activated it.
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    const catalog = {
+      withSession: () => ({
+        batch: session.batch.bind(session),
+        prepare(query: string) {
+          const statement = session.prepare(query);
+          if (!query.startsWith("UPDATE routing_dispatch_control SET revision=")) return statement;
+          return {
+            bind: (...values: unknown[]) => ({
+              async run() {
+                if (!interleaved) {
+                  interleaved = true;
+                  await configure(first);
+                  expect(await activateRoutingDispatch(env)).toBe("active");
+                }
+                return statement.bind(...values).run();
+              },
+            }),
+          };
+        },
+      }),
+    } as unknown as D1Database;
+    expect(
+      (await repairRoutingDispatch({ MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: catalog }))
+        .status,
+    ).toBe("stale");
+    expect(interleaved).toBe(true);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation FROM routing_dispatch_control WHERE id=1",
+      ).first(),
+    ).toEqual({ revision: 2, generation: 2 });
+  });
   it("revocation during asynchronous gating prevents the pending notification", async () => {
     const config = artifact();
     await configure(config);
@@ -1063,6 +1111,37 @@ describe("durable routing dispatch in workerd", () => {
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(["handled", "rejected"]).toContain((await rows())[0]?.state);
+  });
+  it("records a re-extracted invalid source against its new extraction and backs off", async () => {
+    await configure(artifact());
+    const { rawKey } = await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json='{',updated_at=2 WHERE raw_key=?",
+    )
+      .bind(rawKey)
+      .run();
+    const job = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT source_sha256,extraction_updated_at,revision,state,failure_code,updated_at FROM routing_dispatch_jobs",
+      ).first();
+    await repairRoutingDispatch(env, run);
+    const held = {
+      source_sha256: rawSha,
+      extraction_updated_at: 2,
+      revision: 1,
+      state: "held",
+      failure_code: "invalid_source",
+      updated_at: clock,
+    };
+    expect(await job()).toEqual(held);
+    clock += 1000;
+    await repairRoutingDispatch(env, run);
+    expect(await job()).toEqual(held);
+    expect(destination.requests).toHaveLength(1);
   });
   it("bounds work and lets malformed metadata yield to later sources", async () => {
     await configure(artifact());

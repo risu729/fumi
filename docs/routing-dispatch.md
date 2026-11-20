@@ -75,11 +75,14 @@ Its strict v1 fields are:
 - `owners: [{handlerRef, adapter, offerFields}]`: administrator-provisioned adapters
   for enabled owner adoptions. There are at most sixteen.
 
-Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires
-a larger revision. A destination change requires a larger generation as well.
-Lower/stale revisions, generation rollback and same-generation destination changes
-are rejected. Missing, disabled, invalid or uncredentialed configuration cannot send.
-Keep private rule sets, real endpoint details and credentials outside Git.
+Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires a
+larger revision. A destination change requires a larger generation as well. Lower/stale
+revisions, generation rollback and same-generation destination changes are rejected. The
+D1 statement that activates a revision repeats the generation and destination check
+against the stored control row, so two Workers holding different artifacts cannot both
+activate one generation with different destinations. Missing, disabled, invalid or
+uncredentialed configuration cannot send. Keep private rule sets, real endpoint details
+and credentials outside Git.
 
 With `destination: null`, adopted owners still receive only their granted inputs.
 An owner claim remains exclusive; declined or unmatched mail is durably held with
@@ -261,7 +264,10 @@ Unknown outcomes receive at most five automatic status queries, then remain
 quarantined with `reconciliation_exhausted`; they still block handoff. Permanent or
 retry-exhausted operations remain visible as dead letters. Source jobs preserve
 fixed failure codes without logging mail, endpoint details, credentials or raw
-adapter error text. Invalid-source jobs yield to later sources.
+adapter error text. Invalid-source jobs yield to later sources. Such a job records
+the source SHA, extraction time and configuration revision it was checked against,
+so a re-extracted source that is still invalid waits for the held retry time
+instead of being selected as changed on every pass.
 
 Administrative functions are intended only for root wiring behind `mail:routing`:
 `activateRoutingDispatch`, `drainRoutingDispatch`, `routingDispatchStatus`,
