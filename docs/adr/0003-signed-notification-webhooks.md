@@ -153,7 +153,9 @@ The accepted text said an attempted webhook row blocks handoff until it is
 a handoff: a newer revision closes claims, and the old destination's configuration is
 no longer the one loaded. Handoff would wait forever.
 
-Instead, when a new destination generation is observed, an attempted webhook row that
-is not yet `accepted` ends `dead` with `destination_changed`. It is still never
-re-targeted. Rows that are `sending` block handoff as before until their attempt
-finishes or is recovered as interrupted.
+Instead, an attempted webhook row is never revoked by a revision. Once a newer
+destination generation is active, such a row in `ready` or `retry` ends `dead` with
+`destination_changed`. It is still never re-targeted. Rows that are `sending` block
+handoff as before until their attempt finishes or is recovered as interrupted. The
+check runs on every observation, so an attempt that finishes as `retry` after the
+handoff also ends `dead`.

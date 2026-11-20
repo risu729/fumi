@@ -504,6 +504,7 @@ describe("durable routing dispatch in workerd", () => {
     const request = destination.requests[0]!;
     expect(request.operationId).toBe(await routingOperationId(item.rawKey, "action"));
     expect(request.input).toEqual({ subject: "合成の確認" });
+    expect(request.messageId).toBeUndefined();
     expect(JSON.stringify(request)).not.toContain(item.rawKey);
     expect(request.classification).toMatchObject({
       outcome: "review",
@@ -712,7 +713,7 @@ describe("durable routing dispatch in workerd", () => {
     });
     await repairRoutingDispatch(env, run);
     await env.MAIL_CATALOG.prepare(
-      "UPDATE routing_dispatch_outbox SET state='sending',lease_token='lost',lease_until=1",
+      "UPDATE routing_dispatch_outbox SET state='sending',lease_token='lost',lease_until=1 WHERE state='retry'",
     ).run();
     accept = true;
     clock += 600_000;
@@ -766,6 +767,67 @@ describe("durable routing dispatch in workerd", () => {
       state: "dead",
       failure_code: "destination_changed",
     });
+  });
+  it("ends an attempted webhook that reaches retry after a newer generation activated", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    // Model the race: the observation that activates generation 2 does not see the
+    // row as retry, and the old attempt's result lands as retry afterwards.
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='accepted'").run();
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    await repairRoutingDispatch(env, run);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT generation FROM routing_dispatch_control").first(),
+    ).toEqual({ generation: 2 });
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='retry'").run();
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["old.example.com"]);
+    expect((await rows())[0]).toMatchObject({
+      state: "dead",
+      generation: 1,
+      failure_code: "destination_changed",
+    });
+  });
+  it("rebuilds a never-attempted webhook row for a new destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 202 });
+    });
+    let gate = false;
+    run.gateNotification = async () =>
+      gate
+        ? { outcome: "allow", evidenceCode: "synthetic_allow" }
+        : { outcome: "hold", evidenceCode: "synthetic_hold" };
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({ state: "ready", attempts: 0 });
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    gate = true;
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["new.example.com"]);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", generation: 2 });
   });
   it("rejects mail field grants on a generic webhook destination", async () => {
     const config = artifact();

@@ -165,9 +165,10 @@ owner receipt protocol ([ADR 0003](adr/0003-signed-notification-webhooks.md)):
   Receivers must deduplicate by `webhook-id` for at least 24 hours.
 - **Handoff.** A webhook row that was attempted stays bound to the destination
   generation that received it. A revision without a new generation keeps retrying it
-  to the same destination. A new generation ends it `dead` with
-  `destination_changed` instead of re-targeting it to a receiver without the old
-  deduplication state.
+  to the same destination. It is never revoked and rebuilt for another destination.
+  Once a newer generation is active, it ends `dead` with `destination_changed`
+  instead of re-targeting it to a receiver without the old deduplication state.
+  Only webhook bodies carry `messageId`; strict adapters keep their protocol body.
 
 Rows written before this change keep their frozen body; a legacy `uncertain` webhook
 row still needs a verified manual `handled` or `rejected` receipt.

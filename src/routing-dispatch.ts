@@ -396,14 +396,13 @@ async function observe(
       db
         .prepare(`UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND ${replaceable}`)
         .bind(...fence),
-      db
-        .prepare(`UPDATE routing_dispatch_outbox SET state='dead',failure_code='destination_changed',updated_at=?
-        WHERE state IN ('ready','retry','revoked') AND ${ATTEMPTED_WEBHOOK} AND generation<?`)
-        .bind(Date.now(), a.generation),
+      // An attempted webhook row stays bound to its generation: it is never revoked
+      // and rebuilt for another destination. It ends below once a newer generation
+      // is active.
       db
         .prepare(`UPDATE routing_dispatch_outbox SET state='revoked',failure_code='configuration_revoked',updated_at=?
-        WHERE state IN ('ready','retry') AND revision<? AND NOT (${ATTEMPTED_WEBHOOK} AND generation=?)`)
-        .bind(Date.now(), a.revision, a.generation),
+        WHERE state IN ('ready','retry') AND revision<? AND NOT (${ATTEMPTED_WEBHOOK})`)
+        .bind(Date.now(), a.revision),
     ]);
     // The generation fence is part of the statement: another Worker may have
     // activated a different artifact since `current` was read.
@@ -421,6 +420,14 @@ async function observe(
       )
       .run();
   }
+  // Checked on every observation, not only on the call that activates a newer
+  // generation: a row still `sending` during handoff may reach `retry` later.
+  await db
+    .prepare(`UPDATE routing_dispatch_outbox SET state='dead',failure_code='destination_changed',updated_at=?
+    WHERE state IN ('ready','retry') AND ${ATTEMPTED_WEBHOOK}
+    AND generation<(SELECT generation FROM routing_dispatch_control WHERE id=1)`)
+    .bind(Date.now())
+    .run();
   const active = await db
     .prepare("SELECT * FROM routing_dispatch_control WHERE id=1")
     .first<Control>();
@@ -597,9 +604,9 @@ export async function reconcileRoutingDispatch(
   await db
     .prepare(`UPDATE routing_dispatch_outbox SET state=CASE WHEN attempts>=? THEN 'dead' ELSE 'retry' END,
     failure_code=CASE WHEN attempts>=? THEN 'retry_exhausted' ELSE 'interrupted_attempt' END,
-    lease_token=NULL,lease_until=0,next_attempt_at=? WHERE state='sending' AND lease_until<=?
+    lease_token=NULL,lease_until=0,next_attempt_at=?,updated_at=? WHERE state='sending' AND lease_until<=?
     AND json_extract(adapter_json,'$.kind')='webhook' AND (? IS NULL OR raw_key=?)`)
-    .bind(MAX_ATTEMPTS, MAX_ATTEMPTS, now, now, rawKey ?? null, rawKey ?? null)
+    .bind(MAX_ATTEMPTS, MAX_ATTEMPTS, now, now, now, rawKey ?? null, rawKey ?? null)
     .run();
   await db
     .prepare(`UPDATE routing_dispatch_outbox SET state='uncertain',failure_code='interrupted_attempt',lease_token=NULL,
@@ -848,7 +855,7 @@ async function attempt(
       schemaVersion: 1,
       kind: lane === "action" ? "notification" : "owner",
       operationId,
-      ...(lane === "action" ? { messageId: item.messageId } : {}),
+      ...(lane === "action" && adapter.kind === "webhook" ? { messageId: item.messageId } : {}),
       source: {
         eventId: await dispatchDigest(JSON.stringify(["fumi-event-v1", item.rawKey])),
         rawSha256: item.rawSha256,
@@ -963,7 +970,7 @@ async function attempt(
     const result = await exchangeWebhook(adapter, transport, operationId, row.payload_json);
     const attempts = row.attempts + 1;
     const state = result === "accepted" ? "accepted" : attempts >= MAX_ATTEMPTS ? "dead" : "retry";
-    await db
+    const written = await db
       .prepare(`UPDATE routing_dispatch_outbox SET state=?,failure_code=?,lease_token=NULL,lease_until=0,updated_at=?,next_attempt_at=?
       WHERE operation_id=? AND lease_token=? AND state='sending'`)
       .bind(
@@ -979,7 +986,9 @@ async function attempt(
         token,
       )
       .run();
-    return state;
+    // A lost lease means recovery already moved the row; the job must not settle on
+    // this attempt's result.
+    return written.meta.changes === 1 ? state : "held";
   }
   // No configuration, authorization or data lookup is started after this claim.
   // Interruption or missing acknowledgement leaves the durable sending row uncertain.
