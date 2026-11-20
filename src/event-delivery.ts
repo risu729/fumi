@@ -274,14 +274,14 @@ async function deliverOne(
   try {
     // Recheck the subscription after asynchronous authorization, immediately before POST.
     // The lease must outlast the POST, or another run could lease and send it again.
-    const checkedAt = clock();
-    const active = await db
+    // Compare after the query returns, so its own latency does not eat into the POST.
+    const leaseUntil = await db
       .prepare(
-        `SELECT id FROM event_subscriptions WHERE ${guard} AND state='active' AND expires_at>? AND lease_until>?`,
+        `SELECT lease_until FROM event_subscriptions WHERE ${guard} AND state='active' AND expires_at>?`,
       )
-      .bind(...identity, checkedAt, checkedAt + POST_TIMEOUT_MS)
-      .first();
-    if (!active) {
+      .bind(...identity, clock())
+      .first<number>("lease_until");
+    if (leaseUntil === null || leaseUntil <= clock() + POST_TIMEOUT_MS) {
       await db
         .prepare(`UPDATE event_subscriptions SET lease_until=0,lease_token=NULL WHERE ${guard}`)
         .bind(...identity)

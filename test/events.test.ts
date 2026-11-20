@@ -454,6 +454,53 @@ describe("durable MCP Events", () => {
     expect(await deliverEvents(env.MAIL_CATALOG, runtime)).toEqual({ attempted: 1 });
     expect(delivered.filter(({ body }) => body["eventId"])).toHaveLength(1);
   });
+  it("counts the lease recheck's own latency before starting a POST", async () => {
+    // Each query advances the clock when it returns, as a slow D1 round trip would.
+    const slow = {
+      withSession() {
+        const session = env.MAIL_CATALOG.withSession("first-primary");
+        return {
+          prepare: (sql: string) => ({
+            bind(...values: unknown[]) {
+              const bound = session.prepare(sql).bind(...values);
+              const later = async <T>(result: Promise<T>) => {
+                const value = await result;
+                now += 1_500;
+                return value;
+              };
+              return {
+                first: (column?: string) => later(column ? bound.first(column) : bound.first()),
+                run: () => later(bound.run()),
+                all: () => later(bound.all()),
+              };
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    const subscription = await subscribe();
+    await append("slow-database");
+    const authorize = runtime.authorize;
+    runtime.authorize = async (...args) => {
+      now += 46_000;
+      return authorize(...args);
+    };
+    const remaining: number[] = [];
+    runtime.http.post = async () => {
+      const leaseUntil = await env.MAIL_CATALOG.prepare(
+        "SELECT lease_until FROM event_subscriptions WHERE id=?",
+      )
+        .bind(subscription["id"])
+        .first<number>("lease_until");
+      remaining.push(leaseUntil! - now);
+      return new Response(null, { status: 204 });
+    };
+    await deliverEvents(slow, runtime);
+    runtime.authorize = authorize;
+    await deliverEvents(slow, runtime);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toBeGreaterThan(10_000);
+  });
   it("stops leasing further subscriptions once the run's time budget is spent", async () => {
     const targets = await subscribeTargets(3);
     await append("shared");
