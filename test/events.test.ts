@@ -332,6 +332,92 @@ describe("durable MCP Events", () => {
     await deliverEvents(env.MAIL_CATALOG, runtime);
     expect(delivered).toHaveLength(2);
   });
+  it("counts only live subscriptions toward the per-principal limit", async () => {
+    const subscribeTo = (ingestId: string) => subscribe({ arguments: { ingestId } });
+    for (let index = 0; index < 100; index += 1)
+      // oxlint-disable-next-line no-await-in-loop -- Fill the limit with distinct identities.
+      await subscribeTo(`filled-${index}`);
+    await expect(subscribeTo("over-limit")).rejects.toMatchObject({ code: -32001 });
+    // Expired and stopped rows stay stored for refresh, but no longer hold a slot.
+    now += 86_400_001;
+    expect((await subscribeTo("after-expiry"))["id"]).toMatch(/^sub_/);
+    for (let index = 1; index < 100; index += 1)
+      // oxlint-disable-next-line no-await-in-loop -- Fill the limit again with live identities.
+      await subscribeTo(`refilled-${index}`);
+    await expect(subscribeTo("over-limit-again")).rejects.toMatchObject({ code: -32001 });
+    // Reviving an expired identity takes a new slot, so it cannot exceed the limit.
+    await expect(subscribeTo("filled-0")).rejects.toMatchObject({ code: -32001 });
+    const live = await subscribeTo("refilled-1");
+    await handleEventRequest(
+      env.MAIL_CATALOG,
+      principal,
+      "events/unsubscribe",
+      { id: live["id"] },
+      runtime,
+    );
+    expect((await subscribeTo("filled-0"))["id"]).toMatch(/^sub_/);
+    // Refreshing a live subscription never counts against its own slot.
+    expect((await subscribeTo("filled-0"))["id"]).toMatch(/^sub_/);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM event_subscriptions WHERE state='active' AND expires_at>?",
+      )
+        .bind(now)
+        .first("count"),
+    ).toBe(100);
+  });
+  it("rejects a write that would exceed the limit after a concurrent request took the last slot", async () => {
+    const subscribeTo = (ingestId: string, fill: string) =>
+      subscribe({
+        arguments: { ingestId },
+        delivery: { mode: "webhook", url, secret: `whsec_${btoa(fill.repeat(32))}` },
+      });
+    const insertLive = (id: string, expiresAt = now + 60_000) =>
+      env.MAIL_CATALOG.prepare(
+        "INSERT INTO event_subscriptions (id,principal_id,name,arguments_json,callback_url,signing_secret,expires_at,start_sequence,cursor,state) VALUES (?,?,'email.received','{}',?,?,?,0,0,'active')",
+      )
+        .bind(id, principal.id, url, secret, expiresAt)
+        .run();
+    const liveCount = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM event_subscriptions WHERE state='active' AND expires_at>?",
+      )
+        .bind(now)
+        .first("count");
+    const expired = await subscribeTo("expired", "a");
+    await env.MAIL_CATALOG.prepare("UPDATE event_subscriptions SET expires_at=? WHERE id=?")
+      .bind(now - 1, expired["id"])
+      .run();
+    for (let index = 0; index < 99; index += 1)
+      // oxlint-disable-next-line no-await-in-loop -- Fill all but the last slot.
+      await insertLive(`sub_filled_${index}`);
+    // The concurrent request takes the last slot after this request's limit check,
+    // while this request's callback is being verified.
+    const { post } = runtime.http;
+    let racer = 0;
+    runtime.http = {
+      async post(target, body, headers) {
+        if ((JSON.parse(body) as Record<string, unknown>)["type"] === "verification") {
+          racer += 1;
+          await insertLive(`sub_racer_${racer}`);
+        }
+        return post(target, body, headers);
+      },
+    };
+    await expect(subscribeTo("new", "b")).rejects.toMatchObject({
+      code: -32015,
+      data: { reason: "conflict" },
+    });
+    expect(await liveCount()).toBe(100);
+    await env.MAIL_CATALOG.prepare("DELETE FROM event_subscriptions WHERE id=?")
+      .bind(`sub_racer_${racer}`)
+      .run();
+    await expect(subscribeTo("expired", "c")).rejects.toMatchObject({
+      code: -32015,
+      data: { reason: "conflict" },
+    });
+    expect(await liveCount()).toBe(100);
+  });
   it("matches resource filters and never advances past a delayed earlier event", async () => {
     await subscribe({ arguments: { ingestId: "target" } });
     await append("unmatched");
