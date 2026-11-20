@@ -302,10 +302,24 @@ the cursor. HTTP 410, excessive retries, expiry or lost authorization stops deli
 
 The five-minute scheduled handler processes a bounded set of subscriptions, one
 pending event per selected subscription. This is not an immediate notification
-latency guarantee. No arbitrary callback hosts are accepted: configure only
+latency guarantee. A run leases each subscription for one minute from the time
+it reaches it and works from the leased row, so an overlapping run neither
+leases it again nor resends an event another run has acknowledged or set a
+retry backoff for. The POST starts only while at least its 10-second timeout
+remains on the lease, and a failed POST's backoff counts from when it ended. A
+run stops leasing subscriptions four minutes after it starts; the rest stay due
+for the next run. No arbitrary callback hosts are accepted: configure only
 administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
 DNS administration. Redirects are refused on verification and delivery.
+
+`WEBHOOK_ORIGINS` unset or `[]` trusts no origin. Any other value that is not a
+JSON array of at most ten exact HTTPS origins, such as
+`["https://receiver.example.com/path"]`, trusts none of its entries. Callback
+verification then fails, the scheduled run leases no subscription (so none spends
+a retry) and fails, and each `/mcp` request and scheduled run logs
+`{"event":"webhook_origins","status":"invalid"}` without the configured value.
+Other `/mcp` requests are served as usual.
 
 Decision (owner, 2026-11-13 05:53 UTC): no production MCP Events consumer exists.
 Grok Bot notifications use the ordinary routing webhook, not MCP Events, and the

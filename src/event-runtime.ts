@@ -2,23 +2,33 @@ import { createAllowlistedWebhookHttp, type EventRuntime } from "./event-deliver
 import { resolveGrant } from "./auth.ts";
 import { eventScope } from "./event-store.ts";
 
-export function eventRuntime(
-  env: Pick<Env, "MAIL_GRANTS" | "WEBHOOK_ORIGINS" | "MAIL_CATALOG">,
-): EventRuntime {
-  let origins: string[] = [];
+/** Unset or "[]" trusts no origin. Any other value that is not a JSON array of at
+ * most ten exact HTTPS origins is invalid: then no origin is trusted either, not
+ * even the valid entries, and only callback verification and delivery fail. */
+function webhookRuntime(value: string | undefined): Pick<EventRuntime, "http" | "unavailable"> {
   try {
-    const configured: unknown = JSON.parse(env.WEBHOOK_ORIGINS || "[]");
+    const configured: unknown = JSON.parse(value || "[]");
     if (
       Array.isArray(configured) &&
       configured.length <= 10 &&
       configured.every((origin): origin is string => typeof origin === "string")
     )
-      origins = configured;
+      return { http: createAllowlistedWebhookHttp(configured) };
   } catch {
-    /* Missing configuration denies callback delivery. */
+    /* Reported below without the configured value. */
   }
+  console.error(JSON.stringify({ event: "webhook_origins", status: "invalid" }));
   return {
-    http: createAllowlistedWebhookHttp(origins),
+    http: { post: () => Promise.reject(new Error("webhook_origins_invalid")) },
+    unavailable: "webhook_origins_invalid",
+  };
+}
+
+export function eventRuntime(
+  env: Pick<Env, "MAIL_GRANTS" | "WEBHOOK_ORIGINS" | "MAIL_CATALOG">,
+): EventRuntime {
+  return {
+    ...webhookRuntime(env.WEBHOOK_ORIGINS),
     async authorize(id, name, args) {
       const principal = resolveGrant(env.MAIL_GRANTS, id);
       if (
