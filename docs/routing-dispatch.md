@@ -160,11 +160,13 @@ without a runtime. A proxy URL or credential change still uses the revision,
 generation and drain handoff above; an A/B switch inside the proxy does not touch
 fumi configuration.
 
-Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker written in this project's
-work, because the Grok Bot side has no runtime. The `webhook` adapter becomes signed
-with Standard Webhooks, retries with the same `webhook-id`, and sends identifiers and
-classification only. See [ADR 0003](adr/0003-signed-notification-webhooks.md); until
-it is implemented, the behavior above is current.
+Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this project's
+agents, because the Grok Bot side has no runtime. The `webhook` adapter becomes signed
+with Standard Webhooks, retries with the same `webhook-id` instead of staying
+uncertain, and sends identifiers and classification only. Attempted webhook rows stay
+bound to their generation and block handoff until accepted or dead. See
+[ADR 0003](adr/0003-signed-notification-webhooks.md); until it is implemented, the
+behavior on this page is current.
 
 ## Input disclosure and source integrity
 
@@ -244,7 +246,9 @@ claim gate to avoid competing consumption.
 ## Handoff, revocation and recovery
 
 Observing a new desired revision first closes new claims. Ready/retry operations from
-the old revision are revoked without action. A new active generation cannot activate
+the old revision are revoked without action. Once implemented,
+[ADR 0003](adr/0003-signed-notification-webhooks.md) keeps attempted generic webhook
+rows bound to their generation instead. A new active generation cannot activate
 while any previous operation is sending or uncertain. Both activation and claim
 conditions are enforced in D1 statements. The source, extraction revision, manifest,
 live provenance, active config and exact source lease are checked again after

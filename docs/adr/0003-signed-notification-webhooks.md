@@ -17,8 +17,8 @@ Date: 2026-11-20
 
 ## Context
 
-Fumi has two outbound webhook senders. Each validates URLs, refuses redirects,
-applies timeouts and retries on its own.
+Fumi has two outbound webhook senders, and each implements URL validation,
+redirect refusal, timeouts and retry policy on its own.
 
 | | Routing notification | MCP Events subscription |
 | --- | --- | --- |
@@ -26,13 +26,14 @@ applies timeouts and retries on its own.
 | Storage | One frozen row per mail in `routing_dispatch_outbox`, lane `action` | `mail_events` log and a cursor per subscription |
 | Auth | Bearer from `ROUTING_DISPATCH_AUTH[authRef]` and `Idempotency-Key` | Standard Webhooks HMAC with a subscriber secret |
 | Retry | None for `kind: "webhook"`: a non-2xx stays `uncertain` until a manual receipt and blocks handoff | 8 POSTs, then the subscription stops |
-| Body | `kind: "notification"`, `classification` and granted `input` fields (`subject`, `from`, `text` and others) | `{eventId, name, timestamp, data, cursor}` |
+| Body | `kind: "notification"`, `classification` and granted `input` fields (`subject`, `from`, `to`, `hasAttachments`, `envelope`, `text`) | `{eventId, name, timestamp, data, cursor}` |
 
 Facts on 2026-11-20:
 
 - **Grok Bot is a fumi MCP client.** Fumi is attached to the owner MCP Portal with
-  `on_behalf = false` and all tools enabled (owner, 2026-11-17). Since 2026-11-17
-  the Grok Bot's mail-draft skill in risu729/techo sends mail through the Portal's
+  `on_behalf = false` and every tool enabled (owner, 2026-11-17 13:27 UTC, recorded
+  in risu729/infra). Since 2026-11-17 the Grok Bot's mail-draft skill in
+  [risu729/techo](https://github.com/risu729/techo) sends mail through the Portal's
   `fumi_` tools, so the Grok Bot already reads the whole archive as the owner.
 - **The Grok Bot proxy does not exist.** It would pick the active A/B account. The
   Grok Bot side has no runtime to host it.
@@ -40,58 +41,71 @@ Facts on 2026-11-20:
   destination is `null`, and `WEBHOOK_ORIGINS` is empty.
 - **MCP Events is deferred** until ChatGPT returns (owner, 2026-11-16 11:59 UTC).
   The MCP Portal does not proxy `events/*`.
-- **Classifier categories are free text.** The optional classifier reads mail text
-  and returns a free 64-character `category`, so mail content can steer it.
+- **The classifier `category` is model-chosen.** It is a slug of up to 64
+  characters (`^[a-z][a-z0-9_-]{0,63}$`) from an open vocabulary, chosen after
+  reading the mail, so mail content can steer it.
 
 A subagent reviewed the first proposal, which moved both senders onto one
-per-destination outbox. It found that this design:
+per-destination outbox. It found three problems with that design:
 
-- lost events during subscription renewal gaps;
-- sent mail that the notification gate later ignores;
-- needed a migration of the action lane's "already notified" check.
+- it lost events during subscription renewal gaps;
+- it sent mail that the notification gate later ignores;
+- it needed a migration of the action lane's "already notified" check.
 
 That proposal was dropped in favor of the decision below.
 
 ## Decision
 
-1. **Share only the HTTP layer.** Both senders use one module for:
-   - the URL rule: HTTPS, no userinfo, port, fragment or query;
-   - a timeout of at most 5 seconds;
-   - redirect refusal;
-   - Standard Webhooks signing, with `webhook-id`, `webhook-timestamp` and
-     `webhook-signature`, and dual signatures during secret rotation.
+The owner accepted points 1 to 6. The sub-bullets marked "agent" are details an
+agent specified to make them implementable; they are not confirmed by the owner.
 
-   Routing keeps its frozen outbox, fences, gate and owner-lane order. MCP Events
-   keeps its ordered log, cursor replay and subscription rules.
-2. **The routing `webhook` adapter is signed and retries.**
-   - It signs with a `whsec_` secret resolved through `authRef`.
-   - It sends the existing `operationId` as `webhook-id`.
-   - A non-2xx response, timeout or transport failure resends the same frozen body,
-     at most 5 times within one hour. Each attempt first re-checks the current fence
-     and the notification gate.
-   - Ready and retry rows are revoked when the destination generation changes, not
-     on every configuration revision.
-   - The receiver must deduplicate by `webhook-id` for at least 24 hours.
+1. **Share the sending code, not the storage.** One module signs bodies with
+   Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`) and
+   performs the bounded POST without following redirects.
+   - Routing keeps its frozen outbox, fences, gate and owner-lane order.
+   - MCP Events keeps its ordered log, cursor replay and subscription rules.
+   - Agent: each sender keeps its current URL validation, timeout and
+     `WEBHOOK_ORIGINS` allowlist, so MCP Events behavior does not change.
+     Routing secret rotation stays a new `authRef` with a new generation. It does
+     not use dual signatures.
+2. **The routing `webhook` adapter is signed and retries automatically.** It signs
+   with a `whsec_` secret resolved through `authRef` and sends the existing
+   `operationId` as `webhook-id`. The receiver deduplicates by `webhook-id`.
+   - Agent: a non-2xx response, a timeout, a transport failure or an interrupted
+     attempt resends the same frozen body. This reuses the existing total of 5
+     attempts and its backoff. An exhausted row ends `dead`, so a timeout no longer
+     needs a manual receipt.
+   - Agent: a webhook row that was already attempted stays bound to the generation
+     and credential it was first sent with. Until it is `accepted` or `dead`, it
+     blocks handoff, just as `uncertain` rows do today. It is never re-targeted to a
+     new destination, whose receiver lacks the old deduplication state. Rows never
+     attempted are still revoked and rebuilt as today.
+   - Agent: the receiver keeps deduplication state for at least 24 hours, which is
+     longer than the retry span.
 3. **The notification body carries identifiers and classification only.**
    - It adds the message ID that `read_email` accepts (`mail_<ingestId>`).
-   - It keeps the classification.
-   - It sends no granted mail fields (`subject`, `from`, `to`, `envelope`, `text`).
-     The receiver reads the mail through fumi's MCP tools.
-   - Strict owner lanes, such as Kogane, keep their granted `input`.
-4. **The Grok Bot proxy is a Worker written in this project's work, not on the
+   - It keeps the classification. The receiver treats `category` as a hint from
+     mail-steerable output, the same as the mail itself.
+   - It sends no granted mail fields. The receiver reads the mail through fumi's
+     MCP tools.
+   - Agent: this applies to the `webhook` adapter. Configuration validation
+     rejects a non-empty `destination.offerFields` for it. Strict notification
+     adapters and owner lanes, such as Kogane, keep their granted `input`.
+4. **The Grok Bot proxy is a Worker built by this project's agents, not by the
    Grok Bot side.**
    - It verifies the signature and deduplicates by `webhook-id`.
    - It reads the active account and forwards to that account's Grok webhook
-     trigger.
-   - It holds the per-account URLs and secrets.
+     trigger, holding the per-account URLs and secrets.
    - Fumi still sends to one URL and selects no account.
-5. **MCP Events carries the routing result, later.**
-   - `email.review_required`, with data `{message_id, urgent}` and no `category`,
-     replaces `email.received` and `email.ready`.
-   - It is appended to `mail_events` in the routing action claim batch, with the
-     deterministic ID `review:<ingestId>`.
-   - Subscribing to it requires `mail:routing`.
-   - This is implemented when the deferred MCP Events item resumes, not before.
+   - Its repository, deduplication storage and active-account source need a
+     separate approved design.
+5. **MCP Events carries the routing result instead of every mail, later.**
+   - A post-routing event replaces `email.received` and `email.ready` for
+     notification purposes.
+   - Its name, data, scope and where it is produced are designed when the
+     deferred MCP Events item resumes, not now. Constraints:
+     - it must not require the operator scope `mail:routing`;
+     - it must be produced even when the routing destination is `null`.
 6. **No permanent subscribe tools for now.**
    - ChatGPT subscribes through the `events/subscribe` method, not a tool.
    - The Grok Bot uses the routing webhook.
@@ -102,19 +116,20 @@ That proposal was dropped in favor of the decision below.
 
 ## Consequences
 
-- **Less mail content in transit.** A timeout no longer leaves a notification
-  uncertain forever. No mail text travels in the webhook, and the classifier's free
-  `category` is not exposed to subscribers.
-- **Webhook-triggered Grok sessions hold broad tools.** They read untrusted mail
-  while holding fumi send tools and the Portal's GitHub and Kogane tools. This
-  follows the owner's 2026-11-17 decision not to restrict Portal tools.
+- **Fewer manual steps and no mail text.** A failed or timed-out webhook POST is
+  retried automatically instead of waiting for a manual receipt. No mail text
+  travels in the webhook.
 - **Duplicates are possible.** A receiver that does not deduplicate may see one
   notification more than once. The proxy deduplicates before it forwards.
-- **The proxy needs its own design.** Repository, storage for deduplication, how it
-  reads the active account and its deployment still need owner approval.
-- **Planned changes (agent's split, not confirmed by the owner).**
-  - One PR for the shared HTTP layer, the signed and retrying webhook, and the body
-    change.
+- **Broad tools in webhook-triggered sessions.** Webhook-triggered Grok sessions
+  read untrusted mail while holding fumi send tools and the Portal's GitHub and
+  Kogane tools. This follows the owner's 2026-11-17 decision not to restrict Portal
+  tools.
+- **Existing rows keep their old body.** Bodies and `request_sha256` are frozen
+  when a row is first written. Rows from before the change keep any old `input`.
+  Nothing is live, so no such rows exist in production.
+- **Agent's split, not confirmed by the owner.**
+  - One code PR for the shared signing, the retrying webhook and the body change.
   - A separate proposal for the proxy.
   - The MCP Events change waits for ChatGPT.
 
