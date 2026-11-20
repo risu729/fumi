@@ -206,7 +206,11 @@ claimed has never left fumi; it is rebuilt from the current revision, source, gr
 and decision instead of being held. The sending claim compares the stored request
 hash, source identity and grant with the row the worker read, so a row another
 worker rebuilt meanwhile is held, not sent under a hash or source D1 does not
-keep, and the next pass rebuilds or sends it. Current source revisions are
+keep, and the next pass rebuilds or sends it. Likewise, a worker holds instead of
+sending a row it did not check: one another worker inserted first with a different
+request hash, or one that reappeared after this worker deleted it for a rebuild. The
+next pass sends that row if the decision is unchanged and rebuilds it if the decision
+changed and no attempt has claimed it. Current source revisions are
 retained in the source job even when such a conflict is held.
 
 An immutable owner request contains `schemaVersion: 1`, `kind: "owner"`,

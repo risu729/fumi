@@ -222,12 +222,63 @@ async function rows() {
       target_id: string;
       generation: number;
       attempts: number;
+      revision: number;
       failure_code: string | null;
     }>()
   ).results;
 }
 async function advance() {
   clock += 100_000;
+}
+
+// Run `inject` once, just before (or with `after`, just after) the first statement
+// whose SQL starts with `prefix` runs, to model a concurrent worker's write.
+function raceOnce(prefix: string, inject: () => Promise<unknown>, after = false) {
+  let raced = false;
+  const session = (inner: D1DatabaseSession) =>
+    new Proxy(inner, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (raced || !sql.startsWith(prefix)) return statement;
+          raced = true;
+          return {
+            bind: (...values: unknown[]) => {
+              const bound = statement.bind(...values);
+              return {
+                run: async () => {
+                  if (!after) await inject();
+                  const result = await bound.run();
+                  if (after) await inject();
+                  return result;
+                },
+              };
+            },
+          };
+        };
+      },
+    });
+  const catalog = new Proxy(env.MAIL_CATALOG, {
+    get(target, property) {
+      if (property === "withSession")
+        return (constraint?: D1SessionConstraint) => session(target.withSession(constraint));
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { catalog, raced: () => raced };
+}
+async function insertRow(row: Record<string, unknown>) {
+  const columns = Object.keys(row);
+  await env.MAIL_CATALOG.prepare(
+    `INSERT INTO routing_dispatch_outbox(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`,
+  )
+    .bind(...columns.map((column) => row[column]))
+    .run();
 }
 
 beforeAll(async () => applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS));
@@ -1329,6 +1380,92 @@ describe("durable routing dispatch in workerd", () => {
     const [row] = await rows();
     expect(row?.state).toBe("handled");
     expect(row?.request_sha256).toBe(destination.requests[0]?.requestSha256);
+  });
+  it("holds a notification whose insert lost to another worker's differently classified row", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    let category = "billing";
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category,
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    let gate: "hold" | "allow" = "hold";
+    run.gateNotification = async () => ({ outcome: gate, evidenceCode: "synthetic_gate" });
+    // Record the row a worker with the older "billing" classification writes.
+    await repairRoutingDispatch(env, run);
+    const [stale] = await env.MAIL_CATALOG.prepare("SELECT * FROM routing_dispatch_outbox")
+      .all<Record<string, unknown>>()
+      .then((result) => result.results);
+    await env.MAIL_CATALOG.prepare("DELETE FROM routing_dispatch_outbox").run();
+    // This worker classifies as "finance". Between its read (no row) and its insert,
+    // a worker whose source lease expired inserts the stale "billing" row.
+    category = "finance";
+    gate = "allow";
+    const race = raceOnce("INSERT OR IGNORE INTO routing_dispatch_outbox", () => insertRow(stale!));
+    await advance();
+    await repairRoutingDispatch(
+      { MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: race.catalog },
+      run,
+    );
+    expect(race.raced()).toBe(true);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    // The next pass rebuilds the never-attempted row from the current decision.
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect(destination.requests[0]?.classification).toMatchObject({ category: "finance" });
+    expect((await rows())[0]?.state).toBe("handled");
+  });
+  it("holds a row another worker reinserted after this worker deleted it for a rebuild", async () => {
+    const config = artifact();
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    let gate: "hold" | "allow" = "hold";
+    run.gateNotification = async () => ({ outcome: gate, evidenceCode: "synthetic_gate" });
+    await repairRoutingDispatch(env, run);
+    const [stale] = await env.MAIL_CATALOG.prepare("SELECT * FROM routing_dispatch_outbox")
+      .all<Record<string, unknown>>()
+      .then((result) => result.results);
+    expect(stale?.["revision"]).toBe(1);
+    // Revision 2 makes the never-attempted row rebuild. Right after this worker deletes
+    // it, a worker still on revision 1 whose source lease expired inserts it again.
+    config.revision = 2;
+    await configure(config);
+    gate = "allow";
+    const race = raceOnce(
+      "DELETE FROM routing_dispatch_outbox WHERE operation_id=? AND attempts=0",
+      () => insertRow(stale!),
+      true,
+    );
+    await advance();
+    await repairRoutingDispatch(
+      { MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: race.catalog },
+      run,
+    );
+    expect(race.raced()).toBe(true);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts, row.revision])).toEqual([
+      ["ready", 0, 1],
+    ]);
+    // The next pass rebuilds the row under revision 2 and sends it.
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows()).map((row) => [row.state, row.revision])).toEqual([["handled", 2]]);
   });
   it("claims only the source identity it read when a rebuild keeps the same payload", async () => {
     await configure(artifact());
