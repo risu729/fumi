@@ -888,9 +888,16 @@ describe("durable routing dispatch in workerd", () => {
     await advance();
     expect((await repairRoutingDispatch(env, run)).status).toBe("draining");
     expect(second.requests).toHaveLength(0);
+    const control = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation,accepting FROM routing_dispatch_control WHERE id=1",
+      ).first();
+    // The old revision stops accepting claims while the handoff drains.
+    expect(await control()).toEqual({ revision: 1, generation: 1, accepting: 0 });
     first.setStatus("handled");
     await advance();
     await repairRoutingDispatch(env, run);
+    expect(await control()).toEqual({ revision: 2, generation: 2, accepting: 1 });
     expect(first.requests).toHaveLength(1);
     expect(second.requests).toHaveLength(1);
     expect(second.requests[0]?.attempt.generation).toBe(2);
