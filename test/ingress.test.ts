@@ -55,6 +55,7 @@ function message(bytes = mime, rawSize = bytes.byteLength, chunkSize = 37) {
     raw,
     rawSize,
     headers: new Headers({ "X-Fumi-Ingest-ID": "untrusted-marker" }),
+    canBeForwarded: true,
     forward,
     setReject: vi.fn(),
     async reply(_message: EmailMessage | EmailReplyMessageBuilder): Promise<EmailSendResult> {
