@@ -741,6 +741,75 @@ describe("optional managed body corpus and semantic retrieval", () => {
     ).toBe("unknown");
   });
 
+  it("marks a rediscovered item ready when its provider status is already completed after the indexing deadline", async () => {
+    const original = await source();
+    const remote = provider(),
+      first = runtime(remote.binding),
+      now = Date.now();
+    await ready(first, now);
+    await ready(runtime(remote.binding, { revision: "synthetic-v2" }), now + 600002);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    // Restoring the earlier policy rediscovers its durable item ID more than 24 hours later.
+    await repairManagedMailCorpus(first, now + 2 * 86400000);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT state,failure_code FROM managed_mail_documents WHERE raw_key=?",
+      )
+        .bind(original.raw.key)
+        .first(),
+    ).toEqual({ state: "ready", failure_code: null });
+  });
+  it("still blocks an item that is queued or unpollable after the indexing deadline", async () => {
+    const queued = await source("queued", "Queued synthetic body", canonical(1));
+    const unpollable = await source("unpollable", "Unpollable synthetic body", canonical(2));
+    const remote = provider(),
+      now = Date.now();
+    const binding = {
+      ...remote.binding,
+      items: {
+        ...remote.binding.items,
+        get: (id: string) => ({
+          info: async () => {
+            const item = remote.items.get(id)!;
+            if (new TextDecoder().decode(item.bytes).startsWith("Unpollable"))
+              throw new Error("synthetic provider outage");
+            return { id, key: item.key, status: "queued" };
+          },
+        }),
+      },
+    };
+    const context = runtime(binding);
+    await repairManagedMailCorpus(context, now);
+    await repairManagedMailCorpus(context, now + 300001);
+    const states = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT raw_key,state,failure_code FROM managed_mail_documents ORDER BY raw_key",
+      ).all();
+    expect((await states()).results).toEqual([
+      { raw_key: queued.raw.key, state: "submitted", failure_code: null },
+      {
+        raw_key: unpollable.raw.key,
+        state: "submitted",
+        failure_code: "managed_search_unavailable",
+      },
+    ]);
+    await repairManagedMailCorpus(context, now + 86400001);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    expect((await states()).results).toEqual([
+      {
+        raw_key: queued.raw.key,
+        state: "blocked",
+        failure_code: "managed_search_indexing_timeout",
+      },
+      {
+        raw_key: unpollable.raw.key,
+        state: "blocked",
+        failure_code: "managed_search_indexing_timeout",
+      },
+    ]);
+  });
+
   it("postfilters out-of-scope current-policy rows before source reads and coverage even if the provider returns them", async () => {
     const outside = await source("outside", "Outside the approved source set", canonical(1));
     const remote = provider();
