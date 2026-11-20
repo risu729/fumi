@@ -324,6 +324,132 @@ describe("durable outbound submission in workerd", () => {
       .run();
   });
 
+  it("builds RFC 5322 References from the parent's In-Reply-To and trims long chains", async () => {
+    const { ctx, send } = context(vi.fn(async () => ({ messageId: crypto.randomUUID() })));
+    const rawKey = "ingest/synthetic/threading.eml";
+    const seed = async (metadata: Record<string, unknown>) => {
+      await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions WHERE raw_key = ?")
+        .bind(rawKey)
+        .run();
+      await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
+        metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
+        VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
+        .bind(rawKey, "0".repeat(64), JSON.stringify(metadata), await storeBody("Parent"))
+        .run();
+    };
+    const headers = (call: number) =>
+      (send.mock.calls[call]?.[0] as EmailMessageBuilder | undefined)?.headers;
+    const replyInput = { ...input, reply_message_id: rawKey, quote: false };
+
+    // RFC 5322 section 3.6.4: without References, a single-ID In-Reply-To starts the chain.
+    await seed({ messageId: "<parent@example.invalid>", inReplyTo: "<grand@example.invalid>" });
+    await sendMail(ctx, principal, replyInput, "in-reply-to-only");
+    expect(headers(0)).toEqual({
+      "In-Reply-To": "<parent@example.invalid>",
+      References: "<grand@example.invalid> <parent@example.invalid>",
+    });
+
+    // A chain over the header bounds keeps the thread root and the newest ancestors.
+    const ancestor = (index: number) =>
+      `<${String(index).padStart(2, "0")}${"a".repeat(90)}@example.invalid>`;
+    const chain = Array.from({ length: 30 }, (_, index) => ancestor(index));
+    await seed({ messageId: "<parent@example.invalid>", references: chain.join(" ") });
+    await expect(sendMail(ctx, principal, replyInput, "long-chain")).resolves.toMatchObject({
+      state: "accepted",
+    });
+    const references = String(headers(1)?.["References"]).split(" ");
+    expect(new TextEncoder().encode(references.join(" ")).byteLength).toBeLessThanOrEqual(2048);
+    expect(references[0]).toBe(ancestor(0));
+    expect(references.at(-2)).toBe(ancestor(29));
+    expect(references.at(-1)).toBe("<parent@example.invalid>");
+    expect(references.slice(1, -1)).toEqual(chain.slice(-(references.length - 2)));
+
+    // Short IDs: at most 21 entries, still starting at the root.
+    const short = Array.from({ length: 30 }, (_, index) => `<${index}@example.invalid>`);
+    await seed({ messageId: "<parent@example.invalid>", references: short.join(" ") });
+    await sendMail(ctx, principal, replyInput, "many-ancestors");
+    expect(String(headers(2)?.["References"]).split(" ")).toEqual([
+      short[0],
+      ...short.slice(-19),
+      "<parent@example.invalid>",
+    ]);
+
+    // A parent without a usable Message-ID is a header problem, not invalid caller input.
+    await seed({ references: "<grand@example.invalid>" });
+    await expect(sendMail(ctx, principal, replyInput, "no-message-id")).rejects.toMatchObject({
+      code: "reply_headers_unavailable",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions WHERE raw_key = ?")
+      .bind(rawKey)
+      .run();
+  });
+
+  it("matches a same-key retry of a reply hashed with the earlier References rule", async () => {
+    const { ctx, send } = context(vi.fn(async () => ({ messageId: crypto.randomUUID() })));
+    const rawKey = "ingest/synthetic/earlier-rule.eml";
+    const replyInput = { ...input, reply_message_id: rawKey, quote: false };
+    const ids = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) => `<${from + index}@example.invalid>`).join(
+        " ",
+      );
+    const cases = [
+      // Before 2026-11-20 a parent's single In-Reply-To was ignored without References...
+      [{}, { inReplyTo: "<grand@example.invalid>" }],
+      // ...and only the newest 20 References were kept, dropping the thread root.
+      [{ references: ids(5, 25) }, { references: ids(0, 25) }],
+    ] as const;
+    for (const [index, [earlier, stored]] of cases.entries()) {
+      const parent = { messageId: "<parent@example.invalid>" };
+      // The current rule over `earlier` yields what the earlier rule built from `stored`.
+      // oxlint-disable-next-line no-await-in-loop -- Each case reseeds the same parent row.
+      await env.MAIL_CATALOG.prepare(`INSERT OR REPLACE INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
+        metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
+        VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
+        .bind(
+          rawKey,
+          "0".repeat(64),
+          JSON.stringify({ ...parent, ...earlier }),
+          // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+          await storeBody("Parent"),
+        )
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      const first = await sendMail(ctx, principal, replyInput, `earlier-rule-${index}`);
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+      await env.MAIL_CATALOG.prepare(
+        "UPDATE mail_extractions SET metadata_json = ? WHERE raw_key = ?",
+      )
+        .bind(JSON.stringify({ ...parent, ...stored }), rawKey)
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, replyInput, `earlier-rule-${index}`),
+      ).resolves.toMatchObject({ operation_id: first.operation_id, state: "accepted" });
+      // Rows from before request_hash compare input_hash, the digest of the uncomposed
+      // input; this reply composes to its own input, so the archived digest stands in.
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic setup.
+      await env.MAIL_CATALOG.prepare(
+        "UPDATE outbound_operations SET request_hash = NULL WHERE operation_id = ?",
+      )
+        .bind(first.operation_id)
+        .run();
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, replyInput, `earlier-rule-${index}`),
+      ).resolves.toMatchObject({ operation_id: first.operation_id, state: "accepted" });
+      // A different request under the same key is still a conflict.
+      // oxlint-disable-next-line no-await-in-loop -- The retry must follow the first send.
+      await expect(
+        sendMail(ctx, principal, { ...replyInput, subject: "Other" }, `earlier-rule-${index}`),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    }
+    expect(send).toHaveBeenCalledTimes(2);
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions WHERE raw_key = ?")
+      .bind(rawKey)
+      .run();
+  });
+
   it("allows configured sender domains exactly and defaults replies from the captured envelope", async () => {
     const { ctx, send } = context(vi.fn(async () => ({ messageId: crypto.randomUUID() })));
     const domainPrincipal = { ...principal, fromAddresses: [], fromDomains: ["example.invalid"] };

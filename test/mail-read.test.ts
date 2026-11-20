@@ -135,6 +135,37 @@ describe("bounded private mail reads", () => {
       searchMail(env, principal, { query: "from:someone OR to:another" }),
     ).rejects.toMatchObject({ code: "unsupported_query" });
   });
+  it("matches non-ASCII metadata filters exactly as stored, folding only ASCII case", async () => {
+    await insert("fullwidth", "2026-11-11T00:00:00.000Z", {
+      subject: "\u3010\u91cd\u8981\u3011\uff30\uff24\uff26 Report",
+    });
+    await insert("latin", "2026-11-10T00:00:00.000Z", { subject: "\u00c4nderung" });
+    const ids = async (query: string) =>
+      (await searchMail(env, principal, { query })).emails.map((m) => m.id);
+    expect(await ids("subject:\uff30\uff24\uff26")).toEqual(["mail_fullwidth"]);
+    expect(await ids("subject:\u00c4nderung")).toEqual(["mail_latin"]);
+    expect(await ids("subject:\u00c4NDERUNG")).toEqual(["mail_latin"]);
+    expect(await ids("subject:report")).toEqual(["mail_fullwidth"]);
+  });
+  it("keeps matching stored lowercase non-ASCII text for uppercase filters", async () => {
+    await insert("fullwidth", "2026-11-11T00:00:00.000Z", { subject: "\uff50\uff44\uff46 report" });
+    await insert("latin", "2026-11-10T00:00:00.000Z", { subject: "\u00e4nderung" });
+    const ids = async (query: string) =>
+      (await searchMail(env, principal, { query })).emails.map((m) => m.id);
+    expect(await ids("subject:\uff30\uff24\uff26")).toEqual(["mail_fullwidth"]);
+    expect(await ids("subject:\u00c4nderung")).toEqual(["mail_latin"]);
+    expect(await ids("subject:\u00e4nderung")).toEqual(["mail_latin"]);
+  });
+  it("never splits a surrogate pair at the inline preview limit", async () => {
+    const id = await insert("emoji", "2026-11-11T00:00:00.000Z");
+    const text = `${"x".repeat(15_999)}\u{1f600}tail`;
+    await env.MAIL_ARCHIVE.put("synthetic/body/emoji", JSON.stringify({ text, html: null }));
+    const mail = await readMail(env, principal, id);
+    expect(mail).toMatchObject({ content_truncated: true });
+    const preview = (mail as { content: { text: string } }).content.text;
+    // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
+    expect(preview === "x".repeat(15_999)).toBe(true);
+  });
   it("reads direct reply links oldest first without claiming complete threading", async () => {
     await insert("parent", "2026-11-10T00:00:00.000Z");
     const child = await insert(

@@ -150,7 +150,8 @@ Every returned item key must resolve to a current, ready local ledger entry unde
 current policy. The adapter reads and hashes the local source text again and requires
 the returned passage to occur verbatim in that source. It checks the current manifest
 once more after reading. Unmapped, stale, corrupt or transformed passages are omitted.
-Returned excerpts are at most 800 characters and remain untrusted mail content. Body
+Returned excerpts are at most 800 UTF-16 code units, one fewer when the cut would split
+a surrogate pair, and remain untrusted mail content. Body
 citations contain the exact body SHA and authenticated `/text` URL. Attachment citations
 distinguish derivative SHA and `/conversions/part_N/<sha>` from original attachment SHA
 and `/attachments/part_N`. Both include original MIME SHA and `/raw` URL. Provider chunk

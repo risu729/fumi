@@ -75,7 +75,11 @@ are client hints, not authorization.
 
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
 `after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
-`has:attachment`. Quote values containing spaces. It searches extracted metadata,
+`has:attachment`. Quote values containing spaces. `from:`, `to:` and `subject:`
+match substrings and ignore ASCII letter case. Other characters, such as full-width
+`ＰＤＦ` or `Ä`, match stored text as written in the filter or in lowercase:
+`subject:Änderung` matches `Änderung` and `änderung`, but `subject:änderung` does not
+match `Änderung`. It searches extracted metadata,
 not full bodies or attachments. Without a source filter it includes live and
 imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
 Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
@@ -93,10 +97,11 @@ bodies and supported UTF-8 text attachments. It returns citations and explicit
 indexing/representation coverage. See [content search](content-search.md) for
 limits, phrase syntax and activation. Metadata search semantics are unchanged.
 
-Search pages contain at most 50 records; batches contain at most ten messages;
-thread reads contain at most 20. Bodies inline at most 16,000 characters per
-representation, with authenticated full-content links when truncated. Attachments
-use descriptors rather than embedding arbitrary bytes in model context.
+Search pages contain at most 50 records; batches contain at most ten messages; thread
+reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
+UTF-16 code units per representation, one fewer when the cut would split a surrogate
+pair, with authenticated full-content links when truncated. Attachments use descriptors
+rather than embedding arbitrary bytes in model context.
 
 ## Attachment limits
 
@@ -189,6 +194,11 @@ On Tue, Nov 17, 2026 at 11:13 PM Parent Sender <parent@example.invalid> wrote:
 - Like Gmail's prefilled subject, an empty subject or the parent's own subject
   becomes `Re:` and a space plus the parent's subject (unchanged when it already
   starts with `Re:`). A subject the caller changed is sent as written.
+- `In-Reply-To` is the parent's `Message-ID`. `References` follows RFC 5322
+  section 3.6.4: the parent's `References`, or its `In-Reply-To` when that holds
+  exactly one message ID, then the parent's `Message-ID`. A chain over 21 IDs or
+  2048 bytes keeps the first (thread root) ID and the newest IDs that fit. A
+  parent without a valid `Message-ID` fails with `reply_headers_unavailable`.
 - Replies carry the parent's attachments only with `include_attachments: true`
   (Gmail does not attach them to replies). The limits and SHA-256 verification
   described for forwards below apply.
@@ -249,6 +259,14 @@ existed (migration `0015`) compare `input_hash` with the digest of the uncompose
 input, which is how they were hashed. A `prepared` operation resumes from its
 archived `input.json` and is never composed again.
 
+The digest includes the reply's `In-Reply-To` and `References`, which are derived
+from the parent's stored headers. The `References` rule above changed on
+2026-11-20 for parents whose own `References` is missing or holds more than 20
+IDs. Before then, `References` was the parent's newest 20 `References` IDs and
+its `Message-ID`. A same-key retry of a reply submitted under that rule is also
+compared with a digest that uses those headers, so it still matches its
+operation.
+
 ## Sending and recovery
 
 The native `EMAIL` binding is used only after immutable R2 input persistence,
@@ -293,7 +311,9 @@ not create duplicate event IDs.
 Subscriptions require `mail:events` plus the event's read/send scope. Callback
 verification and delivery use Standard Webhooks signatures; subscriptions default
 to 24 hours and are owner-bound. Requested `ttlMs` is bounded to one minute through
-24 hours; `null` still receives a finite 24-hour grant. Rotation signs with both
+24 hours; `null` still receives a finite 24-hour grant. A principal holds at most
+100 live subscriptions. Expired and stopped ones keep their identity and cursor for
+refresh but free their slot; reviving one needs a free slot. Rotation signs with both
 keys for five minutes. Unsubscribe accepts the original event name, arguments
 and webhook URL. Refresh supports replay from an acknowledged
 subscription cursor, never skipping pending events. Delivery is at least once:
@@ -325,6 +345,11 @@ removed. With `WEBHOOK_ORIGINS` empty, callback verification fails and nothing i
 delivered. The temporary receiver from
 [#64](https://github.com/risu729/fumi/pull/64) was removed without being used.
 Grok Bot is the primary notification target through the routing webhook.
+
+Decision (owner, 2026-11-20 17:13 UTC): when MCP Events resumes, subscriptions carry
+a post-routing event instead of `email.received` and `email.ready`, designed at that
+time, and no permanent subscribe tools are added until a subscriber exists.
+See [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
 ## Activation checklist
 

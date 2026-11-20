@@ -34,26 +34,33 @@ current processing instance and present original. Replays reuse a ready projecti
 Index failures retain MIME success and a projection retry for scheduled repair;
 they do not emit another lifecycle event or invoke paid conversion/semantic calls.
 
-The scheduled repair indexes at most three extracted messages per invocation.
-It selects present Email Routing sources before historical Gmail sources, then
-uses remaining capacity for backfill. Retry delays still apply within both groups.
-It processes messages and attachments sequentially. It indexes at most the first
-100,000 characters of the decoded plain-text body and the first 16,000 characters
-of up to eight UTF-8 `text/plain` attachments, each at most 64 KiB. Chunks contain
-3,500 characters with a 200-character overlap so supported phrases can cross
-chunk boundaries. One source can produce multiple hits. Results are ordered by
-index entry, not relevance, with at most 50 chunks per page.
+The scheduled repair indexes at most three extracted messages per invocation. It selects
+present Email Routing sources before historical Gmail sources, then uses remaining
+capacity for backfill. Retry delays still apply within both groups. It processes
+messages and attachments sequentially. It indexes at most the first 100,000 UTF-16 code
+units of the decoded plain-text body and the first 16,000 of up to eight UTF-8
+`text/plain` attachments, each at most 64 KiB. Chunks start every 3,300 units and
+contain 3,500, so a 200-unit overlap lets supported phrases cross chunk boundaries. No
+limit, chunk boundary or excerpt edge splits a surrogate pair: an end inside a pair
+moves one unit earlier to leave it out, and a start inside a pair moves one unit earlier
+to include it. A chunk can therefore hold 3,501 units, and an overlap 199 to 201, which
+still holds any 200-unit phrase. Citations name the chunk ordinal, not offsets, so they
+still point to the chunk that holds the text. Documents indexed before this rule keep
+their stored chunks until an extraction or conversion change invalidates their
+projection and repair rebuilds it. One source can produce multiple hits. Results are
+ordered by index entry, not relevance, with at most 50 chunks per page.
 
-Completed searchable conversion derivatives add at most four attachments and
-64,000 characters per message. Derived citations expose both derivative and
+Completed searchable conversion derivatives add at most four attachments and 64,000
+UTF-16 code units per message; a derivative cut one unit short to keep a pair whole
+still uses the rest of that budget. Derived citations expose both derivative and
 original hashes/URLs, with the representation explicitly labeled. Decrypted PDF
-binaries, ZIP extraction manifests, HTML-only bodies and non-UTF-8 text are not
-silently treated as text. Unsupported, pending or blocked conversion is excluded.
-Per-message coverage lists conversion state and omitted or truncated content.
-Aggregate coverage reports indexed versus extracted messages; pending/blocked
-MIME extraction is excluded from this denominator. A zero-hit search is not proof
-that a phrase is absent from every original or attachment. Metadata search and
-authenticated downloads remain available independently of content indexing.
+binaries, ZIP extraction manifests, HTML-only bodies and non-UTF-8 text are not silently
+treated as text. Unsupported, pending or blocked conversion is excluded. Per-message
+coverage lists conversion state and omitted or truncated content. Aggregate coverage
+reports indexed versus extracted messages; pending/blocked MIME extraction is excluded
+from this denominator. A zero-hit search is not proof that a phrase is absent from every
+original or attachment. Metadata search and authenticated downloads remain available
+independently of content indexing.
 
 Every derivative is read within a byte bound and checked against its recorded
 SHA-256. Missing or changed bytes defer the whole projection; partial chunks are
