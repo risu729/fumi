@@ -228,12 +228,33 @@ decryption path. Hostile-input limit enforcement still needs separate synthetic
 production acceptance; no CPU or OOM enforcement is claimed from a successful
 decryption. No brittle PDF token filter substitutes for isolation.
 
-The parent routes a PDF to decryption when an `/Encrypt` name, after `#xx` unescaping,
-appears outside comments, literal and hex strings and stream data. That covers classic
-and incremental trailers and cross-reference stream dictionaries, so the same token in
-page content, a metadata stream or a string does not block OCR of an unencrypted PDF.
-Unterminated string or stream data falls back to any mention in the remaining bytes.
-This is routing, not a security check: the isolated parser still decides authentication.
+A PDF that never mentions an `/Encrypt` name, after `#xx` unescaping, takes the
+unencrypted path. One that does is routed to decryption when any of these checks in
+`src/attachment-conversion-pdf-encryption.ts` finds that name:
+
+- a lexical scan for an `/Encrypt` name outside comments, literal and hex strings and
+  stream data; unterminated string or stream data counts any later mention;
+- the dictionary after every `trailer` keyword, wherever it appears;
+- the classic table and trailer or the cross-reference stream dictionary at every
+  `startxref`, `/Prev` and `/XRefStm` offset found anywhere in the bytes, including
+  inside strings, comments and streams, because a parser seeks to those offsets.
+
+It is also routed to decryption when it does not start with `%PDF-`; has no offset; has
+an offset outside the file, or one that, after white-space, is not `xref` followed later
+by a `trailer` dictionary or `N G obj <<`; has a comment between one of those keywords
+and its value; has a dictionary that does not close within 64 KiB; or has more than 32
+distinct offsets or `trailer` keywords. So the token in page content, a metadata stream
+or an Info string does not block OCR of an unencrypted PDF whose cross-reference data is
+intact. Synthetic tests place the AES-256 fixture's cross-reference stream, or a classic
+trailer for it, inside a literal or hex string, behind a bare `stream` keyword or on a
+comment line, and the isolated LibPDF child still decrypts each one.
+
+This is routing, not a PDF parser. A parser that rejects a cross-reference section these
+checks accept (for example a corrupt stream or malformed table entries) and rebuilds it
+by scanning objects can still find an encryption dictionary hidden from the lexical
+scan; that PDF then takes the unencrypted path. An unencrypted PDF routed to decryption
+ends as `password_rejected`, because the child requires LibPDF to report encryption. The
+isolated parser still decides authentication.
 
 Without OCR the decrypted PDF is downloadable and explicitly excluded from text
 indexing. With opted-in OCR, the managed service receives the verified decrypted

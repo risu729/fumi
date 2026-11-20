@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { unlockPdf } from "../src/attachment-conversion-pdf.ts";
-import { isEncryptedPdf } from "../src/attachment-conversion-backends.ts";
+import { isEncryptedPdf } from "../src/attachment-conversion-pdf-encryption.ts";
 import {
   encryptedPdf,
   overPageLimitPdf,
@@ -30,7 +30,40 @@ const plainBody = [
   "6 0 obj << /Title (Synthetic \\(/Encrypt\\) <</Encrypt 1 0 R>> notes) /Subject <2F456E6372797074> >> endobj",
   "% /Encrypt 6 0 R inside a comment",
 ].join("\n");
-const plainPdf = `${plainBody}\nxref\n0 7\ntrailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R >>\nstartxref\n9\n%%EOF\n`;
+const plainPdf = `${plainBody}\nxref\n0 7\ntrailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R >>\nstartxref\n${plainBody.length + 1}\n%%EOF\n`;
+// The generated AES-256 fixture ends with its cross-reference stream object `6 0 obj`.
+const original = atob(encryptedPdf);
+const xrefAt = Number(/startxref\s+(\d+)\s+%%EOF\s*$/.exec(original)![1]);
+const objects = original.slice(0, xrefAt);
+const xrefObject = original.slice(xrefAt, original.indexOf("endobj", xrefAt) + "endobj".length);
+const streamAt = xrefObject.indexOf("stream");
+/** Wraps the unchanged cross-reference stream object; startxref still points at `6 0 obj`. */
+const relocated = (before: string, after = "", object = xrefObject) =>
+  `${objects}${before}${object}${after}\nstartxref\n${xrefAt + before.length}\n%%EOF\n`;
+const objectOffsets = [...objects.matchAll(/\d+ 0 obj/g)].map((match) => match.index);
+const xrefTable = `xref\n0 ${objectOffsets.length + 1}\n0000000000 65535 f \n${objectOffsets
+  .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+  .join("")}`;
+const trailer = `trailer\n<< /Size ${objectOffsets.length + 1} /Root 2 0 R /Info 3 0 R /Encrypt 5 0 R ${
+  /\/ID ?\[[^\]]*\]/.exec(xrefObject)![0]
+} >>\n`;
+/** The same objects with a classic table and trailer instead; startxref points at `xref`. */
+const classicSection = (before: string, after = "", tail = "") =>
+  `${objects}${before}${xrefTable}${trailer}${after}startxref\n${objects.length + before.length}\n%%EOF\n${tail}`;
+// Each places the section a parser reads by offset where the lexical scan skips bytes.
+const hiddenSections = {
+  "cross-reference stream behind a bare stream keyword": relocated("stream\n"),
+  "cross-reference stream inside a literal string": relocated("(\n", "\n)"),
+  "cross-reference stream inside a hex string": relocated("<\n"),
+  "cross-reference stream dictionary on a comment line": relocated(
+    "% ",
+    "",
+    xrefObject.slice(0, streamAt).replaceAll("\n", " ") + xrefObject.slice(streamAt),
+  ),
+  "classic trailer inside a literal string": classicSection("(\n", ")\n"),
+  "classic trailer inside a hex string": classicSection("<\n"),
+  "classic trailer behind a bare stream keyword": classicSection("stream\n", "", "%endstream\n"),
+};
 describe("encrypted PDF detection", () => {
   it("ignores the token in stream data, strings and comments of an unencrypted PDF", () => {
     expect(isEncryptedPdf(latin1(plainPdf), "application/pdf")).toBe(false);
@@ -44,6 +77,71 @@ describe("encrypted PDF detection", () => {
     const xrefStream = `${plainBody}\n8 0 obj << /Type /XRef /Size 9 /W [1 2 1] /Root 1 0 R /Encrypt << /Filter /Standard >> /Length 4 >>\nstream\n\x01\x00\x00\x00\nendstream\nendobj\nstartxref\n99\n%%EOF\n`;
     expect(isEncryptedPdf(latin1(xrefStream), "application/pdf")).toBe(true);
     expect(isEncryptedPdf(latin1(classic), "application/octet-stream")).toBe(false);
+  });
+  it.each(Object.entries(hiddenSections))(
+    "detects a %s that the isolated parser decrypts",
+    async (_, text) => {
+      expect(isEncryptedPdf(latin1(text), "application/pdf")).toBe(true);
+      // The child rejects any PDF that LibPDF does not report as encrypted and authenticated.
+      await expect(unlockPdf(env.PDF_LOADER!, latin1(text), [password])).resolves.toMatchObject({
+        pages: 1,
+      });
+    },
+  );
+  it("follows /Prev to an older cross-reference section hidden inside a string", () => {
+    // LibPDF reads /Encrypt from the newest section only; other parsers may merge older ones.
+    const hidden = `${objects}(\n${xrefObject}\n)\n`;
+    const entry = String.fromCharCode(1, hidden.length >> 8, hidden.length & 0xff, 0, 0);
+    const newest = `7 0 obj\n<< /Type /XRef /Size 8 /Index [7 1] /W [1 2 2] /Root 2 0 R /Prev ${xrefAt + 2} /Length 5 >>\nstream\n${entry}\nendstream\nendobj\n`;
+    const text = `${hidden}${newest}startxref\n${hidden.length}\n%%EOF\n`;
+    expect(isEncryptedPdf(latin1(text), "application/pdf")).toBe(true);
+    // Without /Prev no offset reaches the string, so a parser never reads that section.
+    const unreachable = text.replace(`/Prev ${xrefAt + 2} `, "");
+    expect(isEncryptedPdf(latin1(unreachable), "application/pdf")).toBe(false);
+  });
+  it("ignores the token in strings of a parser-written unencrypted PDF", async () => {
+    const { bytes: clear } = await unlockPdf(env.PDF_LOADER!, bytes(encryptedPdf), [password]);
+    const text = new TextDecoder("latin1").decode(clear);
+    // Same-length replacement keeps every cross-reference offset LibPDF wrote valid.
+    const mentioned = text.replace(
+      /\/Title <[\dA-F]+>/,
+      (title) => `/Title (/Encrypt 5 0 R <</Encrypt 5 0 R>>`.padEnd(title.length - 1, " ") + ")",
+    );
+    expect(mentioned).not.toBe(text);
+    expect(mentioned.length).toBe(text.length);
+    expect(isEncryptedPdf(latin1(mentioned), "application/pdf")).toBe(false);
+  });
+  it("counts a mention as encrypted when the cross-reference offsets cannot be read", () => {
+    const at = plainBody.length + 1;
+    /** Appends objects and comments whose /Prev offsets each point at one of them. */
+    const withObjects = (count: number) => {
+      let text = plainPdf;
+      const references: string[] = [];
+      for (let index = 0; index < count; index++) {
+        references.push(`% /Prev ${text.length}\n`);
+        text += `${index + 7} 0 obj << /Producer (/Encrypt) >> endobj\n`;
+      }
+      return text + references.join("");
+    };
+    const conservative = [
+      plainPdf.replace(`startxref\n${at}`, ""),
+      plainPdf.replace(`startxref\n${at}`, `startxref\n${plainPdf.length}`),
+      plainPdf.replace(`startxref\n${at}`, "startxref\n9"),
+      plainPdf.replace(`startxref\n${at}`, `startxref % ${at}\n${at}`),
+      plainPdf.replace("/Info 6 0 R", "/Info 6 0 R /Prev 4"),
+      plainPdf.replace("trailer\n", ""),
+      plainPdf.replace("/Info 6 0 R >>", "/Info 6 0 R"),
+      ` ${plainPdf.replace(`startxref\n${at}`, `startxref\n${at + 1}`)}`,
+      withObjects(32),
+      `${plainPdf}${"% trailer\n".repeat(32)}`,
+    ];
+    for (const text of conservative)
+      expect(isEncryptedPdf(latin1(text), "application/pdf"), text).toBe(true);
+    // Offsets and `trailer` keywords count wherever they appear, up to 32 of each.
+    expect(isEncryptedPdf(latin1(withObjects(31)), "application/pdf")).toBe(false);
+    expect(
+      isEncryptedPdf(latin1(`${plainPdf}${"% trailer\n".repeat(31)}`), "application/pdf"),
+    ).toBe(false);
   });
   it("stays conservative when unterminated stream or string data hides the remainder", () => {
     const head = "%PDF-1.7\n1 0 obj << /Length 9 >>\nstream\nunfinished";

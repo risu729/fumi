@@ -351,10 +351,13 @@ describe("private bounded attachment conversion", () => {
     expect(upload).not.toHaveBeenCalled();
   });
   it("submits an unencrypted PDF to OCR when only its content stream mentions encryption", async () => {
+    // startxref must reach the trailer: unreadable cross-reference data routes to decryption.
+    const body =
+      "%PDF-1.7\n1 0 obj << /Length 25 >>\nstream\nBT (/Encrypt 2 0 R) Tj ET\nendstream\nendobj\n";
     const original = await source(
       "application/pdf",
       encode(
-        "%PDF-1.7\n1 0 obj << /Length 31 >>\nstream\nBT (/Encrypt 2 0 R) Tj ET\nendstream\nendobj\ntrailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n",
+        `${body}xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${body.length}\n%%EOF\n`,
       ),
     );
     const key = `fumi-${original.sha256}.pdf`;

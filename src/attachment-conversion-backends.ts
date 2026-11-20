@@ -68,60 +68,6 @@ export async function verifyOcr(binding: ManagedOcr) {
   if (record(info["indexing_options"])["use_ocr"] !== true)
     throw new ConversionBlocked("ocr_not_enabled");
 }
-const unescapeNames = (text: string) =>
-  text.replace(/#([a-f0-9]{2})/gi, (_, hex: string) =>
-    String.fromCharCode(Number.parseInt(hex, 16)),
-  );
-const mentionsEncrypt = (text: string) => /\/Encrypt\b/.test(unescapeNames(text));
-const regular = (char: string | undefined) =>
-  char !== undefined && !"\0\t\n\f\r ()<>[]{}/%".includes(char);
-/** Finds an `/Encrypt` name outside comments, strings and stream data: the classic or
- * incremental trailer and cross-reference stream dictionaries keep that entry unencrypted.
- * Unterminated string or stream data falls back to any mention in the remaining bytes. */
-export function isEncryptedPdf(bytes: Uint8Array, mime: string) {
-  if (mime !== "application/pdf") return false;
-  const text = new TextDecoder("latin1").decode(bytes);
-  let index = 0;
-  while (index < text.length) {
-    const char = text[index]!;
-    if (char === "%") {
-      while (index < text.length && text[index] !== "\n" && text[index] !== "\r") index++;
-    } else if (char === "(") {
-      const start = index;
-      for (let depth = 0; index < text.length; index++) {
-        const inner = text[index];
-        if (inner === "\\") index++;
-        else if (inner === "(") depth++;
-        else if (inner === ")" && --depth === 0) break;
-      }
-      if (index >= text.length) return mentionsEncrypt(text.slice(start));
-      index++;
-    } else if (char === "<" && text[index + 1] === "<") {
-      index += 2;
-    } else if (char === "<") {
-      const end = text.indexOf(">", index);
-      if (end < 0) return mentionsEncrypt(text.slice(index));
-      index = end + 1;
-    } else if (char === "/") {
-      let end = index + 1;
-      while (regular(text[end])) end++;
-      if (unescapeNames(text.slice(index + 1, end)) === "Encrypt") return true;
-      index = end;
-    } else if (!regular(char)) {
-      index++;
-    } else {
-      let end = index;
-      while (regular(text[end])) end++;
-      if (text.slice(index, end) === "stream") {
-        const close = text.indexOf("endstream", end);
-        if (close < 0) return mentionsEncrypt(text.slice(end));
-        end = close + "endstream".length;
-      }
-      index = end;
-    }
-  }
-  return false;
-}
 export async function convertDocument(
   binding: ManagedDocuments,
   bytes: Uint8Array,
