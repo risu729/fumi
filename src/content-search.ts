@@ -1,5 +1,6 @@
 import { MailReadError, parseMailSearch, type MailReadEnvironment } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
+import { pairBoundary, truncateCodeUnits } from "./utf16.ts";
 
 const VERSION = "text-v2";
 const CHUNK = 3500;
@@ -60,7 +61,10 @@ async function verifiedText(bucket: R2Bucket, key: string, digest: string, maxim
 function chunks(text: string, part: string, sha256: string): Chunk[] {
   const result: Chunk[] = [];
   for (let start = 0; start < text.length; start += CHUNK - OVERLAP) {
-    result.push({ part, ordinal: result.length, text: text.slice(start, start + CHUNK), sha256 });
+    // A boundary inside a surrogate pair moves back one unit: the start keeps the whole pair
+    // and the end leaves it to the next chunk, so the overlap never drops below 199 units.
+    const chunk = text.slice(pairBoundary(text, start), pairBoundary(text, start + CHUNK));
+    result.push({ part, ordinal: result.length, text: chunk, sha256 });
     if (start + CHUNK >= text.length) break;
   }
   return result;
@@ -82,7 +86,7 @@ export async function indexMailContent(
       digest,
       6 * 1024 * 1024,
     );
-    entries.push(...chunks(text.slice(0, 100_000), "body", digest));
+    entries.push(...chunks(truncateCodeUnits(text, 100_000), "body", digest));
     if (text.length > 100_000) omitted.push("body_truncated");
   } else if (source.body_html_key) omitted.push("html_only_body");
   const attachments = JSON.parse(source.attachments_json) as Part[];
@@ -122,7 +126,7 @@ export async function indexMailContent(
           converted.result_sha256,
           256 * 1024,
         );
-        const projected = text.slice(0, 64000 - derivedCharacters);
+        const projected = truncateCodeUnits(text, 64000 - derivedCharacters);
         entries.push(
           ...chunks(projected, `converted_${part.index}`, converted.result_sha256).map((chunk) => ({
             ...chunk,
@@ -155,7 +159,7 @@ export async function indexMailContent(
       omitted.push(`part_${part.index}:unsupported_encoding`);
       continue;
     }
-    entries.push(...chunks(text.slice(0, 16_000), `part_${part.index}`, part.sha256));
+    entries.push(...chunks(truncateCodeUnits(text, 16_000), `part_${part.index}`, part.sha256));
     if (text.length > 16_000) omitted.push(`part_${part.index}:truncated`);
   }
   const db = env.MAIL_CATALOG.withSession("first-primary");
@@ -303,8 +307,8 @@ interface SearchInput {
 function excerpt(text: string, query: string, fallback: string) {
   const at = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text)?.index ?? -1;
   if (at < 0) return fallback.slice(0, 1000);
-  const start = Math.max(0, at - 150);
-  const end = Math.min(text.length, at + query.length + 150);
+  const start = pairBoundary(text, Math.max(0, at - 150));
+  const end = pairBoundary(text, Math.min(text.length, at + query.length + 150));
   return `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }
 export async function searchMailContent(

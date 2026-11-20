@@ -42,6 +42,7 @@ import { searchMailContent } from "./content-search.ts";
 import { searchManagedMail } from "./managed-mail-search.ts";
 import type { ManagedMailEnvironment } from "./managed-search-runtime.ts";
 import { getMailHealth } from "./mail-health.ts";
+import { truncateCodeUnits } from "./utf16.ts";
 
 export interface McpEnvironment extends OutboundContext, ManagedMailEnvironment {
   eventRuntime?: EventRuntime;
@@ -226,7 +227,11 @@ async function readAny(
     ...summary,
     input: {
       ...input,
-      payload: { ...input.payload, text: text?.slice(0, 16_000), html: html?.slice(0, 16_000) },
+      payload: {
+        ...input.payload,
+        text: text === undefined ? undefined : truncateCodeUnits(text, 16_000),
+        html: html === undefined ? undefined : truncateCodeUnits(html, 16_000),
+      },
     },
     content_truncated: (text?.length ?? 0) > 16_000 || (html?.length ?? 0) > 16_000,
     ...((text?.length ?? 0) > 16_000 || (html?.length ?? 0) > 16_000
