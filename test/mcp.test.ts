@@ -137,6 +137,40 @@ describe("official MCP HTTP transport", () => {
       await client.close();
     }
   });
+  it("never splits a surrogate pair at the sent-mail inline body limit", async () => {
+    const ctx = context();
+    const text = `${"x".repeat(15_999)}\u{1f600}tail`;
+    const html = `<p>${"h".repeat(15_996)}\u{1f600}tail</p>`;
+    const sent = await dispatchMailTool(
+      "send_email",
+      {
+        from_address: mailer.fromAddresses[0],
+        to: ["recipient@example.invalid"],
+        subject: "Synthetic emoji at the cut",
+        payload: { text, html },
+        idempotency_key: "synthetic-surrogate-cut",
+      },
+      ctx,
+      mailer,
+      "https://fumi.example.invalid",
+    );
+    const read = (await dispatchMailTool(
+      "read_email",
+      { message_id: `sent_${String(sent["operation_id"])}` },
+      ctx,
+      mailer,
+      "https://fumi.example.invalid",
+    )) as {
+      input: { payload: { text: string; html: string } };
+      content_truncated: boolean;
+      extraction_file_uri?: string;
+    };
+    expect(read.content_truncated).toBe(true);
+    expect(read.extraction_file_uri).toBeDefined();
+    // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
+    expect(read.input.payload.text === "x".repeat(15_999)).toBe(true);
+    expect(read.input.payload.html === `<p>${"h".repeat(15_996)}`).toBe(true);
+  });
   it("rejects cross-origin browser requests before protocol parsing", async () => {
     const response = await handleMcp(
       new Request("https://fumi.example.invalid/mcp", {
