@@ -191,8 +191,9 @@ when it conflicts with an attempted payload; it cannot silently send stale conte
 or mutate the meaning of an idempotency key. A frozen payload that no attempt has
 claimed has never left fumi; it is rebuilt from the current revision, source, grant
 and decision instead of being held. The sending claim compares the stored request
-hash with the payload the worker read, so a row another worker rebuilt meanwhile
-is held, not sent under a hash D1 does not keep. Current source revisions are
+hash, source identity and grant with the row the worker read, so a row another
+worker rebuilt meanwhile is held, not sent under a hash or source D1 does not
+keep, and the next pass rebuilds or sends it. Current source revisions are
 retained in the source job even when such a conflict is held.
 
 An immutable owner request contains `schemaVersion: 1`, `kind: "owner"`,

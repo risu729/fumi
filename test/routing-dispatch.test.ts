@@ -1194,6 +1194,38 @@ describe("durable routing dispatch in workerd", () => {
     expect(row?.state).toBe("handled");
     expect(row?.request_sha256).toBe(destination.requests[0]?.requestSha256);
   });
+  it("claims only the source identity it read when a rebuild keeps the same payload", async () => {
+    await configure(artifact());
+    await source();
+    const destination = service("retryable_error");
+    const run = runtime({ "active-a": destination.binding });
+    let rebuilt = false;
+    run.gateNotification = async () => {
+      if (!rebuilt) {
+        // A worker whose source lease expired read an older extraction of the same
+        // raw message. Its rebuild yields identical payload bytes but records the
+        // older extraction identity on the never-attempted row.
+        rebuilt = true;
+        await env.MAIL_CATALOG.prepare(
+          "UPDATE routing_dispatch_outbox SET extraction_updated_at=0",
+        ).run();
+      }
+      return { outcome: "allow", evidenceCode: "synthetic_gate" };
+    };
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["retry", 1]]);
+    destination.setOffer("handled");
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(2);
+    expect(destination.requests[1]?.requestSha256).toBe(destination.requests[0]?.requestSha256);
+    expect((await rows())[0]?.state).toBe("handled");
+  });
   it("keeps an attempted notification frozen when its classification changes", async () => {
     const config = artifact();
     config.routing.configJson = JSON.stringify({
