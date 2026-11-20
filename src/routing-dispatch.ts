@@ -337,6 +337,17 @@ async function job(
     .run();
 }
 
+/** Lower revisions, generation rollback, changed bytes under one revision and a
+ * destination change without a generation advance cannot replace `row`. */
+function staleAgainst(config: DispatchConfiguration, row: Control): boolean {
+  const a = config.artifact;
+  return (
+    a.revision < row.revision ||
+    a.generation < row.generation ||
+    (a.revision === row.revision && config.configurationSha256 !== row.configuration_sha256) ||
+    (a.generation === row.generation && config.destinationSha256 !== row.destination_sha256)
+  );
+}
 /** A newer desired revision closes offers before handoff. It cannot activate until
  * all prior in-flight/ambiguous outcomes have durable receipt reconciliation. */
 async function observe(
@@ -363,40 +374,41 @@ async function observe(
     await db.prepare("UPDATE routing_dispatch_control SET accepting=0 WHERE id=1").run();
     return "paused";
   }
-  if (
-    a.revision < current.revision ||
-    a.generation < current.generation ||
-    (a.revision === current.revision &&
-      config.configurationSha256 !== current.configuration_sha256) ||
-    (a.generation === current.generation && config.destinationSha256 !== current.destination_sha256)
-  )
-    return "stale";
+  if (staleAgainst(config, current)) return "stale";
   if (a.revision > current.revision || !a.enabled) {
+    // Both control statements carry the same fence: a Worker that lost a race to
+    // another activation must not close acceptance on the revision now active.
+    const replaceable = "revision<? AND (generation<? OR (generation=? AND destination_sha256=?))";
+    const fence = [a.revision, a.generation, a.generation, config.destinationSha256];
     await db.batch([
       db
-        .prepare("UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND revision<=?")
-        .bind(a.revision),
+        .prepare(`UPDATE routing_dispatch_control SET accepting=0 WHERE id=1 AND ${replaceable}`)
+        .bind(...fence),
       db
         .prepare(`UPDATE routing_dispatch_outbox SET state='revoked',failure_code='configuration_revoked',updated_at=?
         WHERE state IN ('ready','retry') AND revision<?`)
         .bind(Date.now(), a.revision),
     ]);
+    // The generation fence is part of the statement: another Worker may have
+    // activated a different artifact since `current` was read.
     await db
       .prepare(`UPDATE routing_dispatch_control SET revision=?,generation=?,configuration_sha256=?,destination_sha256=?,accepting=?
-      WHERE id=1 AND revision<? AND NOT EXISTS(SELECT 1 FROM routing_dispatch_outbox WHERE state IN ('sending','uncertain'))`)
+      WHERE id=1 AND ${replaceable}
+      AND NOT EXISTS(SELECT 1 FROM routing_dispatch_outbox WHERE state IN ('sending','uncertain'))`)
       .bind(
         a.revision,
         a.generation,
         config.configurationSha256,
         config.destinationSha256,
         a.enabled ? 1 : 0,
-        a.revision,
+        ...fence,
       )
       .run();
   }
   const active = await db
     .prepare("SELECT * FROM routing_dispatch_control WHERE id=1")
     .first<Control>();
+  if (active && staleAgainst(config, active)) return "stale";
   if (active?.paused) return "paused";
   return active?.configuration_sha256 === config.configurationSha256 &&
     active.accepting &&
@@ -1227,7 +1239,9 @@ export async function repairRoutingDispatch(
       await db
         .prepare(`INSERT INTO routing_dispatch_jobs(raw_key,source_sha256,extraction_updated_at,revision,state,failure_code,next_attempt_at,updated_at)
           VALUES(?,?,?,?,'held','invalid_source',?,?) ON CONFLICT(raw_key) DO UPDATE SET
-          state='held',failure_code='invalid_source',next_attempt_at=excluded.next_attempt_at,updated_at=excluded.updated_at
+          source_sha256=excluded.source_sha256,extraction_updated_at=excluded.extraction_updated_at,
+          revision=excluded.revision,state='held',failure_code='invalid_source',
+          next_attempt_at=excluded.next_attempt_at,updated_at=excluded.updated_at
           WHERE routing_dispatch_jobs.lease_until<=?`)
         .bind(
           row.raw_key,
