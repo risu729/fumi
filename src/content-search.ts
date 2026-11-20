@@ -137,8 +137,11 @@ export async function indexMailContent(
         );
         derivedSelected++;
         derivedCharacters += projected.length;
-        if (projected.length < text.length)
+        if (projected.length < text.length) {
           omitted.push(`part_${part.index}:derivative_search_truncated`);
+          // A cut moved back to keep a surrogate pair whole still spends the whole budget.
+          derivedCharacters = 64000;
+        }
       } else
         omitted.push(
           `part_${part.index}:${converted?.failure_code ?? converted?.state ?? "conversion_not_enabled_or_pending"}`,
