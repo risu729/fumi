@@ -484,6 +484,67 @@ describe("bounded content retrieval", () => {
       .excerpt;
     expect(excerpt === `…${emoji}${"q".repeat(149)}needle${"r".repeat(149)}…`).toBe(true);
   });
+  it("spends the derivative budget when a surrogate pair shortens the derivative cut", async () => {
+    const source = await insert("surrogate-budget", "budget body", {
+      text: "synthetic scanned original",
+      mimeType: "application/pdf",
+    });
+    const first = JSON.parse(source.attachments_json)[0]!;
+    const second = { ...first, index: 1, ...(await object("synthetic second original")) };
+    source.attachments_json = JSON.stringify([first, second]);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET attachments_json=?,attachment_count=2 WHERE raw_key=?",
+    )
+      .bind(source.attachments_json, source.raw_key)
+      .run();
+    for (const [part, text] of [
+      [first, `${"d".repeat(63_999)}\u{1f600}after`],
+      [second, "second derivative needle"],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- Two synthetic derivatives in index order.
+      const converted = await object(text);
+      // oxlint-disable-next-line no-await-in-loop -- Two synthetic derivatives in index order.
+      await env.MAIL_CATALOG.prepare(
+        `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,representation,result_key,result_sha256,result_size,provenance_json,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'complete','managed_ocr_indexed_text',?,?,?,'{}',0)`,
+      )
+        .bind(
+          source.raw_key,
+          part.index,
+          source.manifest_key,
+          "a".repeat(64),
+          part.key,
+          part.sha256,
+          part.size,
+          part.mimeType,
+          "b".repeat(64),
+          converted.key,
+          converted.sha256,
+          converted.size,
+        )
+        .run();
+    }
+    expect(await indexMailContent(env, source)).toBe(true);
+    // The first cut stops at 63,999 units only to keep the pair whole; the budget is still spent.
+    const coverage = await env.MAIL_CATALOG.prepare(
+      "SELECT coverage_json FROM mail_search_documents WHERE raw_key=?",
+    )
+      .bind(source.raw_key)
+      .first<{ coverage_json: string }>();
+    expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
+      omitted: [
+        "part_0:derivative_search_truncated",
+        "part_1:derivative_search_count_or_character_limit",
+      ],
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) n FROM mail_search_chunks WHERE raw_key=? AND part='converted_1'",
+      )
+        .bind(source.raw_key)
+        .first("n"),
+    ).toBe(0);
+  });
   it("enforces mail read grants at the MCP boundary and exposes source citations", async () => {
     await insert("mcp", "find this synthetic needle");
     await repairContentSearch(env);
