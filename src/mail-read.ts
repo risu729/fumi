@@ -53,8 +53,10 @@ const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.s
 const LIMIT = 16_000;
 function bodyPreview(value: string | null): string | null {
   if (value === null) return null;
+  // Never end on half of a surrogate pair: strict UTF-8/JSON clients reject a lone surrogate.
+  const end = value.length > LIMIT && /[\ud800-\udbff]/.test(value[LIMIT - 1]!) ? LIMIT - 1 : LIMIT;
   // Detach the small prefix: V8 slices can retain the entire multi-megabyte source string.
-  return JSON.parse(JSON.stringify(value.slice(0, LIMIT))) as string;
+  return JSON.parse(JSON.stringify(value.slice(0, end))) as string;
 }
 export const inboundMessageId = (id: string) => `mail_${id}`;
 
@@ -440,7 +442,9 @@ export function parseMailSearch(query: string) {
       clauses.push(
         `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),'')) LIKE ? ESCAPE '\\'`,
       );
-      values.push(`%${value.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`);
+      // SQLite LOWER() folds ASCII only; folding more here would miss stored non-ASCII text.
+      const folded = value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      values.push(`%${folded.replace(/[\\%_]/g, "\\$&")}%`);
     }
   }
   return { clauses, values };
