@@ -1,6 +1,7 @@
 /* oxlint-disable no-await-in-loop -- Serial bounded source reads and durable leases prevent memory spikes and duplicate provider calls. */
 import { parseMailSearch } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
+import { truncateCodeUnits } from "./utf16.ts";
 import { managedSourceFence, hasManagedAttachmentSources } from "./managed-mail-sources.ts";
 import {
   bounded,
@@ -188,7 +189,7 @@ export async function searchManagedMail(
     const messageId = `mail_${row.external_id}`;
     matches.push({
       message_id: messageId,
-      excerpt: JSON.parse(JSON.stringify(chunk["text"].slice(0, 800))) as string,
+      excerpt: JSON.parse(JSON.stringify(truncateCodeUnits(chunk["text"], 800))) as string,
       score: chunk["score"],
       citation: {
         part: row.part,

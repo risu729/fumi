@@ -6,7 +6,7 @@ import { setTimeout } from "node:timers/promises";
 
 // Execute the built production bundle with native workerd Email/Cron events and local R2/D1.
 // Miniflare simulates forwarding; this never sends SMTP or uses provisioned storage.
-const output = ".cloudflare/output/v0/workers/default";
+const output = ".cloudflare/output/v1/workers/default";
 const { encryptedPdf, password: syntheticPdfPassword } = JSON.parse(
   await readFile(".cloudflare/attachment-fixture.json", "utf8"),
 );
