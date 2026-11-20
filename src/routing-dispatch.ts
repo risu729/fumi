@@ -748,13 +748,31 @@ async function attempt(
   if (row && ["handled", "accepted", "not_applicable", "rejected", "dead"].includes(row.state))
     return row.state;
   if (row?.state === "uncertain" || row?.state === "sending") return row.state;
+  const sourceChanged = (existing: Outbox) =>
+    existing.source_sha256 !== item.rawSha256 ||
+    existing.extraction_updated_at !== item.extractionUpdatedAt ||
+    existing.manifest_key !== item.manifestKey;
+  const grantChanged = (existing: Outbox) => JSON.stringify(fields) !== existing.grant_fields_json;
+  const classificationChanged = (existing: Outbox) => {
+    if (lane !== "action" || !resolution) return false;
+    const frozen = JSON.parse(existing.payload_json) as {
+      classification?: { category: string | null; urgent: boolean };
+    };
+    return (
+      !frozen.classification ||
+      frozen.classification.category !== resolution.category ||
+      frozen.classification.urgent !== resolution.urgent
+    );
+  };
+  // A payload that no attempt has claimed has never left fumi, so it is rebuilt
+  // from the current decision. Only an attempted payload stays frozen and holds.
   if (
     row &&
     row.attempts === 0 &&
     (row.revision !== config.artifact.revision ||
-      row.source_sha256 !== item.rawSha256 ||
-      row.extraction_updated_at !== item.extractionUpdatedAt ||
-      row.manifest_key !== item.manifestKey)
+      sourceChanged(row) ||
+      grantChanged(row) ||
+      classificationChanged(row))
   ) {
     await db
       .prepare(
@@ -767,13 +785,7 @@ async function attempt(
       .bind(operationId)
       .first<Outbox>();
   }
-  if (
-    row &&
-    (row.source_sha256 !== item.rawSha256 ||
-      row.extraction_updated_at !== item.extractionUpdatedAt ||
-      row.manifest_key !== item.manifestKey)
-  )
-    return "held";
+  if (row && sourceChanged(row)) return "held";
   const now = runtime.now?.() ?? Date.now();
   if (row && row.next_attempt_at > now && row.state !== "revoked") return row.state;
   const transport = transportFor(env, runtime);
@@ -792,18 +804,7 @@ async function attempt(
     )
       return "held";
   }
-  if (row && JSON.stringify(fields) !== row.grant_fields_json) return "held";
-  if (row && lane === "action" && resolution) {
-    const frozen = JSON.parse(row.payload_json) as {
-      classification?: { category: string | null; urgent: boolean };
-    };
-    if (
-      !frozen.classification ||
-      frozen.classification.category !== resolution.category ||
-      frozen.classification.urgent !== resolution.urgent
-    )
-      return "held";
-  }
+  if (row && (grantChanged(row) || classificationChanged(row))) return "held";
   if (!row) {
     const input = await projectedInput(env, item, fields);
     const body = canonicalOfferJson({

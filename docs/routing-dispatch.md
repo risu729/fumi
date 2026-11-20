@@ -188,7 +188,9 @@ An accepted operation therefore cannot replay when a plugin or endpoint is upgra
 The first bounded payload and its request hash are frozen before any network call.
 Retries reuse them. A changed source revision, grant or symbolic decision is held
 when it conflicts with an attempted payload; it cannot silently send stale content
-or mutate the meaning of an idempotency key. Current source revisions are retained
+or mutate the meaning of an idempotency key. A frozen payload that no attempt has
+claimed has never left fumi; it is rebuilt from the current revision, source, grant
+and decision instead of being held. Current source revisions are retained
 in the source job even when such a conflict is held.
 
 An immutable owner request contains `schemaVersion: 1`, `kind: "owner"`,
