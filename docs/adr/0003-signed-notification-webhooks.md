@@ -68,6 +68,7 @@ agent specified to make them implementable; they are not confirmed by the owner.
      `WEBHOOK_ORIGINS` allowlist, so MCP Events behavior does not change.
      Routing secret rotation stays a new `authRef` with a new generation. It does
      not use dual signatures.
+
 2. **The routing `webhook` adapter is signed and retries automatically.** It signs
    with a `whsec_` secret resolved through `authRef` and sends the existing
    `operationId` as `webhook-id`. The receiver deduplicates by `webhook-id`.
@@ -82,6 +83,7 @@ agent specified to make them implementable; they are not confirmed by the owner.
      attempted are still revoked and rebuilt as today.
    - Agent: the receiver keeps deduplication state for at least 24 hours, which is
      longer than the retry span.
+
 3. **The notification body carries identifiers and classification only.**
    - It adds the message ID that `read_email` accepts (`mail_<ingestId>`).
    - It keeps the classification. The receiver treats `category` as a hint from
@@ -91,6 +93,7 @@ agent specified to make them implementable; they are not confirmed by the owner.
    - Agent: this applies to the `webhook` adapter. Configuration validation
      rejects a non-empty `destination.offerFields` for it. Strict notification
      adapters and owner lanes, such as Kogane, keep their granted `input`.
+
 4. **The Grok Bot proxy is a Worker built by this project's agents, not by the
    Grok Bot side.**
    - It verifies the signature and deduplicates by `webhook-id`.
@@ -99,6 +102,7 @@ agent specified to make them implementable; they are not confirmed by the owner.
    - Fumi still sends to one URL and selects no account.
    - Its repository, deduplication storage and active-account source need a
      separate approved design.
+
 5. **MCP Events carries the routing result instead of every mail, later.**
    - A post-routing event replaces `email.received` and `email.ready` for
      notification purposes.
@@ -106,6 +110,7 @@ agent specified to make them implementable; they are not confirmed by the owner.
      deferred MCP Events item resumes, not now. Constraints:
      - it must not require the operator scope `mail:routing`;
      - it must be produced even when the routing destination is `null`.
+
 6. **No permanent subscribe tools for now.**
    - ChatGPT subscribes through the `events/subscribe` method, not a tool.
    - The Grok Bot uses the routing webhook.
