@@ -1,4 +1,5 @@
 import { cursorFor, type EventName, type StoredEvent, type Subscription } from "./event-store.ts";
+import { standardWebhookHeaders } from "./webhook-signature.ts";
 
 /** An adapter must validate addresses at connection time and refuse redirects, or
  * use createAllowlistedWebhookHttp with administrator-controlled trusted origins. */
@@ -62,22 +63,6 @@ export function createAllowlistedWebhookHttp(
     },
   };
 }
-export function decodeSigningSecret(secret: string): Uint8Array<ArrayBuffer> {
-  if (!/^whsec_[A-Za-z0-9+/]+={0,2}$/.test(secret)) throw new Error("Invalid signing secret");
-  let bytes: Uint8Array<ArrayBuffer>;
-  try {
-    bytes = Uint8Array.from(atob(secret.slice(6)), (character) => character.charCodeAt(0));
-  } catch {
-    throw new Error("Invalid signing secret");
-  }
-  if (
-    bytes.length < 24 ||
-    bytes.length > 64 ||
-    btoa(String.fromCharCode(...bytes)) !== secret.slice(6)
-  )
-    throw new Error("Invalid signing secret");
-  return bytes;
-}
 export async function signedHeaders(
   secret: string,
   id: string,
@@ -85,24 +70,9 @@ export async function signedHeaders(
   subscriptionId: string,
   now: number,
 ): Promise<Headers> {
-  const timestamp = String(Math.floor(now / 1000));
-  const key = await crypto.subtle.importKey(
-    "raw",
-    decodeSigningSecret(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = new Uint8Array(
-    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${timestamp}.${body}`)),
-  );
-  return new Headers({
-    "Content-Type": "application/json",
-    "webhook-id": id,
-    "webhook-timestamp": timestamp,
-    "webhook-signature": `v1,${btoa(String.fromCharCode(...signature))}`,
-    "X-MCP-Subscription-Id": subscriptionId,
-  });
+  const headers = await standardWebhookHeaders(secret, id, body, now);
+  headers.set("X-MCP-Subscription-Id", subscriptionId);
+  return headers;
 }
 export function constantTimeEqual(left: string, right: string): boolean {
   const a = new TextEncoder().encode(left);
