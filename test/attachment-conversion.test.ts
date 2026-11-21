@@ -851,6 +851,50 @@ describe("private bounded attachment conversion", () => {
     });
     expect(upload).toHaveBeenCalledTimes(1);
   });
+  it("keeps a paid OCR item whose PDF password arrived in the last lookup round", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    let available = false;
+    const upload = vi.fn(async () => ({ id: "last-round-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "last-round-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "last-chunk", text: "PDF total 45,678 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => (available ? [syntheticPdfPassword] : []),
+    });
+    for (let round = 0; round < 7; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one hourly password retry.
+      await repairAttachmentConversions(enabled, now + round * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_required", password_checks: 7 });
+    // The password arrives for the eighth and last lookup round, and the PDF is uploaded once.
+    available = true;
+    await repairAttachmentConversions(enabled, now + 7 * 3600000);
+    expect(await row()).toMatchObject({ state: "submitted", password_checks: 8 });
+    // Collecting the paid result re-resolves the password for redaction; it is not a new guess.
+    await repairAttachmentConversions(enabled, now + 7 * 3600000 + 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+      password_checks: 8,
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
   it("polls a submitted OCR item once before applying the 24-hour limit", async () => {
     const completed = await source("application/pdf", encode("%PDF synthetic paused scan"));
     const queued = await source("application/pdf", encode("%PDF synthetic slow scan"), "slow");

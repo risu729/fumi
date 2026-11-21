@@ -185,8 +185,11 @@ returns to `pending` as `temporarily_unavailable` (a submitted OCR item stays
 `submitted` within its 24-hour limit) and is retried after five minutes, like any other
 transient failure. A failure after the lookup, such as saving extracted
 members, uses the round. After eight rounds the item is blocked as
-`password_attempt_budget`. Further attempts require a deliberate policy revision. Other
-permanent failures are not retried automatically.
+`password_attempt_budget`. Further attempts require a deliberate policy revision. A
+submitted encrypted PDF re-resolves its password to redact the OCR text; that lookup
+uses no round, so a password found in the eighth round still collects the paid result,
+and its waits are bounded by the 24-hour submission limit instead. Other permanent
+failures are not retried automatically.
 
 zip.js reports a wrong password and a corrupt encrypted entry with the same errors: a
 synthetic check on 2026-11-21 10:15 UTC with zip.js 2.24.0 found that a correct password

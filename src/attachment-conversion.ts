@@ -452,7 +452,10 @@ async function processRow(
           CONVERSION_LIMITS.sourceBytes,
           row.source_size,
         );
-        secrets = await lookupPasswords();
+        // Re-resolving the password that already unlocked this upload is not a new guess, so it
+        // uses no round: a password found in the last round must not discard the paid result.
+        // The 24-hour submission limit bounds these hourly waits instead.
+        secrets = await candidates(env, row);
         await unlockPdf(env.PDF_LOADER, original, secrets);
         output.bytes = conversionText(new TextDecoder().decode(output.bytes), secrets);
       }
