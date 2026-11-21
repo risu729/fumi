@@ -33,6 +33,10 @@ bounded reads, digests and projection transaction, additionally fenced to the
 current processing instance and present original. Replays reuse a ready projection.
 Index failures retain MIME success and a projection retry for scheduled repair;
 they do not emit another lifecycle event or invoke paid conversion/semantic calls.
+The step skips its Workflow retries when R2 answers for a selected object but the
+object is missing, over its read bound, not its recorded SHA-256 or not UTF-8 body
+text, because reading the same object again gives the same answer. D1 and R2 request
+failures still use the step retries.
 
 The scheduled repair indexes at most three extracted messages per invocation. It selects
 present Email Routing sources before historical Gmail sources, then uses remaining
