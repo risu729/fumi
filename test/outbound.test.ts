@@ -572,7 +572,19 @@ describe("durable outbound submission in workerd", () => {
         "default-reply-new",
       ),
     ).rejects.toMatchObject({ code: "reply_not_found" });
+    // Previews and drafts take their default sender from a current extraction only.
+    await expect(
+      previewMail(ctx, domainPrincipal, { ...noSender, reply_message_id: rawKey }),
+    ).rejects.toMatchObject({ code: "reply_sender_unavailable" });
+    await expect(
+      createDraft(ctx, domainPrincipal, { ...noSender, reply_message_id: rawKey }),
+    ).rejects.toMatchObject({ code: "reply_sender_unavailable" });
     expect(send).toHaveBeenCalledTimes(3);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS operations FROM outbound_operations WHERE idempotency_key = 'default-reply-new'",
+      ).first(),
+    ).toEqual({ operations: 0 });
     await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources WHERE raw_key = ?")
       .bind(rawKey)
       .run();

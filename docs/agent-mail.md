@@ -267,7 +267,9 @@ quote. Composition, drafts and previews use only a current parent extraction (se
 [tools and bounded results](#tools-and-bounded-results)): when the parent's extraction
 is blocked, or its original has gone missing or changed, a reply, draft or preview fails
 with `reply_not_found` and a forward with `message_not_found`, as for a parent that was
-never extracted. Reply drafts saved before this change have no `quote` field and are
+never extracted. A draft or preview that omits `from_address` fails earlier with
+`reply_sender_unavailable`, because its default sender also needs a current extraction.
+Reply drafts saved before this change have no `quote` field and are
 quoted when sent.
 
 Idempotency compares `request_hash`, a digest of the caller's own input, draft
