@@ -102,7 +102,9 @@ provider IDs separately from RFC Message-ID until their relationship is verified
 
 Replies use stored parent headers for In-Reply-To/References and retain a local thread
 link. Gmail-style reply quoting and forward blocks are composed on the server; see
-[reply quoting and forwarding](agent-mail.md#reply-quoting-and-forwarding). MCP new
+[reply quoting and forwarding](agent-mail.md#reply-quoting-and-forwarding). Quotes,
+forwarded blocks, original attachments and `copy_attachment` come only from a current
+extraction of the parent, one whose original is still present and unchanged. MCP new
 sends and later replies use the outbound API, not the live Email Routing
 `message.reply()` object. That API is limited to the incoming event and has sender,
 DMARC and reply-count restrictions.

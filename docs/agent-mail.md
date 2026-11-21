@@ -111,7 +111,11 @@ extraction is later blocked (such as `source_changed` on a retry), or its origin
 missing or changes, inline content is `null`, `read_attachment_supported` is `false`,
 `read_attachment` fails with `extraction_incomplete`, and the downloads fail with
 `content_unavailable` (HTTP 404 `mail_unavailable`), even though the old derived objects
-remain in R2. `/raw` still serves the archived original while R2 holds it. A message ID
+remain in R2. `/raw` still serves the archived original while R2 holds it.
+`search_mail_content` returns no match from such a message
+([content search](content-search.md)). `copy_attachment` fails with
+`attachment_not_found`, and replies and forwards follow
+[reply quoting and forwarding](#reply-quoting-and-forwarding). A message ID
 whose external ID matches more than one catalog source fails with `message_conflict`
 instead of choosing one.
 
@@ -255,12 +259,18 @@ First line
 - `preview_email` has no forward mode and there are no forward drafts, so a
   forward's composed block is visible only in its sent record.
 
-Drafts store the author's own input, including `quote`. `preview_email`, sends
-and the sent archive (`input.json`, `read_email` on `sent_` IDs) contain the
-composed message, so the archive matches what was submitted. A parent whose
-extracted body is missing or fails its digest check fails with
-`original_unavailable` rather than sending without the quote. Reply drafts saved
-before this change have no `quote` field and are quoted when sent.
+Drafts store the author's own input, including `quote`. `preview_email`, sends and the
+sent archive (`input.json`, `read_email` on `sent_` IDs) contain the composed message,
+so the archive matches what was submitted. A parent whose extracted body is missing or
+fails its digest check fails with `original_unavailable` rather than sending without the
+quote. Composition, drafts and previews use only a current parent extraction (see
+[tools and bounded results](#tools-and-bounded-results)): when the parent's extraction
+is blocked, or its original has gone missing or changed, a reply, draft or preview fails
+with `reply_not_found` and a forward with `message_not_found`, as for a parent that was
+never extracted. A draft or preview that omits `from_address` fails earlier with
+`reply_sender_unavailable`, because its default sender also needs a current extraction.
+Reply drafts saved before this change have no `quote` field and are
+quoted when sent.
 
 Idempotency compares `request_hash`, a digest of the caller's own input, draft
 revision and forwarded parent, before anything is composed. A same-key retry of a
@@ -269,7 +279,11 @@ unreadable or a later fumi release composes differently. `input_hash` remains th
 digest of the archived `input.json`. Operations created before `request_hash`
 existed (migration `0015`) compare `input_hash` with the digest of the uncomposed
 input, which is how they were hashed. A `prepared` operation resumes from its
-archived `input.json` and is never composed again.
+archived `input.json` and is never composed again. The current-extraction check runs
+when composing, after this lookup, so a parent that stops being current does not
+change a request's digest or stop a same-key retry. The send paths still read reply
+headers, and the default sender when `from_address` is omitted, from any completed
+extraction for that reason; a new send then fails at composition.
 
 The digest includes the reply's `In-Reply-To` and `References`, which are derived
 from the parent's stored headers. The `References` rule above changed on

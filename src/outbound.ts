@@ -1,6 +1,7 @@
 import type { MailPrincipal } from "./principal.ts";
 import { eventStatement } from "./event-store.ts";
 import { parseReceipt } from "./receipt-schema.ts";
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 import {
   ComposeError,
   composeForward,
@@ -291,7 +292,7 @@ async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
   input: unknown,
-  options: { forward?: boolean } = {},
+  options: { forward?: boolean; currentParent?: boolean } = {},
 ): Promise<NormalizedMail> {
   const item = record(input);
   exact(item, [
@@ -324,10 +325,12 @@ async function normalize(
     if (item["reply_message_id"] === undefined) fail("from_address_required");
     scope(principal, "mail:read");
     const replyKey = text(item["reply_message_id"], 512, true);
+    // The default sender is part of the request hash like the reply headers below, so sends
+    // accept any completed extraction here too; compose() requires a current one.
     const source = await db(ctx)
       .prepare(`SELECT s.receipt_snapshot FROM archive_sources s
-      JOIN mail_extractions e ON e.raw_key = s.raw_key AND e.raw_sha256 = s.raw_sha256
-      WHERE s.raw_key = ? AND s.raw_state = 'present' AND s.receipt_state = 'valid' AND e.status = 'complete'`)
+      JOIN mail_extractions e ON e.raw_key = s.raw_key
+      WHERE s.raw_key = ? AND s.receipt_state = 'valid' AND ${options.currentParent ? CURRENT_EXTRACTION_SQL : "e.status = 'complete'"}`)
       .bind(replyKey)
       .first<{ receipt_snapshot: string | null }>();
     const receipt = source?.receipt_snapshot
@@ -407,9 +410,14 @@ async function normalize(
   if (item["reply_message_id"] !== undefined) {
     scope(principal, "mail:read");
     reply = text(item["reply_message_id"], 512, true);
+    // Sends read the parent's headers from any completed extraction, as they always have:
+    // they are part of the request hash, which a same-key retry must reproduce after the
+    // parent stops being current. compose() requires a current extraction for new work.
     const parent = await db(ctx)
       .prepare(
-        "SELECT metadata_json FROM mail_extractions WHERE raw_key = ? AND status = 'complete'",
+        `SELECT e.metadata_json FROM mail_extractions e
+        ${options.currentParent ? "JOIN archive_sources s ON s.raw_key = e.raw_key" : ""}
+        WHERE e.raw_key = ? AND ${options.currentParent ? CURRENT_EXTRACTION_SQL : "e.status = 'complete'"}`,
       )
       .bind(reply)
       .first<{ metadata_json: string }>();
@@ -534,7 +542,7 @@ async function compose(
 ): Promise<NormalizedMail> {
   const parentKey = forward ?? input.reply_message_id;
   if (parentKey === undefined) return withinMessageSize(input);
-  let parent: ParentMail;
+  let parent: ParentMail | null;
   try {
     parent = await loadParent(
       db(ctx),
@@ -546,6 +554,8 @@ async function compose(
     if (error instanceof ComposeError) fail(error.code);
     throw error;
   }
+  // The codes these paths give a parent without a completed extraction.
+  if (!parent) fail(forward === undefined ? "reply_not_found" : "message_not_found");
   const author = {
     ...(input.payload.text === undefined ? {} : { text: input.payload.text }),
     ...(input.payload.html === undefined ? {} : { html: input.payload.html }),
@@ -591,7 +601,9 @@ async function previewMailImpl(ctx: OutboundContext, principal: MailPrincipal, i
   if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
     fail("forbidden");
   return {
-    input: publicMail(await compose(ctx, await normalize(ctx, principal, input))),
+    input: publicMail(
+      await compose(ctx, await normalize(ctx, principal, input, { currentParent: true })),
+    ),
     policy: { allowed: true },
     submitted: false,
   };
@@ -683,7 +695,8 @@ async function bindArchivedAttachmentImpl(
     fail("invalid_attachment");
   const source = await db(ctx)
     .prepare(
-      "SELECT attachments_json FROM mail_extractions WHERE raw_key = ? AND status = 'complete'",
+      `SELECT e.attachments_json FROM mail_extractions e JOIN archive_sources s ON s.raw_key = e.raw_key
+      WHERE e.raw_key = ? AND ${CURRENT_EXTRACTION_SQL}`,
     )
     .bind(rawKey)
     .first<{ attachments_json: string }>();
@@ -735,7 +748,7 @@ function draftInput(input: NormalizedMail): MailInput {
 
 async function createDraftImpl(ctx: OutboundContext, principal: MailPrincipal, input: unknown) {
   scope(principal, "mail:draft");
-  const normalized = await normalize(ctx, principal, input);
+  const normalized = await normalize(ctx, principal, input, { currentParent: true });
   const draftId = `draft_${crypto.randomUUID()}`;
   const now = Date.now();
   await db(ctx)
@@ -788,7 +801,7 @@ async function updateDraftImpl(
 ) {
   scope(principal, "mail:draft");
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail("invalid_revision");
-  const normalized = await normalize(ctx, principal, input);
+  const normalized = await normalize(ctx, principal, input, { currentParent: true });
   const original = await loadDraft(ctx, principal, draftId);
   const now = Date.now();
   const result = await db(ctx)
@@ -1002,6 +1015,7 @@ async function forwardMailImpl(
 ) {
   scope(principal, "mail:read");
   scope(principal, "mail:send");
+  // Like reply headers: compose() requires a current extraction, after the same-key lookup.
   const parent = await db(ctx)
     .prepare("SELECT raw_key FROM mail_extractions WHERE raw_key = ? AND status = 'complete'")
     .bind(parentRawKey)
