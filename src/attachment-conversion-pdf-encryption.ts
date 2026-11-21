@@ -4,7 +4,10 @@ const unescapeNames = (text: string) =>
   text.replace(/#([a-f0-9]{2})/gi, (_, hex: string) =>
     String.fromCharCode(Number.parseInt(hex, 16)),
   );
-const mentionsEncrypt = (text: string) => /\/Encrypt\b/.test(unescapeNames(text));
+// LibPDF decodes a name with a `#xx` escape as UTF-8, which drops a leading byte order mark.
+const mentionPattern = /\/(?:\xef\xbb\xbf)?Encrypt\b/;
+const isEncryptName = (name: string) => /^(?:\xef\xbb\xbf)?Encrypt$/.test(unescapeNames(name));
+const mentionsEncrypt = (text: string) => mentionPattern.test(unescapeNames(text));
 const regular = (char: string | undefined) =>
   char !== undefined && !"\0\t\n\f\r ()<>[]{}/%".includes(char);
 const space = (char: string | undefined) => char !== undefined && "\0\t\n\f\r ".includes(char);
@@ -59,7 +62,7 @@ function dictionaryEncrypt(text: string, start: number) {
       if (index < 0) return undefined;
     } else if (char === "/") {
       const end = nameEnd(text, index + 1, limit);
-      found ||= unescapeNames(text.slice(index + 1, end)) === "Encrypt";
+      found ||= isEncryptName(text.slice(index + 1, end));
       index = end;
     } else index++;
   }
@@ -78,7 +81,7 @@ function lexicalEncrypt(text: string) {
       index = next;
     } else if (char === "/") {
       const end = nameEnd(text, index + 1, text.length);
-      if (unescapeNames(text.slice(index + 1, end)) === "Encrypt") return true;
+      if (isEncryptName(text.slice(index + 1, end))) return true;
       index = end;
     } else if (!regular(char)) index++;
     else {
@@ -104,6 +107,8 @@ function structuralEncrypt(text: string, unescaped: string) {
     if (trailers.length === LIMITS.trailers) return true;
     const limit = Math.min(text.length, index + LIMITS.dictionaryChars);
     const at = skipSpaceAndComments(text, index + "trailer".length, limit);
+    // A decoy `trailer` in a table entry line could otherwise stand in for this one.
+    if (at === limit && limit < text.length) return true;
     const dictionary = text.startsWith("<<", at);
     if (dictionary && dictionaryEncrypt(text, at) !== false) return true;
     trailers.push({ at: index, dictionary });
@@ -142,6 +147,6 @@ export function isEncryptedPdf(bytes: Uint8Array, mime: string) {
   if (mime !== "application/pdf") return false;
   const text = new TextDecoder("latin1").decode(bytes);
   const unescaped = unescapeNames(text);
-  if (!/\/Encrypt\b/.test(unescaped)) return false;
+  if (!mentionPattern.test(unescaped)) return false;
   return lexicalEncrypt(text) || structuralEncrypt(text, unescaped);
 }

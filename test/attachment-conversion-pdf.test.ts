@@ -63,6 +63,20 @@ const hiddenSections = {
   "classic trailer inside a literal string": classicSection("(\n", ")\n"),
   "classic trailer inside a hex string": classicSection("<\n"),
   "classic trailer behind a bare stream keyword": classicSection("stream\n", "", "%endstream\n"),
+  // LibPDF decodes an escaped name as UTF-8, which drops a leading byte order mark.
+  "cross-reference stream /Encrypt name behind an escaped byte order mark": relocated(
+    "",
+    "",
+    xrefObject.replace("/Encrypt ", "/#EF#BB#BFEncrypt "),
+  ),
+  "classic trailer /Encrypt name behind a raw byte order mark and an escape": classicSection(
+    "",
+  ).replace("/Encrypt ", "/\xef\xbb\xbfEncryp#74 "),
+  // An entry line ends with arbitrary bytes, so the first `trailer` after `xref` may be a decoy.
+  "classic trailer more than 64 KiB after its keyword, behind a decoy in a table entry":
+    classicSection("(\n", ")\n")
+      .replace("trailer\n<<", `trailer\n${" ".repeat(65_536)}<<`)
+      .replace(" 65535 f \n", " 65535 f trailer << >>\n"),
 };
 describe("encrypted PDF detection", () => {
   it("ignores the token in stream data, strings and comments of an unencrypted PDF", () => {
