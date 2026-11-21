@@ -42,7 +42,10 @@ This is a single-owner inbound archive: `mail:read` permits all inbound records.
 Drafts, staged attachments, outgoing records and outbound notifications remain
 principal-owned. Scope checks run on the server even if a caller bypasses tool
 discovery. Missing or malformed grants fail closed. Requests and downloads are
-uncacheable; HTML is downloaded as opaque content and never rendered.
+uncacheable; HTML is downloaded as opaque content and never rendered. A
+`/api/mail/*` download the caller cannot read, such as a missing message, a
+`sent_` record of another principal or any message without `mail:read`, answers
+HTTP 404 with `{"error":{"code":"mail_unavailable"}}`.
 
 For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
