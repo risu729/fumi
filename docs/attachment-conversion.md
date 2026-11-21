@@ -239,7 +239,8 @@ checks in `src/attachment-conversion-pdf-encryption.ts` finds it:
 - the dictionary after every `trailer` keyword, wherever it appears;
 - the classic table and trailer or the cross-reference stream dictionary at every
   `startxref`, `/Prev` and `/XRefStm` offset found anywhere in the bytes, including
-  inside strings, comments and streams, because a parser seeks to those offsets.
+  inside strings, comments and streams, because a parser seeks to those offsets; a
+  `/Prev` or `/XRefStm` name may also start with the byte order mark.
 
 It is also routed to decryption when it does not start with `%PDF-`; has no offset; has
 an offset outside the file, or one that, after white-space, is not `xref` followed later

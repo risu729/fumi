@@ -109,6 +109,9 @@ describe("encrypted PDF detection", () => {
     const newest = `7 0 obj\n<< /Type /XRef /Size 8 /Index [7 1] /W [1 2 2] /Root 2 0 R /Prev ${xrefAt + 2} /Length 5 >>\nstream\n${entry}\nendstream\nendobj\n`;
     const text = `${hidden}${newest}startxref\n${hidden.length}\n%%EOF\n`;
     expect(isEncryptedPdf(latin1(text), "application/pdf")).toBe(true);
+    // LibPDF also follows a /Prev key spelled with a byte order mark.
+    const bom = text.replace("/Prev ", "/#EF#BB#BFPrev ");
+    expect(isEncryptedPdf(latin1(bom), "application/pdf")).toBe(true);
     // Without /Prev no offset reaches the string, so a parser never reads that section.
     const unreachable = text.replace(`/Prev ${xrefAt + 2} `, "");
     expect(isEncryptedPdf(latin1(unreachable), "application/pdf")).toBe(false);
