@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  MAX_SEARCH_FILTERS,
   readMail,
   readMailAttachment,
   readMailResource,
@@ -155,6 +156,46 @@ describe("bounded private mail reads", () => {
     expect(await ids("subject:\uff30\uff24\uff26")).toEqual(["mail_fullwidth"]);
     expect(await ids("subject:\u00c4nderung")).toEqual(["mail_latin"]);
     expect(await ids("subject:\u00e4nderung")).toEqual(["mail_latin"]);
+  });
+  it("binds the most filters D1 allows next to every other search parameter", async () => {
+    await insert("latin", "2026-11-10T00:00:00.000Z", { subject: "Änderung" });
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) => Array.from({ length: count }, () => "subject:Ä");
+    const most = filters(MAX_SEARCH_FILTERS).join(" ");
+    expect((await searchMail(env, principal, { query: most })).emails.map((m) => m.id)).toEqual([
+      "mail_latin",
+    ]);
+    // The worst case adds an archive source, ten labels and a cursor.
+    const labels = Array.from({ length: 10 }, (_, index) => `LABEL_${index}`);
+    const cursor = btoa(
+      String.fromCharCode(
+        ...new TextEncoder().encode(
+          JSON.stringify({
+            snapshot: Number.MAX_SAFE_INTEGER,
+            beforeTime: "9999-12-31T00:00:00.000Z",
+            beforeId: "~",
+            query: JSON.stringify([most, "email_routing", labels]),
+          }),
+        ),
+      ),
+    );
+    const worst = await searchMail(env, principal, {
+      query: most,
+      archive_source: "email_routing",
+      label_ids: labels,
+      next_page_token: cursor,
+      max_results: 50,
+    });
+    expect(worst.emails).toEqual([]);
+    await expect(
+      searchMail(env, principal, { query: filters(MAX_SEARCH_FILTERS + 1).join(" ") }),
+    ).rejects.toMatchObject({ code: "query_too_long" });
+    // The cap counts filters, not bound values: has:attachment binds none.
+    await expect(
+      searchMail(env, principal, {
+        query: Array.from({ length: MAX_SEARCH_FILTERS + 1 }, () => "has:attachment").join(" "),
+      }),
+    ).rejects.toMatchObject({ code: "query_too_long" });
   });
   it("never splits a surrogate pair at the inline preview limit", async () => {
     const id = await insert("emoji", "2026-11-11T00:00:00.000Z");
