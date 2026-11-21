@@ -299,8 +299,11 @@ export async function repairContentSearch(env: MailReadEnvironment, now = Date.n
   for (const row of rows) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- Bound decoded mail memory to one message.
-      await indexMailContent(env, row);
-      indexed += 1;
+      if (await indexMailContent(env, row)) indexed += 1;
+      // The extraction or conversion changed after this pass read it, and its trigger
+      // removed the projection. Nothing was published, and the next pass selects the
+      // source again while its extraction stays complete.
+      else deferred += 1;
     } catch {
       deferred += 1;
       // oxlint-disable-next-line no-await-in-loop -- Persist a fixed retry outcome before continuing.

@@ -120,6 +120,48 @@ async function failedEvents(instanceId: string) {
     .first("n");
 }
 
+// A catalog row that admits lifecycle events for the source. Its sizes, digest and
+// receipt state differ from what observing the stored objects writes, so a catalog
+// write by the attempt changes the row.
+async function notifyingSource(source: { id: string; key: string }) {
+  await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (
+    source_kind, source_namespace, external_id, raw_key, receipt_key, received_at,
+    raw_state, receipt_state, observed_pass, observed_revision, notify_events
+  ) VALUES ('email_routing', 'ingress-v1', ?, ?, ?, ?, 'present', 'missing', 0, 0, 1)`)
+    .bind(source.id, source.key, source.key.replace(/raw\.eml$/, "receipt.json"), receivedAt)
+    .run();
+  return () =>
+    env.MAIL_CATALOG.prepare("SELECT * FROM archive_sources WHERE raw_key=?")
+      .bind(source.key)
+      .first();
+}
+
+// A completed extraction, so only the processing ledger decides whether a ready event is written.
+async function completedExtraction(source: { key: string; sha256: string; instanceId: string }) {
+  await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (
+    raw_key, extractor_version, raw_sha256, raw_size, instance_id, status, metadata_json,
+    attachments_json, attachment_count, body_json_key, manifest_key, updated_at
+  ) VALUES (?, 'mime-v1', ?, ?, ?, 'complete', '{}', '[]', 0, ?, ?, 0)`)
+    .bind(
+      source.key,
+      source.sha256,
+      bytes.byteLength,
+      source.instanceId,
+      `synthetic/body-json/${source.sha256}`,
+      `synthetic/manifest/${source.sha256}`,
+    )
+    .run();
+}
+
+// Lifecycle events for the source from any of its processing attempts.
+async function processingEvents(source: { id: string }) {
+  return env.MAIL_CATALOG.prepare(
+    "SELECT COUNT(*) n FROM mail_events WHERE name IN ('email.ready','email.processing_failed') AND json_extract(data_json,'$.ingestId')=?",
+  )
+    .bind(source.id)
+    .first("n");
+}
+
 beforeAll(async () => {
   await applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS);
 });
@@ -592,6 +634,8 @@ describe("mail processing Workflows in workerd", () => {
 
   it("ends a superseded attempt at its stale check without retries or ledger writes", async () => {
     const source = await putSource(true);
+    const catalog = await notifyingSource(source);
+    const seeded = await catalog();
     const newer = await ledgerRow(source.key, 1, "running");
     const reads = countLedgerReads();
     await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
@@ -605,14 +649,15 @@ describe("mail processing Workflows in workerd", () => {
     // One stale check and one failure lookup; five retries would add five stale checks.
     expect(reads()).toBe(2);
     expect(await job(source.key)).toEqual(newer);
-    expect(await failedEvents(source.instanceId)).toBe(0);
-    expect(
-      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM archive_sources").first("n"),
-    ).toBe(0);
+    // Neither the stale attempt nor the newer attempt's row gets a failure event.
+    expect(await processingEvents(source)).toBe(0);
+    expect(await catalog()).toEqual(seeded);
   });
 
   it("ends a fenced completion without retries and keeps the terminal ledger", async () => {
     const source = await putSource(true);
+    await notifyingSource(source);
+    await completedExtraction(source);
     // A repair check or operator already ended this attempt after its extraction.
     const failed = await ledgerRow(source.key, 0, "failed");
     const reads = countLedgerReads();
@@ -642,7 +687,7 @@ describe("mail processing Workflows in workerd", () => {
   });
 
   it("still retries a D1 failure in the stale check", async () => {
-    const source = await putSource();
+    const source = await putSource(true);
     await ledgerRow(source.key, 0, "running");
     const reads = countLedgerReads(1);
     await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
