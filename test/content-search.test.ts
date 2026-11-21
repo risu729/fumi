@@ -8,7 +8,7 @@ import {
   indexContentSearchSource,
 } from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
-import { readMailResource } from "../src/mail-read.ts";
+import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
@@ -427,6 +427,47 @@ describe("bounded content retrieval", () => {
     await expect(searchMailContent(env, reader, { query: "ab" }, base)).rejects.toMatchObject({
       code: "invalid_content_query",
     });
+  });
+  it("binds the most metadata filters D1 allows next to the phrase and cursor", async () => {
+    await insert("first", "bounded filter needle");
+    await insert("second", "bounded filter needle");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
+    ).run();
+    await repairContentSearch(env);
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) =>
+      Array.from({ length: count }, () => "subject:\u00c4").join(" ");
+    const first = await searchMailContent(
+      env,
+      reader,
+      { query: "needle", filters: filters(MAX_SEARCH_FILTERS), max_results: 1 },
+      base,
+    );
+    expect(first.matches).toHaveLength(1);
+    const second = await searchMailContent(
+      env,
+      reader,
+      {
+        query: "needle",
+        filters: filters(MAX_SEARCH_FILTERS),
+        max_results: 1,
+        next_page_token: first.next_page_token!,
+      },
+      base,
+    );
+    expect([...first.matches, ...second.matches].map((m) => m.message_id).sort()).toEqual([
+      "mail_first",
+      "mail_second",
+    ]);
+    await expect(
+      searchMailContent(
+        env,
+        reader,
+        { query: "needle", filters: filters(MAX_SEARCH_FILTERS + 1) },
+        base,
+      ),
+    ).rejects.toMatchObject({ code: "query_too_long" });
   });
   it("returns the entire matching phrase when it exceeds the FTS snippet token limit", async () => {
     const query = "a".repeat(100);

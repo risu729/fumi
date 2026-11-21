@@ -77,22 +77,29 @@ Mail, headers, attachment filenames and HTML are untrusted data. Tool annotation
 are client hints, not authorization.
 
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
-`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
-`has:attachment`. Quote values containing spaces. `from:`, `to:` and `subject:`
-match substrings and ignore ASCII letter case. Other characters, such as full-width
-`ＰＤＦ` or `Ä`, match stored text as written in the filter or in lowercase:
-`subject:Änderung` matches `Änderung` and `änderung`, but `subject:änderung` does not
-match `Änderung`. It searches extracted metadata,
-not full bodies or attachments. Without a source filter it includes live and
-imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
-Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
-live ingress has `INBOX`. Gmail SENT messages therefore require
-`archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For compatibility,
-`SENT` without `archive_source` still lists the caller's outgoing operation records
-and accepts only an empty query. Continuation tokens bind query, source and labels;
-changing filters requires a new search. Other Gmail query syntax is rejected.
-Pending/blocked extraction remains visible. Gmail threads use retained account and
-thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
+`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and `has:attachment`.
+Quote values containing spaces. `from:`, `to:` and `subject:` match substrings and
+ignore ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match
+stored text as written in the filter or in lowercase: `subject:Änderung` matches
+`Änderung` and `änderung`, but `subject:änderung` does not match `Änderung`. A query has
+at most 1,000 characters and 33 operators, counting repeated ones; a longer query or
+more operators fail with `query_too_long`, and `get_profile` reports the operator cap as
+`limits.search_filters`. The cap keeps every search, including the `filters` of
+`search_mail_content` and `search_mail_semantic`, within D1's 100 bound parameters per
+statement: a `from:`, `to:` or `subject:` value with uppercase non-ASCII binds two
+values, and `search_mail_semantic` binds up to 33 of its own (item key, policy, ten
+approved sources, archive source and two per label). Operators join as a balanced `AND`
+tree, so 33 of them nest six levels deep instead of 33 and stay within D1's expression
+depth limit of 100. It searches extracted metadata, not full bodies or attachments.
+Without a source filter it includes live and imported archive sources. `archive_source`
+can be `all`, `gmail` or `email_routing`. Up to ten `label_ids` are ANDead: imported
+messages retain provider label IDs; live ingress has `INBOX`. Gmail SENT messages
+therefore require `archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For
+compatibility, `SENT` without `archive_source` still lists the caller's outgoing
+operation records and accepts only an empty query. Continuation tokens bind query,
+source and labels; changing filters requires a new search. Other Gmail query syntax is
+rejected. Pending/blocked extraction remains visible. Gmail threads use retained account
+and thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
 direct untrusted header hints. Neither claims a complete conversation model.
 
 `search_mail_content` is a separate lexical baseline over bounded plain-text
