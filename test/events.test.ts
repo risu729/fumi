@@ -727,19 +727,126 @@ describe("callback egress policy", () => {
   ])("rejects unsafe callback %s", (value) => {
     expect(() => validateCallback(value)).toThrow();
   });
-  it("fails closed without exact admin origin and disables redirects", async () => {
-    const send = vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+  /** A fetch stand-in that applies workerd's own Request option checks, which reject
+   * `redirect: "error"`, and answers the parsed request. */
+  function runtimeFetch(answer: (request: Request) => Response | Promise<Response>) {
+    const requests: Request[] = [];
+    const send = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return answer(request);
+    }) as unknown as typeof fetch;
+    return { requests, send };
+  }
+  /** A redirect whose body records whether it was cancelled, and can refuse to cancel. */
+  function redirectTo(code: number, cancelRejects = false) {
+    const state = { cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        state.cancelled = true;
+        if (cancelRejects) throw new Error("synthetic cancel failure");
+      },
+    });
+    const response = new Response(code === 304 ? null : body, {
+      status: code,
+      headers: { Location: "https://attacker.example.com/collect" },
+    });
+    return { response, state };
+  }
+  it("fails closed without exact admin origin and posts with the runtime's manual redirect mode", async () => {
+    const { requests, send } = runtimeFetch(() => new Response(null, { status: 204 }));
     const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
     await expect(http.post("https://attacker.example.com", "{}", new Headers())).rejects.toThrow();
     expect(send).not.toHaveBeenCalled();
-    await http.post(url, "{}", new Headers());
-    expect(send).toHaveBeenCalledWith(
-      url,
-      expect.objectContaining({ redirect: "error", method: "POST" }),
-    );
+    const response = await http.post(url, '{"a":1}', new Headers({ "webhook-id": "synthetic" }));
+    expect(response.status).toBe(204);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(url);
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.redirect).toBe("manual");
+    expect(requests[0]?.headers.get("webhook-id")).toBe("synthetic");
+    expect(await requests[0]?.text()).toBe('{"a":1}');
     await expect(
       createAllowlistedWebhookHttp([], send).post(url, "{}", new Headers()),
     ).rejects.toThrow();
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it.each([300, 301, 302, 303, 304, 307, 308])(
+    "refuses a %i redirect, cancels its body, and never follows it",
+    async (code) => {
+      const redirect = redirectTo(code);
+      const { requests, send } = runtimeFetch(() => redirect.response);
+      const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+      await expect(http.post(url, "{}", new Headers())).rejects.toThrow(
+        "Callback redirect refused",
+      );
+      expect(requests.map((request) => request.url)).toEqual([url]);
+      if (code !== 304) expect(redirect.state.cancelled).toBe(true);
+    },
+  );
+  it("refuses a redirect even when cancelling its body fails", async () => {
+    const redirect = redirectTo(302, true);
+    const { send } = runtimeFetch(() => redirect.response);
+    const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    await expect(http.post(url, "{}", new Headers())).rejects.toThrow("Callback redirect refused");
+    expect(redirect.state.cancelled).toBe(true);
+  });
+  it("verifies a callback through the allowlisted adapter and fails verification on a redirect", async () => {
+    let redirecting = true;
+    const { requests, send } = runtimeFetch(async (request) => {
+      if (redirecting) return redirectTo(307).response;
+      const parsed = (await request.json()) as Record<string, unknown>;
+      return Response.json({ challenge: parsed["challenge"] });
+    });
+    runtime.http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    await expect(subscribe()).rejects.toMatchObject({
+      code: -32015,
+      data: { reason: "challenge_failed" },
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM event_subscriptions").first(
+        "count",
+      ),
+    ).toBe(0);
+    redirecting = false;
+    await subscribe();
+    expect(requests.map((request) => [request.url, request.redirect])).toEqual([
+      [url, "manual"],
+      [url, "manual"],
+    ]);
+  });
+  it("retries a redirected delivery like other non-2xx responses, without advancing the cursor", async () => {
+    let redirecting = true;
+    const { requests, send } = runtimeFetch(async (request) => {
+      const parsed = (await request.json()) as Record<string, unknown>;
+      if (parsed["type"] === "verification")
+        return Response.json({ challenge: parsed["challenge"] });
+      return redirecting ? redirectTo(308).response : new Response(null, { status: 204 });
+    });
+    runtime.http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    const subscription = await subscribe();
+    await append("redirected");
+    const started = now;
+    expect(await deliverEvents(env.MAIL_CATALOG, runtime)).toEqual({ attempted: 1 });
+    const row = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT state,cursor,attempts,next_attempt_at,lease_token FROM event_subscriptions WHERE id=?",
+      )
+        .bind(subscription["id"])
+        .first();
+    expect(await row()).toEqual({
+      state: "active",
+      cursor: 0,
+      attempts: 1,
+      next_attempt_at: started + 1_000,
+      lease_token: null,
+    });
+    now += 1_001;
+    redirecting = false;
+    await deliverEvents(env.MAIL_CATALOG, runtime);
+    expect(await row()).toMatchObject({ state: "active", attempts: 0 });
+    expect(requests.map((request) => request.url)).toEqual([url, url, url]);
+    expect(requests.every((request) => request.redirect === "manual")).toBe(true);
   });
   it("rejects malformed secrets before signing", async () => {
     await expect(signedHeaders("whsec_!", "id", "{}", "sub", now)).rejects.toThrow(

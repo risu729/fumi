@@ -331,7 +331,11 @@ run stops leasing subscriptions four minutes after it starts; the rest stay due
 for the next run. No arbitrary callback hosts are accepted: configure only
 administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
-DNS administration. Redirects are refused on verification and delivery.
+DNS administration. Redirects are never followed. Verification and delivery POST
+with `redirect: "manual"`, because workerd rejects `redirect: "error"` before it
+connects. A 3xx response is then refused: its body is cancelled unread and its
+`Location` is never contacted. It fails callback verification, and a delivery
+retries it like any other non-2xx response.
 
 `WEBHOOK_ORIGINS` unset or `[]` trusts no origin. Any other value that is not a
 JSON array of at most ten exact HTTPS origins, such as
