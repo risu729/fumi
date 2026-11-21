@@ -22,6 +22,7 @@ import { reconcileArchive, indexArchiveSource } from "../src/reconcile.ts";
 import { commitPage, readCheckpoint } from "../src/catalog.ts";
 import worker from "../src/index.ts";
 import { repairContentSearch, searchMailContent } from "../src/content-search.ts";
+import { readMail } from "../src/mail-read.ts";
 
 const receivedAt = "2026-11-10T00:00:00.000Z";
 const bytes = new TextEncoder().encode("Subject: Synthetic workflow\r\n\r\nBody\r\n");
@@ -239,6 +240,17 @@ describe("mail processing Workflows in workerd", () => {
         )
       ).matches,
     ).toHaveLength(1);
+    // The catalog and the extraction record the same original digest, so reads serve the body.
+    expect(
+      await readMail(
+        env,
+        { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] },
+        `mail_${source.id}`,
+      ),
+    ).toMatchObject({
+      extraction: { status: "complete" },
+      content: { text: "Body\n" },
+    });
     expect(await env.MAIL_CATALOG.prepare("SELECT * FROM archive_scan").first()).toEqual({
       id: 1,
       revision: 1,
