@@ -127,8 +127,13 @@ outcomes are retained as `unknown` and are not automatically submitted again.
 OCR submission persists the item ID before a later invocation polls. Queued/running
 items defer for five minutes; polling never uploads again. Complete ingestion must
 fit one page of at most 32 indexed chunks, all returned with matching item identity
-and complete pagination. Partial/oversized output is blocked. Polling stops after
-24 hours with explicit coverage. Fixed diagnostics omit provider exception text.
+and complete pagination. Partial/oversized output is blocked. A missing OCR binding,
+a missing PDF loader or a lost password defers the item without uploading again.
+The 24-hour limit counts from submission. After it, the next run still polls the
+item when the OCR binding is present and keeps a completed result; otherwise the row
+is blocked as `ocr_processing_timeout`, including one still waiting for a binding, a
+password or a provider that keeps failing. So a pause in scheduled runs does not
+discard a finished item. Fixed diagnostics omit provider exception text.
 
 The ledger distinguishes `pending`, `running`, `submitted`, `complete`, `blocked`
 and `unknown`. Each result records source manifest, original key/hash/size/MIME,
@@ -260,8 +265,9 @@ Without OCR the decrypted PDF is downloadable and explicitly excluded from text
 indexing. With opted-in OCR, the managed service receives the verified decrypted
 PDF, and provenance retains both original encrypted and decrypted hashes. Before
 indexing returned OCR text, candidates are resolved and verified again for
-redaction; loss of a password defers the existing submission instead of uploading
-again. The first upload's identity remains durable throughout that wait.
+redaction; loss of a password or of the `PDF_LOADER` binding defers the existing
+submission instead of uploading again. The first upload's identity remains durable
+throughout that wait.
 
 References: [LibPDF](https://github.com/LibPDF-js/core),
 [pdf-lib encryption](https://github.com/Hopding/pdf-lib#encryption-handling),
