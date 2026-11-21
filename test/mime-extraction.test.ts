@@ -489,6 +489,40 @@ describe("bounded MIME extraction in workerd", () => {
     expect((await env.MAIL_ARCHIVE.list()).objects).toHaveLength(1);
   });
 
+  it("blocks oversized stored attachment records before saving any derivative", async () => {
+    // Each record fits the field and the name-only list fits the metadata limit,
+    // but adding the derivative key and digests pushes the stored list over it.
+    const filename = "n".repeat(3300);
+    const input = await source(
+      mixed(
+        Array.from(
+          { length: 9 },
+          (_, index) =>
+            `Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="${filename}"\r\n\r\nSynthetic ${index}`,
+        ),
+      ),
+    );
+    expect(await process(input)).toEqual({
+      status: "blocked",
+      attachmentCount: 0,
+      code: "metadata_limit",
+    });
+    expect((await env.MAIL_ARCHIVE.list()).objects.map((object) => object.key)).toEqual([
+      input.key,
+    ]);
+  });
+
+  it("reports large headerless input as invalid MIME, not as a parser limit", async () => {
+    const input = await source(
+      `NOT A MIME MESSAGE\r\n\r\n${"a".repeat(MIME_LIMITS.headersBytes + 1024)}`,
+    );
+    expect(await process(input)).toEqual({
+      status: "blocked",
+      attachmentCount: 0,
+      code: "invalid_mime",
+    });
+  });
+
   it("blocks a conflicting derivative instead of overwriting its bytes", async () => {
     const input = await source();
     await process(input);
