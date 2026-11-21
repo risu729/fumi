@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations } from "cloudflare:test";
+import { applyD1Migrations, createScheduledController } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eventStatement } from "../src/event-store.ts";
 import { handleEventRequest } from "../src/mcp-events.ts";
@@ -13,6 +13,7 @@ import {
 import { eventRuntime } from "../src/event-runtime.ts";
 import { handleHttp } from "../src/http.ts";
 import type { MailPrincipal } from "../src/principal.ts";
+import worker from "../src/index.ts";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 const principal: MailPrincipal = {
@@ -599,6 +600,59 @@ describe("durable MCP Events", () => {
     expect(await deliverEvents(env.MAIL_CATALOG, runtime)).toEqual({ attempted: 2 });
     expect(await deliverEvents(env.MAIL_CATALOG, runtime)).toEqual({ attempted: 1 });
     expect(new Set(posts)).toEqual(new Set(targets));
+  });
+});
+describe("scheduled stage isolation", () => {
+  it("delivers MCP Events when outbound reconciliation fails in the same run", async () => {
+    now = Date.now();
+    const owner = { ...principal, id: "user:owner" };
+    await subscribe({}, owner);
+    await append("isolated-event");
+    const withSession = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    // A transient D1 failure in outbound receipt reconciliation only.
+    const sessions = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation((constraint) => {
+      const session = withSession(constraint);
+      const prepare = session.prepare.bind(session);
+      return Object.assign(session, {
+        prepare(query: string) {
+          if (query.includes("FROM outbound_operations WHERE state IN"))
+            throw new Error("synthetic transient D1 failure for private-recipient@example.invalid");
+          return prepare(query);
+        },
+      });
+    });
+    const posts: string[] = [];
+    const send = vi.spyOn(globalThis, "fetch").mockImplementation(async (target) => {
+      posts.push(String(target));
+      return new Response(null, { status: 204 });
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(
+        worker.scheduled(createScheduledController(), {
+          ...env,
+          MAIL_GRANTS: JSON.stringify({
+            "user:owner": { scopes: principal.scopes, fromAddresses: [] },
+          }),
+          WEBHOOK_ORIGINS: '["https://receiver.example.com"]',
+        }),
+      ).rejects.toThrow("Archive reconciliation did not complete");
+      expect(posts).toEqual([url]);
+      expect(errors).toHaveBeenCalledWith(
+        JSON.stringify({ event: "outbound_reconcile", status: "deferred" }),
+      );
+      expect(errors).not.toHaveBeenCalledWith(
+        JSON.stringify({ event: "event_delivery", status: "deferred" }),
+      );
+      expect(logs).toHaveBeenCalledWith(JSON.stringify({ event: "event_delivery", attempted: 1 }));
+      expect(JSON.stringify([errors.mock.calls, logs.mock.calls])).not.toContain("example.invalid");
+    } finally {
+      sessions.mockRestore();
+      send.mockRestore();
+      errors.mockRestore();
+      logs.mockRestore();
+    }
   });
 });
 describe("webhook origin configuration", () => {

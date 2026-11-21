@@ -36,6 +36,10 @@ This best-effort start is not the durable recovery mechanism: the existing R2
 sweep discovers raw-only and receipt-only sources if invocation time runs out.
 Every scheduled invocation also discovers up to 10 catalog sources without jobs
 and checks up to 10 due jobs. A failed scan does not suppress repair of known jobs.
+More generally, every stage of the scheduled handler, from the archive sweep through
+outbound delivery-event reconciliation and MCP Events delivery, is isolated: a failed
+stage logs only its event name and a fixed status, later stages still run, and the
+run is reported failed.
 Failed dispatches move behind other due jobs before remote calls, with a five-minute
 check interval. These bounds are for the small live archive, not bulk import.
 

@@ -894,13 +894,21 @@ async function getSendStatusImpl(
   operationId: string,
 ) {
   scope(principal, "mail:send");
-  const operation = await operationFor(ctx, principal, operationId);
-  const recipients = await db(ctx)
-    .prepare(
-      "SELECT address, kind, state, event_timestamp FROM outbound_recipients WHERE operation_id = ? ORDER BY kind, address",
-    )
-    .bind(operationId)
-    .all<{ address: string; kind: string; state: string; event_timestamp: number }>();
+  const session = db(ctx);
+  // One batch is one snapshot: an event projected between two separate reads
+  // could pair an unknown submission with a delivered recipient.
+  const [operations, recipients] = await session.batch([
+    session
+      .prepare("SELECT * FROM outbound_operations WHERE operation_id = ? AND principal_id = ?")
+      .bind(operationId, principal.id),
+    session
+      .prepare(
+        "SELECT address, kind, state, event_timestamp FROM outbound_recipients WHERE operation_id = ? ORDER BY kind, address",
+      )
+      .bind(operationId),
+  ]);
+  const operation = operations?.results[0] as Operation | undefined;
+  if (!operation || !recipients) fail("send_not_found");
   // A process can disappear at any point after claim. A surviving claim is
   // uncertainty, never permission for a second provider call.
   return {
@@ -908,7 +916,12 @@ async function getSendStatusImpl(
     state: operation.state === "submitting" ? "unknown" : operation.state,
     provider_message_id: operation.provider_message_id,
     failure_code: operation.failure_code,
-    recipients: recipients.results,
+    recipients: recipients.results as {
+      address: string;
+      kind: string;
+      state: string;
+      event_timestamp: number;
+    }[],
     created_at: operation.created_at,
     updated_at: operation.updated_at,
   };
