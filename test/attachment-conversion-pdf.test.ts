@@ -63,6 +63,20 @@ const hiddenSections = {
   "classic trailer inside a literal string": classicSection("(\n", ")\n"),
   "classic trailer inside a hex string": classicSection("<\n"),
   "classic trailer behind a bare stream keyword": classicSection("stream\n", "", "%endstream\n"),
+  // LibPDF decodes an escaped name as UTF-8, which drops a leading byte order mark.
+  "cross-reference stream /Encrypt name behind an escaped byte order mark": relocated(
+    "",
+    "",
+    xrefObject.replace("/Encrypt ", "/#EF#BB#BFEncrypt "),
+  ),
+  "classic trailer /Encrypt name behind a raw byte order mark and an escape": classicSection(
+    "",
+  ).replace("/Encrypt ", "/\xef\xbb\xbfEncryp#74 "),
+  // An entry line ends with arbitrary bytes, so the first `trailer` after `xref` may be a decoy.
+  "classic trailer more than 64 KiB after its keyword, behind a decoy in a table entry":
+    classicSection("(\n", ")\n")
+      .replace("trailer\n<<", `trailer\n${" ".repeat(65_536)}<<`)
+      .replace(" 65535 f \n", " 65535 f trailer << >>\n"),
 };
 describe("encrypted PDF detection", () => {
   it("ignores the token in stream data, strings and comments of an unencrypted PDF", () => {
@@ -95,6 +109,14 @@ describe("encrypted PDF detection", () => {
     const newest = `7 0 obj\n<< /Type /XRef /Size 8 /Index [7 1] /W [1 2 2] /Root 2 0 R /Prev ${xrefAt + 2} /Length 5 >>\nstream\n${entry}\nendstream\nendobj\n`;
     const text = `${hidden}${newest}startxref\n${hidden.length}\n%%EOF\n`;
     expect(isEncryptedPdf(latin1(text), "application/pdf")).toBe(true);
+    // LibPDF also follows a /Prev key spelled with a byte order mark.
+    const bom = text.replace("/Prev ", "/#EF#BB#BFPrev ");
+    expect(isEncryptedPdf(latin1(bom), "application/pdf")).toBe(true);
+    // LibPDF reads `+N` and `--N` as the number N.
+    for (const sign of ["+", "--"]) {
+      const signed = text.replace("/Prev ", `/Prev ${sign}`);
+      expect(isEncryptedPdf(latin1(signed), "application/pdf")).toBe(true);
+    }
     // Without /Prev no offset reaches the string, so a parser never reads that section.
     const unreachable = text.replace(`/Prev ${xrefAt + 2} `, "");
     expect(isEncryptedPdf(latin1(unreachable), "application/pdf")).toBe(false);

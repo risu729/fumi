@@ -42,7 +42,10 @@ This is a single-owner inbound archive: `mail:read` permits all inbound records.
 Drafts, staged attachments, outgoing records and outbound notifications remain
 principal-owned. Scope checks run on the server even if a caller bypasses tool
 discovery. Missing or malformed grants fail closed. Requests and downloads are
-uncacheable; HTML is downloaded as opaque content and never rendered.
+uncacheable; HTML is downloaded as opaque content and never rendered. A
+`/api/mail/*` download the caller cannot read, such as a missing message, a
+`sent_` record of another principal or any message without `mail:read`, answers
+HTTP 404 with `{"error":{"code":"mail_unavailable"}}`.
 
 For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
@@ -302,8 +305,14 @@ there is no public HTTP receipt endpoint. Events are retained before projection,
 deduplicated by provider event ID and reconciled when the provider message ID
 becomes known. Deferred events cannot overwrite terminal recipient outcomes;
 mixed recipient outcomes remain separate. Failed processing retries through the
-Queue and eventually uses `fumi-delivery-events-dlq`. Scheduled reconciliation
-updates evidence and never sends mail.
+Queue after a delay of 30 seconds doubled per attempt, at most 15 minutes, so the
+five retries span about 15 minutes before the message moves to
+`fumi-delivery-events-dlq`, which has no consumer. Scheduled reconciliation
+updates evidence and never sends mail. It runs as its own scheduled stage: its
+failure marks the run failed but does not skip MCP Events delivery in that run.
+`get_send_status` reads the submission and its recipients in one D1 batch, so
+a recipient outcome never appears beside a submission state from before it was
+projected.
 
 ## MCP Events
 
@@ -343,7 +352,11 @@ run stops leasing subscriptions four minutes after it starts; the rest stay due
 for the next run. No arbitrary callback hosts are accepted: configure only
 administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
-DNS administration. Redirects are refused on verification and delivery.
+DNS administration. Redirects are never followed. Verification and delivery POST
+with `redirect: "manual"`, because workerd rejects `redirect: "error"` before it
+connects. A 3xx response is then refused: its body is cancelled unread and its
+`Location` is never contacted. It fails callback verification, and a delivery
+retries it like any other non-2xx response.
 
 `WEBHOOK_ORIGINS` unset or `[]` trusts no origin. Any other value that is not a
 JSON array of at most ten exact HTTPS origins, such as

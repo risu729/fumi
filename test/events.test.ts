@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations } from "cloudflare:test";
+import { applyD1Migrations, createScheduledController } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eventStatement } from "../src/event-store.ts";
 import { handleEventRequest } from "../src/mcp-events.ts";
@@ -13,6 +13,7 @@ import {
 import { eventRuntime } from "../src/event-runtime.ts";
 import { handleHttp } from "../src/http.ts";
 import type { MailPrincipal } from "../src/principal.ts";
+import worker from "../src/index.ts";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 const principal: MailPrincipal = {
@@ -601,6 +602,59 @@ describe("durable MCP Events", () => {
     expect(new Set(posts)).toEqual(new Set(targets));
   });
 });
+describe("scheduled stage isolation", () => {
+  it("delivers MCP Events when outbound reconciliation fails in the same run", async () => {
+    now = Date.now();
+    const owner = { ...principal, id: "user:owner" };
+    await subscribe({}, owner);
+    await append("isolated-event");
+    const withSession = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    // A transient D1 failure in outbound receipt reconciliation only.
+    const sessions = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation((constraint) => {
+      const session = withSession(constraint);
+      const prepare = session.prepare.bind(session);
+      return Object.assign(session, {
+        prepare(query: string) {
+          if (query.includes("FROM outbound_operations WHERE state IN"))
+            throw new Error("synthetic transient D1 failure for private-recipient@example.invalid");
+          return prepare(query);
+        },
+      });
+    });
+    const posts: string[] = [];
+    const send = vi.spyOn(globalThis, "fetch").mockImplementation(async (target) => {
+      posts.push(String(target));
+      return new Response(null, { status: 204 });
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(
+        worker.scheduled(createScheduledController(), {
+          ...env,
+          MAIL_GRANTS: JSON.stringify({
+            "user:owner": { scopes: principal.scopes, fromAddresses: [] },
+          }),
+          WEBHOOK_ORIGINS: '["https://receiver.example.com"]',
+        }),
+      ).rejects.toThrow("Archive reconciliation did not complete");
+      expect(posts).toEqual([url]);
+      expect(errors).toHaveBeenCalledWith(
+        JSON.stringify({ event: "outbound_reconcile", status: "deferred" }),
+      );
+      expect(errors).not.toHaveBeenCalledWith(
+        JSON.stringify({ event: "event_delivery", status: "deferred" }),
+      );
+      expect(logs).toHaveBeenCalledWith(JSON.stringify({ event: "event_delivery", attempted: 1 }));
+      expect(JSON.stringify([errors.mock.calls, logs.mock.calls])).not.toContain("example.invalid");
+    } finally {
+      sessions.mockRestore();
+      send.mockRestore();
+      errors.mockRestore();
+      logs.mockRestore();
+    }
+  });
+});
 describe("webhook origin configuration", () => {
   it.each([
     '["https://receiver.example.com","https://receiver.example.com/path"]',
@@ -727,19 +781,126 @@ describe("callback egress policy", () => {
   ])("rejects unsafe callback %s", (value) => {
     expect(() => validateCallback(value)).toThrow();
   });
-  it("fails closed without exact admin origin and disables redirects", async () => {
-    const send = vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+  /** A fetch stand-in that applies workerd's own Request option checks, which reject
+   * `redirect: "error"`, and answers the parsed request. */
+  function runtimeFetch(answer: (request: Request) => Response | Promise<Response>) {
+    const requests: Request[] = [];
+    const send = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return answer(request);
+    }) as unknown as typeof fetch;
+    return { requests, send };
+  }
+  /** A redirect whose body records whether it was cancelled, and can refuse to cancel. */
+  function redirectTo(code: number, cancelRejects = false) {
+    const state = { cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        state.cancelled = true;
+        if (cancelRejects) throw new Error("synthetic cancel failure");
+      },
+    });
+    const response = new Response(code === 304 ? null : body, {
+      status: code,
+      headers: { Location: "https://attacker.example.com/collect" },
+    });
+    return { response, state };
+  }
+  it("fails closed without exact admin origin and posts with the runtime's manual redirect mode", async () => {
+    const { requests, send } = runtimeFetch(() => new Response(null, { status: 204 }));
     const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
     await expect(http.post("https://attacker.example.com", "{}", new Headers())).rejects.toThrow();
     expect(send).not.toHaveBeenCalled();
-    await http.post(url, "{}", new Headers());
-    expect(send).toHaveBeenCalledWith(
-      url,
-      expect.objectContaining({ redirect: "error", method: "POST" }),
-    );
+    const response = await http.post(url, '{"a":1}', new Headers({ "webhook-id": "synthetic" }));
+    expect(response.status).toBe(204);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(url);
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.redirect).toBe("manual");
+    expect(requests[0]?.headers.get("webhook-id")).toBe("synthetic");
+    expect(await requests[0]?.text()).toBe('{"a":1}');
     await expect(
       createAllowlistedWebhookHttp([], send).post(url, "{}", new Headers()),
     ).rejects.toThrow();
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it.each([300, 301, 302, 303, 304, 307, 308])(
+    "refuses a %i redirect, cancels its body, and never follows it",
+    async (code) => {
+      const redirect = redirectTo(code);
+      const { requests, send } = runtimeFetch(() => redirect.response);
+      const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+      await expect(http.post(url, "{}", new Headers())).rejects.toThrow(
+        "Callback redirect refused",
+      );
+      expect(requests.map((request) => request.url)).toEqual([url]);
+      if (code !== 304) expect(redirect.state.cancelled).toBe(true);
+    },
+  );
+  it("refuses a redirect even when cancelling its body fails", async () => {
+    const redirect = redirectTo(302, true);
+    const { send } = runtimeFetch(() => redirect.response);
+    const http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    await expect(http.post(url, "{}", new Headers())).rejects.toThrow("Callback redirect refused");
+    expect(redirect.state.cancelled).toBe(true);
+  });
+  it("verifies a callback through the allowlisted adapter and fails verification on a redirect", async () => {
+    let redirecting = true;
+    const { requests, send } = runtimeFetch(async (request) => {
+      if (redirecting) return redirectTo(307).response;
+      const parsed = (await request.json()) as Record<string, unknown>;
+      return Response.json({ challenge: parsed["challenge"] });
+    });
+    runtime.http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    await expect(subscribe()).rejects.toMatchObject({
+      code: -32015,
+      data: { reason: "challenge_failed" },
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM event_subscriptions").first(
+        "count",
+      ),
+    ).toBe(0);
+    redirecting = false;
+    await subscribe();
+    expect(requests.map((request) => [request.url, request.redirect])).toEqual([
+      [url, "manual"],
+      [url, "manual"],
+    ]);
+  });
+  it("retries a redirected delivery like other non-2xx responses, without advancing the cursor", async () => {
+    let redirecting = true;
+    const { requests, send } = runtimeFetch(async (request) => {
+      const parsed = (await request.json()) as Record<string, unknown>;
+      if (parsed["type"] === "verification")
+        return Response.json({ challenge: parsed["challenge"] });
+      return redirecting ? redirectTo(308).response : new Response(null, { status: 204 });
+    });
+    runtime.http = createAllowlistedWebhookHttp(["https://receiver.example.com"], send);
+    const subscription = await subscribe();
+    await append("redirected");
+    const started = now;
+    expect(await deliverEvents(env.MAIL_CATALOG, runtime)).toEqual({ attempted: 1 });
+    const row = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT state,cursor,attempts,next_attempt_at,lease_token FROM event_subscriptions WHERE id=?",
+      )
+        .bind(subscription["id"])
+        .first();
+    expect(await row()).toEqual({
+      state: "active",
+      cursor: 0,
+      attempts: 1,
+      next_attempt_at: started + 1_000,
+      lease_token: null,
+    });
+    now += 1_001;
+    redirecting = false;
+    await deliverEvents(env.MAIL_CATALOG, runtime);
+    expect(await row()).toMatchObject({ state: "active", attempts: 0 });
+    expect(requests.map((request) => request.url)).toEqual([url, url, url]);
+    expect(requests.every((request) => request.redirect === "manual")).toBe(true);
   });
   it("rejects malformed secrets before signing", async () => {
     await expect(signedHeaders("whsec_!", "id", "{}", "sub", now)).rejects.toThrow(

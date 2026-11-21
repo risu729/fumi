@@ -154,13 +154,17 @@ export async function collectOcr(binding: ManagedOcr, id: string, key: string) {
     },
   };
 }
-/** ZIP payloads remain local; generated filenames never become filesystem paths. */
+/**
+ * ZIP payloads remain local; generated filenames never become filesystem paths. `lookup` runs
+ * only for an archive with an encrypted entry, and its candidates are redacted from all output.
+ */
 export async function convertZip(
   bucket: R2Bucket,
   bytes: Uint8Array,
-  passwords: readonly string[],
+  lookup: () => Promise<readonly string[]>,
 ) {
-  const members = await unlockZip(bytes, passwords);
+  let passwords: readonly string[] = [];
+  const members = await unlockZip(bytes, async () => (passwords = await lookup()));
   const provenance = [];
   const text = [];
   for (const member of members) {

@@ -238,6 +238,50 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "matching" }, base)).matches,
     ).toHaveLength(1);
   });
+  it("counts a projection fenced by a conversion change during repair as deferred", async () => {
+    const source = await insert("raced", "raced body needle", {
+      text: "synthetic original scanned PDF",
+      mimeType: "application/pdf",
+    });
+    const part = JSON.parse(source.attachments_json)[0]!;
+    const open = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    const conversion = env.MAIL_CATALOG.prepare(
+      `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,updated_at)
+         VALUES(?,0,?,?,?,?,?,?,?,'pending',0)`,
+    ).bind(
+      source.raw_key,
+      source.manifest_key,
+      "a".repeat(64),
+      part.key,
+      part.sha256,
+      part.size,
+      part.mimeType,
+      "b".repeat(64),
+    );
+    // A conversion starts after repair read the conversion snapshot but before it publishes.
+    const spy = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementationOnce((constraint) => {
+      const session = open(constraint);
+      const batch = session.batch.bind(session);
+      session.batch = async (statements) => {
+        await conversion.run();
+        return batch(statements);
+      };
+      return session;
+    });
+    try {
+      expect(await repairContentSearch(env, 100)).toEqual({ indexed: 0, deferred: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_search_documents").first("n"),
+    ).toBe(0);
+    // Nothing was published, so the next pass picks the source up without a retry delay.
+    expect(await repairContentSearch(env, 101)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      (await searchMailContent(env, reader, { query: "raced body" }, base)).matches,
+    ).toHaveLength(1);
+  });
   it("reindexes a live conversion before historical backlog and backfills the remaining slots", async () => {
     const historical = [];
     for (let index = 0; index < 4; index++) {
