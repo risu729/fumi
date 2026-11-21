@@ -876,7 +876,7 @@ describe("optional managed body corpus and semantic retrieval", () => {
   });
 
   it("uploads, serves and counts only an extraction of the original the catalog holds now", async () => {
-    const originals = [];
+    const originals: Awaited<ReturnType<typeof source>>[] = [];
     for (const id of ["missing", "changed", "blocked", "current"]) {
       // oxlint-disable-next-line no-await-in-loop -- Four synthetic messages with one converted part each.
       const original = await source(
@@ -941,15 +941,13 @@ describe("optional managed body corpus and semantic retrieval", () => {
     ).toEqual(calls);
   });
   it("never uploads or projects an extraction whose original went missing, changed or was blocked", async () => {
-    const stale = [];
-    for (const kind of ["missing", "changed", "blocked"] as const) {
+    for (const [index, kind] of (["missing", "changed", "blocked"] as const).entries()) {
       // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
-      const original = await source(kind, `Never ${kind} body.`, canonical(stale.length + 1));
+      const original = await source(kind, `Never ${kind} body.`, canonical(index + 1));
       // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
       await convertedPart(original, `Never ${kind} attachment.`);
       // oxlint-disable-next-line no-await-in-loop -- The original goes stale before the first repair.
       await env.MAIL_CATALOG.prepare(staleUpdates[kind]).bind(original.raw.key).run();
-      stale.push(original);
     }
     const remote = provider();
     await ready(runtime(remote.binding));
@@ -962,7 +960,7 @@ describe("optional managed body corpus and semantic retrieval", () => {
   });
   it("projects no part when the original goes stale between discovery and the projection write", async () => {
     const kinds = ["missing", "changed", "blocked"] as const;
-    const originals = [];
+    const originals: Awaited<ReturnType<typeof source>>[] = [];
     for (const kind of kinds) {
       // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
       const original = await source(kind, `Race ${kind} body.`, canonical(originals.length + 1));

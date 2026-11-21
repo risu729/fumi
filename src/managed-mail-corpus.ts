@@ -19,6 +19,7 @@ import {
   managedSourceFence,
   attachmentMembership,
 } from "./managed-mail-sources.ts";
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 
 interface Document {
   raw_key: string;
@@ -43,7 +44,9 @@ async function discover(
   attachments: boolean,
   now: number,
 ) {
-  const scope = managedSourceScope(runtime, "e.raw_key");
+  const scope = managedSourceScope(runtime, "e.raw_key"),
+    candidateScope = managedSourceScope(runtime, "candidate.raw_key"),
+    fence = managedSourceFence(attachments, "candidate");
   const attachmentMissing = attachments
     ? `OR EXISTS(SELECT 1 FROM attachment_conversions a WHERE a.raw_key=e.raw_key AND a.manifest_key=e.manifest_key
     AND a.state='complete' AND a.representation IN ('managed_document_text','managed_ocr_indexed_text','local_zip_text')
@@ -55,8 +58,8 @@ async function discover(
     : "";
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.raw_sha256,e.body_text_key FROM mail_extractions e
-    JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.extractor_version='mime-v1' AND e.status='complete'
-    AND s.raw_state='present' AND s.raw_sha256=e.raw_sha256 AND ${scope.sql} AND ((e.body_text_key IS NOT NULL AND NOT EXISTS(
+    JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL}
+    AND ${scope.sql} AND ((e.body_text_key IS NOT NULL AND NOT EXISTS(
       SELECT 1 FROM managed_mail_documents d WHERE d.raw_key=e.raw_key AND d.part='body' AND d.policy_hash=?)) ${attachmentMissing})
     ORDER BY e.raw_key LIMIT 3`)
       .bind(...scope.values, runtime.policy, ...(attachments ? [runtime.policy] : []))
@@ -109,9 +112,13 @@ async function discover(
       )
         .bind(key)
         .first<{ item_id: string | null; submitted_at: number | null }>();
+      // The write applies the cleanup fence to the new row itself, so discovery never projects a
+      // part that the next cleanup would delete, even if the original goes stale meanwhile.
       await env.MAIL_CATALOG.prepare(`INSERT INTO managed_mail_documents(raw_key,part,manifest_key,raw_sha256,text_key,text_sha256,
         original_key,original_sha256,representation,conversion_policy,policy_hash,item_key,state,failure_code,item_id,submitted_at,updated_at)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM mail_extractions e WHERE raw_key=? AND status='complete' AND manifest_key=? AND ${scope.sql})
+        SELECT * FROM (SELECT ? AS raw_key,? AS part,? AS manifest_key,? AS raw_sha256,? AS text_key,? AS text_sha256,? AS original_key,
+        ? AS original_sha256,? AS representation,? AS conversion_policy,? AS policy_hash,? AS item_key,? AS state,? AS failure_code,
+        ? AS item_id,? AS submitted_at,? AS updated_at) candidate WHERE ${fence} AND ${candidateScope.sql}
         ON CONFLICT(raw_key,part) DO UPDATE SET manifest_key=excluded.manifest_key,raw_sha256=excluded.raw_sha256,text_key=excluded.text_key,
         text_sha256=excluded.text_sha256,original_key=excluded.original_key,original_sha256=excluded.original_sha256,
         representation=excluded.representation,conversion_policy=excluded.conversion_policy,policy_hash=excluded.policy_hash,
@@ -136,9 +143,7 @@ async function discover(
           prior?.item_id ?? null,
           prior?.submitted_at ?? null,
           now,
-          row.raw_key,
-          row.manifest_key,
-          ...scope.values,
+          ...candidateScope.values,
         )
         .run();
     }

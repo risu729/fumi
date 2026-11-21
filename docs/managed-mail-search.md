@@ -93,6 +93,21 @@ ledgers, provenance and retention; this corpus copies only its verified local te
 into the dedicated retrieval instance. If migration0011 is absent, body retrieval
 continues with explicit disabled attachment coverage.
 
+Discovery, the projection write, the cleanup fence, upload and poll claims, retrieval
+and coverage counts use only a current extraction, the definition in
+[agent mail](agent-mail.md#tools-and-bounded-results) and `get_mail_health`: status
+`complete`, original `present` in the catalog, and the extraction's original SHA-256
+equal to the catalog's. When a completed extraction is later blocked, or its original
+goes missing or changes, the next repair deletes its local rows and discovery does not
+select it again, so nothing is uploaded or polled for it. `search_mail_semantic` treats
+its remote items as unmapped candidates (counted in `omitted_candidates`), and coverage
+`documents` no longer counts them. The projection write applies the cleanup fence to the
+new row itself, so a source that goes stale between discovery and that write is not
+projected, and cleanup and discovery cannot delete and recreate the same row. The upload
+call ledger keeps each attempt identity: if the same original becomes current again,
+rediscovery polls the recorded item ID or keeps the unknown outcome instead of uploading
+again.
+
 ## Durability and budgets
 
 The per-part ledger pins original MIME SHA, current extraction manifest, source text
@@ -157,7 +172,8 @@ distinguish derivative SHA and `/conversions/part_N/<sha>` from original attachm
 and `/attachments/part_N`. Both include original MIME SHA and `/raw` URL. Provider chunk
 IDs are descriptive metadata; they never become download paths or authorization.
 
-Local invalidation does not delete remote items or prior revision copies. Private
+Local invalidation does not delete remote items or prior revision copies, including
+items whose original later went missing or changed. Private
 remote retention and eventual cleanup require a separate reviewed decision. Local
 source fences keep those old copies out of tool results, and original archive
 bytes remain preserved independently.
