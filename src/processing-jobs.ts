@@ -1,3 +1,4 @@
+import { NonRetryableError } from "cloudflare:workflows";
 import { archiveCandidate } from "./archive-key.ts";
 import { eventStatement, type EventName } from "./event-store.ts";
 
@@ -348,7 +349,9 @@ export async function completeProcessing(db: D1DatabaseSession, params: Processi
   if (result?.meta.changes) return;
   const existing = await readProcessingJob(db, params.rawKey, params.pipelineVersion);
   if (existing?.instance_id !== instanceId || existing.state !== "complete") {
-    throw new Error("Processing completion was fenced");
+    // An attempt never regains the ledger: a newer attempt has a new identity and
+    // a terminal state stays terminal. A retry of this write is fenced the same way.
+    throw new NonRetryableError("Processing completion was fenced");
   }
 }
 

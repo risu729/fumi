@@ -273,25 +273,32 @@ production acceptance; no CPU or OOM enforcement is claimed from a successful
 decryption. No brittle PDF token filter substitutes for isolation.
 
 A PDF that never mentions an `/Encrypt` name, after `#xx` unescaping, takes the
-unencrypted path. One that does is routed to decryption when any of these checks in
-`src/attachment-conversion-pdf-encryption.ts` finds that name:
+unencrypted path. A name that starts with the UTF-8 byte order mark, such as
+`/#EF#BB#BFEncrypt`, also counts, because LibPDF decodes an escaped name as UTF-8 and
+drops that mark. A PDF that mentions the name is routed to decryption when any of these
+checks in `src/attachment-conversion-pdf-encryption.ts` finds it:
 
 - a lexical scan for an `/Encrypt` name outside comments, literal and hex strings and
   stream data; unterminated string or stream data counts any later mention;
 - the dictionary after every `trailer` keyword, wherever it appears;
 - the classic table and trailer or the cross-reference stream dictionary at every
   `startxref`, `/Prev` and `/XRefStm` offset found anywhere in the bytes, including
-  inside strings, comments and streams, because a parser seeks to those offsets.
+  inside strings, comments and streams, because a parser seeks to those offsets; a
+  `/Prev` or `/XRefStm` name may also start with the byte order mark, and an offset
+  may follow `+` or `-` signs, because LibPDF reads `/Prev +N` and `/Prev --N` as N.
 
 It is also routed to decryption when it does not start with `%PDF-`; has no offset; has
 an offset outside the file, or one that, after white-space, is not `xref` followed later
 by a `trailer` dictionary or `N G obj <<`; has a comment between one of those keywords
-and its value; has a dictionary that does not close within 64 KiB; or has more than 32
-distinct offsets or `trailer` keywords. So the token in page content, a metadata stream
-or an Info string does not block OCR of an unencrypted PDF whose cross-reference data is
+and its value; has white-space and comments that run past 64 KiB after a `trailer`
+keyword, or a dictionary that does not close within 64 KiB; or has more than 32 distinct
+offsets or `trailer` keywords. So the token in page content, a metadata stream or an
+Info string does not block OCR of an unencrypted PDF whose cross-reference data is
 intact. Synthetic tests place the AES-256 fixture's cross-reference stream, or a classic
-trailer for it, inside a literal or hex string, behind a bare `stream` keyword or on a
-comment line, and the isolated LibPDF child still decrypts each one.
+trailer for it, inside a literal or hex string, behind a bare `stream` keyword, on a
+comment line or more than 64 KiB after a `trailer` keyword that follows a decoy
+`trailer` in a table entry, or spell its entry with a byte order mark, and the isolated
+LibPDF child still decrypts each one.
 
 This is routing, not a PDF parser. A parser that rejects a cross-reference section these
 checks accept (for example a corrupt stream or malformed table entries) and rebuilds it
