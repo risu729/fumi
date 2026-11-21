@@ -66,6 +66,103 @@ async function job(key: string) {
   return readProcessingJob(env.MAIL_CATALOG.withSession("first-primary"), key);
 }
 
+async function ledgerRow(key: string, attempt: number, state: "running" | "failed") {
+  const now = Date.now();
+  await env.MAIL_CATALOG.prepare(`INSERT INTO processing_jobs (
+    raw_key, pipeline_version, attempt, instance_id, state, created_at, updated_at,
+    next_check_at, dispatched_at, failure_code
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(
+      key,
+      PIPELINE_VERSION,
+      attempt,
+      processingInstanceId(key, attempt),
+      state,
+      now,
+      now,
+      now + PROCESSING_CHECK_INTERVAL_MS,
+      now,
+      state === "failed" ? "workflow_failed" : null,
+    )
+    .run();
+  return job(key);
+}
+
+function startAttempt(key: string, attempt = 0) {
+  return env.MAIL_PROCESSING.create({
+    id: processingInstanceId(key, attempt),
+    params: { rawKey: key, pipelineVersion: PIPELINE_VERSION, attempt },
+  });
+}
+
+// Workflow steps share this binding object, so the wrapper sees every processing
+// ledger read: one per stale check or fenced completion attempt, and one when the
+// failure step looks up the job. The first `failures` reads fail like a D1 outage.
+function countLedgerReads(failures = 0) {
+  const ledgerRead = "SELECT * FROM processing_jobs WHERE raw_key = ? AND pipeline_version = ?";
+  const open = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+  let reads = 0;
+  vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation((constraint) => {
+    const session = open(constraint);
+    const prepare = session.prepare.bind(session);
+    session.prepare = (query) => {
+      if (query === ledgerRead && ++reads <= failures)
+        throw new Error("D1_ERROR: synthetic outage");
+      return prepare(query);
+    };
+    return session;
+  });
+  return () => reads;
+}
+
+async function failedEvents(instanceId: string) {
+  return env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events WHERE event_id=?")
+    .bind(`failed:${instanceId}`)
+    .first("n");
+}
+
+// A catalog row that admits lifecycle events for the source. Its sizes, digest and
+// receipt state differ from what observing the stored objects writes, so a catalog
+// write by the attempt changes the row.
+async function notifyingSource(source: { id: string; key: string }) {
+  await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (
+    source_kind, source_namespace, external_id, raw_key, receipt_key, received_at,
+    raw_state, receipt_state, observed_pass, observed_revision, notify_events
+  ) VALUES ('email_routing', 'ingress-v1', ?, ?, ?, ?, 'present', 'missing', 0, 0, 1)`)
+    .bind(source.id, source.key, source.key.replace(/raw\.eml$/, "receipt.json"), receivedAt)
+    .run();
+  return () =>
+    env.MAIL_CATALOG.prepare("SELECT * FROM archive_sources WHERE raw_key=?")
+      .bind(source.key)
+      .first();
+}
+
+// A completed extraction, so only the processing ledger decides whether a ready event is written.
+async function completedExtraction(source: { key: string; sha256: string; instanceId: string }) {
+  await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (
+    raw_key, extractor_version, raw_sha256, raw_size, instance_id, status, metadata_json,
+    attachments_json, attachment_count, body_json_key, manifest_key, updated_at
+  ) VALUES (?, 'mime-v1', ?, ?, ?, 'complete', '{}', '[]', 0, ?, ?, 0)`)
+    .bind(
+      source.key,
+      source.sha256,
+      bytes.byteLength,
+      source.instanceId,
+      `synthetic/body-json/${source.sha256}`,
+      `synthetic/manifest/${source.sha256}`,
+    )
+    .run();
+}
+
+// Lifecycle events for the source from any of its processing attempts.
+async function processingEvents(source: { id: string }) {
+  return env.MAIL_CATALOG.prepare(
+    "SELECT COUNT(*) n FROM mail_events WHERE name IN ('email.ready','email.processing_failed') AND json_extract(data_json,'$.ingestId')=?",
+  )
+    .bind(source.id)
+    .first("n");
+}
+
 beforeAll(async () => {
   await applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS);
 });
@@ -545,5 +642,97 @@ describe("mail processing Workflows in workerd", () => {
     expect(
       await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_extractions").first(),
     ).toEqual({ count: 1 });
+  });
+
+  it("ends a superseded attempt at its stale check without retries or ledger writes", async () => {
+    const source = await putSource(true);
+    const catalog = await notifyingSource(source);
+    const seeded = await catalog();
+    const newer = await ledgerRow(source.key, 1, "running");
+    const reads = countLedgerReads();
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify(async (modifier) => {
+      await modifier.disableRetryDelays();
+      // The old attempt began before the newer attempt took the ledger over.
+      await modifier.mockStepResult({ name: "begin-mime-v1" }, true);
+    });
+    await startAttempt(source.key);
+    await instance.waitForStatus("errored");
+    // One stale check and one failure lookup; five retries would add five stale checks.
+    expect(reads()).toBe(2);
+    expect(await job(source.key)).toEqual(newer);
+    // Neither the stale attempt nor the newer attempt's row gets a failure event.
+    expect(await processingEvents(source)).toBe(0);
+    expect(await catalog()).toEqual(seeded);
+  });
+
+  it("ends a fenced completion without retries and keeps the terminal ledger", async () => {
+    const source = await putSource(true);
+    await notifyingSource(source);
+    await completedExtraction(source);
+    // A repair check or operator already ended this attempt after its extraction.
+    const failed = await ledgerRow(source.key, 0, "failed");
+    const reads = countLedgerReads();
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify(async (modifier) => {
+      await modifier.disableRetryDelays();
+      await modifier.mockStepResult({ name: "begin-mime-v1" }, true);
+      await modifier.mockStepResult(
+        { name: "index-mime-v1" },
+        { indexed: 1, issues: 0, rawState: "present", receiptState: "present" },
+      );
+      await modifier.mockStepResult(
+        { name: "extract-mime-v1" },
+        { status: "complete", attachmentCount: 0 },
+      );
+    });
+    await startAttempt(source.key);
+    await instance.waitForStatus("errored");
+    // One fenced completion and one failure lookup; five retries would add five reads.
+    expect(reads()).toBe(2);
+    expect(await job(source.key)).toEqual(failed);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_events WHERE event_id=?")
+        .bind(`ready:${source.instanceId}`)
+        .first("n"),
+    ).toBe(0);
+  });
+
+  it("still retries a D1 failure in the stale check", async () => {
+    const source = await putSource(true);
+    await ledgerRow(source.key, 0, "running");
+    const reads = countLedgerReads(1);
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify((modifier) => modifier.disableRetryDelays());
+    await startAttempt(source.key);
+    await instance.waitForStatus("complete");
+    expect(reads()).toBe(2);
+    expect(await job(source.key)).toMatchObject({ state: "complete", failure_code: null });
+    expect(await failedEvents(source.instanceId)).toBe(0);
+  });
+
+  it("defers an invalid search source to repair without retrying lexical indexing", async () => {
+    const source = await putSource();
+    const get = env.MAIL_ARCHIVE.get.bind(env.MAIL_ARCHIVE);
+    const derived: string[] = [];
+    // R2 answers that the extracted body text is gone: a stored outcome, not an outage.
+    vi.spyOn(env.MAIL_ARCHIVE, "get").mockImplementation(async (key: string) => {
+      if (!key.startsWith(`derived/mime-v1/${source.sha256}/`)) return get(key);
+      derived.push(key);
+      return null;
+    });
+    await using instance = await introspectWorkflowInstance(env.MAIL_PROCESSING, source.instanceId);
+    await instance.modify((modifier) => modifier.disableRetryDelays());
+    await requestProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING, source.key);
+    await instance.waitForStatus("complete");
+    expect(await instance.getOutput()).toMatchObject({ status: "extracted" });
+    // The body text is the only derivative read; five retries would read it five more times.
+    expect(derived).toHaveLength(1);
+    expect(await job(source.key)).toMatchObject({ state: "complete", failure_code: null });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT status FROM mail_search_documents WHERE raw_key=?")
+        .bind(source.key)
+        .first("status"),
+    ).toBe("retry");
   });
 });

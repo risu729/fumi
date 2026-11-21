@@ -37,6 +37,21 @@ describe("local ZIP runtime compatibility", () => {
       });
     },
   );
+  it("looks up candidates only for an encrypted archive and keeps lookup errors", async () => {
+    let calls = 0;
+    const failing = async () => {
+      calls++;
+      throw new Error("synthetic lookup timeout");
+    };
+    expect((await unlockZip(await archive({ level: 0 }), failing))[0]!.bytes).toEqual(text);
+    expect(calls).toBe(0);
+    const encrypted = await archive({ password: crypto.randomUUID(), level: 0 });
+    await expect(unlockZip(encrypted, failing)).rejects.toThrow("synthetic lookup timeout");
+    expect(calls).toBe(1);
+    await expect(unlockZip(encrypted, async () => [])).rejects.toMatchObject({
+      code: "password_required",
+    });
+  });
   it("uses native deflate streams inside workerd", async () => {
     const bytes = await archive({ level: 6 });
     expect((await unlockZip(bytes))[0]!.bytes).toEqual(text);

@@ -13,12 +13,12 @@
     "valibot": "1.5.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "2.0.0-rc.2",
-    "@cloudflare/vitest-plugin": "1.8.5",
+    "@cloudflare/vite-plugin": "2.0.0-rc.3",
+    "@cloudflare/vitest-plugin": "1.9.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@risu729/tsconfigs": "3.0.1",
     "cf": "1.0.0-rc.2",
-    "miniflare": "5.20261118.0-beta",
+    "miniflare": "5.20261119.0-beta",
     "typescript": "7.0.2",
     "vite": "8.3.8",
     "vitest": "5.1.1"
