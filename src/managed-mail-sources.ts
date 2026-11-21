@@ -1,3 +1,4 @@
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 import type { ManagedMailEnvironment } from "./managed-search-runtime.ts";
 
 /** The attachment adapter is independently optional; no missing-table exception means disabled coverage. */
@@ -19,8 +20,8 @@ export function managedSourceFence(attachments: boolean, alias = "managed_mail_d
     AND json_extract(p.value,'$.mimeType')=a.source_mime))`
     : "";
   return `EXISTS(SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
-    WHERE e.raw_key=${d}.raw_key AND e.extractor_version='mime-v1' AND e.status='complete' AND e.manifest_key=${d}.manifest_key
-    AND e.raw_sha256=${d}.raw_sha256 AND s.raw_state='present' AND s.raw_sha256=e.raw_sha256
+    WHERE e.raw_key=${d}.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=${d}.manifest_key
+    AND e.raw_sha256=${d}.raw_sha256
     AND ((${d}.part='body' AND e.body_text_key=${d}.text_key AND ${d}.text_key=${d}.original_key AND ${d}.text_sha256=${d}.original_sha256) ${converted}))`;
 }
 export interface ManagedAttachmentSource {
@@ -42,7 +43,7 @@ export async function managedAttachmentSources(env: ManagedMailEnvironment, rawK
   return (
     await env.MAIL_CATALOG.prepare(`SELECT a.part_index,a.source_key,a.source_sha256,a.result_key,a.result_sha256,a.representation,a.policy_hash
     FROM attachment_conversions a JOIN mail_extractions e ON e.raw_key=a.raw_key JOIN archive_sources s ON s.raw_key=e.raw_key
-    WHERE a.raw_key=? AND a.state='complete' AND s.raw_state='present' AND e.status='complete' AND e.manifest_key=a.manifest_key
+    WHERE a.raw_key=? AND a.state='complete' AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=a.manifest_key
     AND a.representation IN ('managed_document_text','managed_ocr_indexed_text','local_zip_text')
     AND ${attachmentMembership()}
     ORDER BY a.part_index LIMIT 4`)
