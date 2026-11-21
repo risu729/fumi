@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import * as v from "valibot";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -9,6 +10,7 @@ import {
   handleMcp,
   type McpEnvironment,
 } from "../src/mcp.ts";
+import { handleHttp } from "../src/http.ts";
 import { bridge, toolSchemas } from "../src/mcp-schemas.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
@@ -86,6 +88,22 @@ describe("official MCP HTTP transport", () => {
       expect(query).toMatchObject({
         isError: true,
         structuredContent: { error: { code: "unsupported_query" } },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+  it("rejects more metadata filters than D1 can bind with query_too_long", async () => {
+    const { client } = await clientFor();
+    try {
+      // 50 filters bind 100 LIKE patterns, past D1's limit of 100 bound parameters.
+      const tooMany = await client.callTool({
+        name: "search_emails",
+        arguments: { query: Array.from({ length: 50 }, () => "subject:Ä").join(" ") },
+      });
+      expect(tooMany).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "query_too_long" } },
       });
     } finally {
       await client.close();
@@ -170,6 +188,72 @@ describe("official MCP HTTP transport", () => {
     // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
     expect(read.input.payload.text === "x".repeat(15_999)).toBe(true);
     expect(read.input.payload.html === `<p>${"h".repeat(15_996)}`).toBe(true);
+  });
+  it("answers sent-record downloads it cannot serve as unavailable, not as server errors", async () => {
+    const keys = await generateKeyPair("RS256", { extractable: true });
+    const jwk = await exportJWK(keys.publicKey);
+    jwk.kid = "synthetic-sent-resource";
+    const issuer = "https://synthetic-sent-resource.cloudflareaccess.com";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      if (String(url) !== `${issuer}/cdn-cgi/access/certs`) throw new Error("Unexpected network");
+      return Response.json({ keys: [jwk] });
+    });
+    const ctx = {
+      ...context(),
+      ACCESS_ISSUER: issuer,
+      ACCESS_AUDIENCE: "synthetic-sent-resource",
+      MAIL_GRANTS: JSON.stringify({
+        "user:owner": { scopes: mailer.scopes, fromAddresses: mailer.fromAddresses },
+        "user:other": { scopes: ["mail:read"], fromAddresses: [] },
+        "user:sender": { scopes: ["mail:send"], fromAddresses: mailer.fromAddresses },
+      }),
+    };
+    const owner = { ...mailer, id: "user:owner" };
+    try {
+      const sent = await dispatchMailTool(
+        "send_email",
+        {
+          from_address: mailer.fromAddresses[0],
+          to: ["recipient@example.invalid"],
+          subject: "Synthetic sent record",
+          payload: { text: "Synthetic" },
+          idempotency_key: "synthetic-sent-resource",
+        },
+        ctx,
+        owner,
+        ctx.API_ORIGIN,
+      );
+      const get = async (subject: string, id: string) =>
+        handleHttp(
+          new Request(`${ctx.API_ORIGIN}/api/mail/${id}/body`, {
+            headers: {
+              "cf-access-jwt-assertion": await new SignJWT({ type: "app", sub: subject })
+                .setProtectedHeader({ alg: "RS256", kid: "synthetic-sent-resource" })
+                .setIssuer(issuer)
+                .setAudience(ctx.ACCESS_AUDIENCE)
+                .setIssuedAt()
+                .setExpirationTime("5m")
+                .sign(keys.privateKey),
+            },
+          }),
+          ctx,
+        );
+      const id = `sent_${String(sent["operation_id"])}`;
+      expect((await get("owner", id)).status).toBe(200);
+      // Another principal's record, a missing record and a caller without mail:read
+      // are all unavailable downloads, like inbound mail, never 500 internal_error.
+      const refused = await Promise.all([
+        get("other", id),
+        get("owner", "sent_send_synthetic-missing"),
+        get("sender", id),
+      ]);
+      expect(refused.map((response) => response.status)).toEqual([404, 404, 404]);
+      expect(await Promise.all(refused.map(async (response) => response.json()))).toEqual(
+        Array.from({ length: 3 }, () => ({ error: { code: "mail_unavailable" } })),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
   it("rejects cross-origin browser requests before protocol parsing", async () => {
     const response = await handleMcp(

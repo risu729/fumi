@@ -9,6 +9,7 @@ import * as v from "valibot";
 import { bridge, toolSchemas, toolOutputSchemas } from "./mcp-schemas.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import {
+  MAX_SEARCH_FILTERS,
   MailReadError,
   readMail,
   readMailAttachment,
@@ -91,8 +92,7 @@ const descriptions: Record<ToolName, string> = {
     "Read recent archived messages oldest first. Imported Gmail groups by retained account-scoped provider thread ID; live ingress uses direct Message-ID/In-Reply-To hints. message_id takes precedence. thread_id is an anchor Fumi message ID. Neither mode proves conversation completeness.",
   read_attachment:
     "Resolve an inbound attachment to an authenticated download resource. Copy attachment_id from read_email; exact filename is a fallback and duplicate filenames are rejected. Bytes are downloaded separately; no remote URLs are fetched.",
-  search_emails:
-    "Bounded archive metadata search. Supported AND operators: from:, to:, subject:, after:YYYY-MM-DD (inclusive), before:YYYY-MM-DD (exclusive), has:attachment. Quote values with spaces. archive_source selects all, gmail or email_routing; default includes both archived sources. Labels match retained Gmail label IDs, while live ingress has INBOX. For compatibility, SENT without archive_source lists this principal's outgoing operations with an empty query; use archive_source:gmail or all for historical SENT. Follow next_page_token with identical query, source and labels.",
+  search_emails: `Bounded archive metadata search. Supported AND operators: from:, to:, subject:, after:YYYY-MM-DD (inclusive), before:YYYY-MM-DD (exclusive), has:attachment. Quote values with spaces. At most ${MAX_SEARCH_FILTERS} operators and 1000 characters; more fail with query_too_long. archive_source selects all, gmail or email_routing; default includes both archived sources. Labels match retained Gmail label IDs, while live ingress has INBOX. For compatibility, SENT without archive_source lists this principal's outgoing operations with an empty query; use archive_source:gmail or all for historical SENT. Follow next_page_token with identical query, source and labels.`,
   search_email_ids:
     "Search with search_emails semantics, returning only opaque message IDs and explicit coverage/pagination. Pending extraction remains visible for unfiltered inbound search.",
   preview_email:
@@ -273,6 +273,7 @@ export async function dispatchMailTool(
         message_id_namespaces: ["mail_", "sent_"],
         limits: {
           search_page: 50,
+          search_filters: MAX_SEARCH_FILTERS,
           batch_read: 10,
           thread_messages: 20,
           inline_body_characters: 16000,
@@ -530,7 +531,16 @@ export async function handleMailResource(
   if (request.method !== "GET" && request.method !== "HEAD")
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   if (kind !== "body") throw new MailReadError("content_unavailable");
-  const mail = await getSentMail(env, p, messageId.slice(5));
+  let mail;
+  try {
+    mail = await getSentMail(env, p, messageId.slice(5));
+  } catch (error) {
+    // A missing, foreign or unreadable record is an unavailable download, as for
+    // inbound mail. Storage failures stay internal errors.
+    if (error instanceof OutboundError && error.code !== "storage_unavailable")
+      throw new MailReadError(error.code);
+    throw error;
+  }
   const data = await publicResult(env, { input: mail.input });
   return new Response(request.method === "HEAD" ? null : JSON.stringify(data), {
     headers: {

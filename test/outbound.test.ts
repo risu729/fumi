@@ -19,6 +19,7 @@ import {
 } from "../src/outbound.ts";
 import type { MailInput, OutboundContext } from "../src/outbound.ts";
 import { applyProviderEvent, reconcileProviderEvents } from "../src/outbound-events.ts";
+import worker from "../src/index.ts";
 
 const principal = {
   id: "synthetic-owner",
@@ -780,6 +781,107 @@ describe("durable outbound submission in workerd", () => {
     expect((await getSendStatus(ctx, principal, result.operation_id)).state).toBe("accepted");
     await sendMail(ctx, principal, input, "receipt-failure");
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads send status as one snapshot while an event projects between reads", async () => {
+    const { ctx } = context();
+    const bucket = {
+      get: ctx.MAIL_ARCHIVE.get.bind(ctx.MAIL_ARCHIVE),
+      put: async (key: string, value: string, options: R2PutOptions) => {
+        if (key.endsWith("receipt.json")) throw new Error("synthetic receipt failure");
+        return ctx.MAIL_ARCHIVE.put(key, value, options);
+      },
+    } as unknown as R2Bucket;
+    const sent = await sendMail({ ...ctx, MAIL_ARCHIVE: bucket }, principal, input, "snapshot");
+    expect(sent.state).toBe("unknown");
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    let projected = false;
+    // A delivery event projects right after the operation row is read, before
+    // anything else the status read does.
+    const project = async () => {
+      if (projected) return;
+      projected = true;
+      await applyProviderEvent(ctx, event("delivered"));
+    };
+    const racing = {
+      ...ctx,
+      MAIL_CATALOG: {
+        withSession: () => ({
+          prepare: (query: string) => {
+            const statement = session.prepare(query);
+            if (!query.startsWith("SELECT * FROM outbound_operations")) return statement;
+            return {
+              bind: (...values: unknown[]) => {
+                const bound = statement.bind(...values);
+                const first = bound.first.bind(bound);
+                Object.assign(bound, {
+                  first: async (...args: []) => {
+                    const row = await first(...args);
+                    await project();
+                    return row;
+                  },
+                });
+                return bound;
+              },
+            } as unknown as D1PreparedStatement;
+          },
+          batch: async (statements: D1PreparedStatement[]) => {
+            const results = await session.batch(statements);
+            await project();
+            return results;
+          },
+        }),
+      } as unknown as D1Database,
+    };
+    const status = await getSendStatus(racing, principal, sent.operation_id);
+    expect(projected).toBe(true);
+    expect({ state: status.state, recipients: status.recipients.map((r) => r.state) }).toEqual({
+      state: "unknown",
+      recipients: ["pending"],
+    });
+    const settled = await getSendStatus(ctx, principal, sent.operation_id);
+    expect({ state: settled.state, recipients: settled.recipients.map((r) => r.state) }).toEqual({
+      state: "accepted",
+      recipients: ["delivered"],
+    });
+  });
+
+  it("retries a delivery event with a bounded backoff from its attempt count", async () => {
+    const outage = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementation(() => {
+      throw new Error("synthetic D1 outage for recipient@example.invalid");
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const messages = [1, 2, 3, 4, 5, 6, 40].map((attempts) => ({
+      id: `synthetic-message-${attempts}`,
+      timestamp: new Date(),
+      body: event("delivered"),
+      attempts,
+      ack: vi.fn(),
+      retry: vi.fn(),
+    }));
+    try {
+      await worker.queue(
+        {
+          queue: "fumi-delivery-events",
+          messages,
+          ackAll: vi.fn(),
+          retryAll: vi.fn(),
+        } as unknown as MessageBatch,
+        env,
+      );
+      expect(messages.map((message) => message.ack.mock.calls.length)).toEqual([
+        0, 0, 0, 0, 0, 0, 0,
+      ]);
+      expect(messages.map((message) => message.retry.mock.calls)).toEqual(
+        [30, 60, 120, 240, 480, 900, 900].map((delaySeconds) => [[{ delaySeconds }]]),
+      );
+      expect(errors.mock.calls).toEqual(
+        messages.map(() => [JSON.stringify({ event: "delivery_event", status: "deferred" })]),
+      );
+    } finally {
+      outage.mockRestore();
+      errors.mockRestore();
+    }
   });
 
   it("recovers the R2 acceptance receipt when post-send D1 writes fail", async () => {

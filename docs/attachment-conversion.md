@@ -76,13 +76,15 @@ hash, so changing or removing it deliberately starts a new policy budget and can
 reprocess selected parts. A call cap alone does not restrict processing to test
 mail. Existing completed downloads remain governed by current MIME provenance.
 
-`enabled:false` disables work. `documents` also requires an `AI` binding. `ocr`
-requires `ATTACHMENT_OCR`, a server-owned **instance** binding, and its `info()`
-must confirm `indexing_options.use_ocr:true` before upload. Use a dedicated private
-instance; copies of opted-in originals enter its built-in storage and retention
-must be managed there separately. No instance name, model, URL or credentials can
-come from a message or MCP request. Absent configuration/bindings makes no paid
-requests. Synthetic tests inject these documented binding methods locally.
+`enabled:false` disables work. Malformed JSON, a value that is not an object or a schema
+mismatch stops the run with the fixed code `invalid_conversion_config`, which never
+quotes the value. `documents` also requires an `AI` binding. `ocr` requires
+`ATTACHMENT_OCR`, a server-owned **instance** binding, and its `info()` must confirm
+`indexing_options.use_ocr:true` before upload. Use a dedicated private instance; copies
+of opted-in originals enter its built-in storage and retention must be managed there
+separately. No instance name, model, URL or credentials can come from a message or MCP
+request. Absent configuration/bindings makes no paid requests. Synthetic tests inject
+these documented binding methods locally.
 
 `maxCalls` is a finite reservation cap (1–1000) for the exact canonical policy,
 including revision and options. A reservation precedes each potentially billable
@@ -127,8 +129,19 @@ outcomes are retained as `unknown` and are not automatically submitted again.
 OCR submission persists the item ID before a later invocation polls. Queued/running
 items defer for five minutes; polling never uploads again. Complete ingestion must
 fit one page of at most 32 indexed chunks, all returned with matching item identity
-and complete pagination. Partial/oversized output is blocked. Polling stops after
-24 hours with explicit coverage. Fixed diagnostics omit provider exception text.
+and complete pagination. Partial/oversized output is blocked. A missing OCR binding,
+a missing PDF loader, a lost password or a malformed `ATTACHMENT_PASSWORDS` defers the
+item without uploading again.
+The 24-hour limit counts from submission. After it, the next run still polls the
+item once when the OCR binding is present and keeps a completed result. Any other
+outcome of that run blocks the row. A provider failure or rejected output keeps its
+own code, such as `ocr_failed` or `output_limit`. An item still queued or running, a
+wait for a binding or a password, or any other failure before the result is committed
+to the call receipt, including a transient one, becomes `ocr_processing_timeout`. A
+result already committed to the receipt is kept even if the row write after it
+fails. So a pause in scheduled runs does not discard a finished item unless that one
+collection attempt fails.
+Fixed diagnostics omit provider exception text.
 
 The ledger distinguishes `pending`, `running`, `submitted`, `complete`, `blocked`
 and `unknown`. Each result records source manifest, original key/hash/size/MIME,
@@ -151,27 +164,58 @@ UTF-8 bodies, each at most 24 KiB, with one-second get/stream deadlines and a
 four-second lookup window. Password-shaped English or Japanese hints remain guesses
 until cryptographic verification. Untrusted message text never grants archive access. A
 private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original SHA-256 supplies
-optional manual candidates. Both sources are validated and combined with at most eight
-distinct strings of 1–128 characters. No credential is accepted through MCP or
-attachment HTTP routes. Password lookup has a five-second deadline. Candidate strings
+optional manual candidates. Malformed JSON or a schema mismatch there blocks the
+encrypted item as `invalid_password_config`. Like a missing password, it is rechecked
+hourly, because a fix to the dictionary does not change the conversion policy hash that
+would otherwise reopen a blocked item. A submitted OCR item likewise keeps its
+submission and waits with that code, like a missing binding, so a corrected dictionary
+still collects the paid result within the 24-hour limit. Both sources are validated and
+combined with at most eight distinct strings of 1–128 characters. No credential is
+accepted through MCP or attachment HTTP routes. Password lookup has a five-second
+deadline and runs only for an item known to be encrypted: an encrypted PDF, or a ZIP
+whose entry list, read and checked against the limits below before anything is
+decrypted, has an encrypted entry. An unencrypted ZIP makes no lookup. Candidate strings
 and provider/parser exceptions are never persisted in the ledger, exposed through MCP or
 logged.
 
 Cryptographic verification decides success. ZIP processing permits eight entries,
 2 MiB per member, 4 MiB total expansion, a maximum 40:1 declared expansion ratio,
-and a shared five-second abort signal. It rejects unsafe paths, corrupt payloads,
+and a five-second abort signal shared by every decryption and decompression, which
+starts after the password lookup. It rejects unsafe paths, corrupt payloads,
 and nested processing; no filesystem, worker scripts or WASM are used. Password
 required/rejected coverage is reconsidered hourly for at most eight lookup rounds,
-allowing a later password message to arrive. Further attempts require a deliberate
-policy revision. Other permanent failures are not retried automatically.
+allowing a later password message to arrive. A round is counted in `password_checks`
+when a lookup for an encrypted item returns, including one that finds no candidate, and
+before any candidate is tried, so a failure while decrypting still uses the round. A
+lookup that times out or fails, and a storage failure before it, uses no round: the item
+returns to `pending` as `temporarily_unavailable` (a submitted OCR item stays
+`submitted` within its 24-hour limit) and is retried after five minutes, like any other
+transient failure. A failure after the lookup, such as saving extracted
+members, uses the round. After eight rounds the item is blocked as
+`password_attempt_budget`. Further attempts require a deliberate policy revision. A
+submitted encrypted PDF re-resolves its password to redact the OCR text; that lookup
+uses no round, so a password found in the eighth round still collects the paid result,
+and its waits are bounded by the 24-hour submission limit instead. Other permanent
+failures are not retried automatically.
 
-Verified members are separate immutable R2 derivatives. UTF-8 `.txt`, `.md` and
-`.csv` members contribute searchable text; other members remain downloadable with
-explicit `unsupported_member` coverage. Nested documents/archives are not recursively
-converted. A ZIP without supported text still exposes an extraction manifest and
-members without falsely indexing manifest metadata as document evidence. Candidate
-values are redacted from newly generated searchable ZIP text before hashing it.
-This does not retroactively remove password text already present in original mail.
+zip.js reports a wrong password and a corrupt encrypted entry with the same errors: a
+synthetic check on 2026-11-21 10:15 UTC with zip.js 2.24.0 found that a correct password
+with a corrupted declared size fails as `Invalid uncompressed size` (stored
+AES/ZipCrypto, deflated AES) or `Invalid CRC32` (deflated ZipCrypto), while wrong
+passwords fail as `Invalid password`, `Invalid CRC32` (stored ZipCrypto) or
+`Invalid compressed data` (deflated). So such an encrypted entry ends as
+`password_rejected` and is retried within the eight rounds instead of being blocked as
+`invalid_archive`, which would end retries for an archive whose right password had not
+arrived yet.
+
+Verified members are separate immutable R2 derivatives. UTF-8 `.txt`, `.md` and `.csv`
+members contribute searchable text; other members remain downloadable with explicit
+`unsupported_member` coverage. Nested documents/archives are not recursively converted.
+A ZIP without supported text still exposes an extraction manifest and members without
+falsely indexing manifest metadata as document evidence. Candidate values found for an
+encrypted ZIP are redacted from all of its newly generated searchable text and member
+names before hashing it. This does not retroactively remove password text already
+present in original mail.
 
 ## Search and authenticated downloads
 
@@ -229,25 +273,32 @@ production acceptance; no CPU or OOM enforcement is claimed from a successful
 decryption. No brittle PDF token filter substitutes for isolation.
 
 A PDF that never mentions an `/Encrypt` name, after `#xx` unescaping, takes the
-unencrypted path. One that does is routed to decryption when any of these checks in
-`src/attachment-conversion-pdf-encryption.ts` finds that name:
+unencrypted path. A name that starts with the UTF-8 byte order mark, such as
+`/#EF#BB#BFEncrypt`, also counts, because LibPDF decodes an escaped name as UTF-8 and
+drops that mark. A PDF that mentions the name is routed to decryption when any of these
+checks in `src/attachment-conversion-pdf-encryption.ts` finds it:
 
 - a lexical scan for an `/Encrypt` name outside comments, literal and hex strings and
   stream data; unterminated string or stream data counts any later mention;
 - the dictionary after every `trailer` keyword, wherever it appears;
 - the classic table and trailer or the cross-reference stream dictionary at every
   `startxref`, `/Prev` and `/XRefStm` offset found anywhere in the bytes, including
-  inside strings, comments and streams, because a parser seeks to those offsets.
+  inside strings, comments and streams, because a parser seeks to those offsets; a
+  `/Prev` or `/XRefStm` name may also start with the byte order mark, and an offset
+  may follow `+` or `-` signs, because LibPDF reads `/Prev +N` and `/Prev --N` as N.
 
 It is also routed to decryption when it does not start with `%PDF-`; has no offset; has
 an offset outside the file, or one that, after white-space, is not `xref` followed later
 by a `trailer` dictionary or `N G obj <<`; has a comment between one of those keywords
-and its value; has a dictionary that does not close within 64 KiB; or has more than 32
-distinct offsets or `trailer` keywords. So the token in page content, a metadata stream
-or an Info string does not block OCR of an unencrypted PDF whose cross-reference data is
+and its value; has white-space and comments that run past 64 KiB after a `trailer`
+keyword, or a dictionary that does not close within 64 KiB; or has more than 32 distinct
+offsets or `trailer` keywords. So the token in page content, a metadata stream or an
+Info string does not block OCR of an unencrypted PDF whose cross-reference data is
 intact. Synthetic tests place the AES-256 fixture's cross-reference stream, or a classic
-trailer for it, inside a literal or hex string, behind a bare `stream` keyword or on a
-comment line, and the isolated LibPDF child still decrypts each one.
+trailer for it, inside a literal or hex string, behind a bare `stream` keyword, on a
+comment line or more than 64 KiB after a `trailer` keyword that follows a decoy
+`trailer` in a table entry, or spell its entry with a byte order mark, and the isolated
+LibPDF child still decrypts each one.
 
 This is routing, not a PDF parser. A parser that rejects a cross-reference section these
 checks accept (for example a corrupt stream or malformed table entries) and rebuilds it
@@ -260,8 +311,9 @@ Without OCR the decrypted PDF is downloadable and explicitly excluded from text
 indexing. With opted-in OCR, the managed service receives the verified decrypted
 PDF, and provenance retains both original encrypted and decrypted hashes. Before
 indexing returned OCR text, candidates are resolved and verified again for
-redaction; loss of a password defers the existing submission instead of uploading
-again. The first upload's identity remains durable throughout that wait.
+redaction; loss of a password or of the `PDF_LOADER` binding defers the existing
+submission instead of uploading again. The first upload's identity remains durable
+throughout that wait.
 
 References: [LibPDF](https://github.com/LibPDF-js/core),
 [pdf-lib encryption](https://github.com/Hopding/pdf-lib#encryption-handling),

@@ -476,6 +476,149 @@ describe("private bounded attachment conversion", () => {
       0,
     );
   });
+  it("does not look up or count passwords for an unencrypted ZIP during a storage outage", async () => {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Plain ZIP invoice 11,111 yen")));
+    await source("application/zip", await writer.close());
+    let outage = true;
+    const archive = new Proxy(env.MAIL_ARCHIVE, {
+      get(target, property) {
+        if (property === "put" && outage)
+          return async () => {
+            throw new Error("synthetic storage outage");
+          };
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? (value as () => unknown).bind(target) : value;
+      },
+    });
+    const resolveCandidates = vi.fn(async () => ["synthetic-unused-candidate"]);
+    const enabled = runtime({
+      MAIL_ARCHIVE: archive,
+      resolveAttachmentPasswords: resolveCandidates,
+    });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    outage = false;
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "local_zip_text",
+      password_checks: 0,
+    });
+    expect(resolveCandidates).not.toHaveBeenCalled();
+  });
+  it("counts only completed password lookups for an encrypted ZIP, within a fixed budget", async () => {
+    const password = crypto.randomUUID();
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      password,
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Encrypted ZIP 22,222 yen")));
+    await source("application/zip", await writer.close());
+    let lookup: () => Promise<string[]> = async () => {
+      throw new Error("synthetic resolver timeout");
+    };
+    const enabled = runtime({ resolveAttachmentPasswords: async () => lookup() });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    // Completed lookups that find no password or a wrong one each use one of eight rounds.
+    lookup = async () => [];
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({ failure_code: "password_required", password_checks: 1 });
+    lookup = async () => ["wrong-synthetic-password"];
+    for (let round = 1; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one hourly password retry.
+      await repairAttachmentConversions(enabled, now + 9 * 300000 + round * 3600000);
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "password_attempt_budget",
+      password_checks: 8,
+    });
+    lookup = async () => [password];
+    await repairAttachmentConversions(enabled, now + 9 * 300000 + 9 * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_attempt_budget" });
+  });
+  it("does not count a failed password lookup for an encrypted PDF", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    await source("application/pdf", bytes);
+    let failing = true;
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, ocr: false, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      resolveAttachmentPasswords: async () => {
+        if (failing) throw new Error("synthetic resolver timeout");
+        return [syntheticPdfPassword];
+      },
+    });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    failing = false;
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "local_decrypted_pdf",
+      password_checks: 1,
+    });
+  });
+  it("defers on malformed private passwords and blocks malformed conversion configuration", async () => {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      password: crypto.randomUUID(),
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Encrypted ZIP 33,333 yen")));
+    await source("application/zip", await writer.close());
+    const secret = "synthetic-config-secret";
+    await repairAttachmentConversions(runtime({ ATTACHMENT_PASSWORDS: `{"${secret}` }), now);
+    // The blocked item is rechecked hourly, so a corrected dictionary reopens it.
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "invalid_password_config",
+      next_attempt_at: now + 3600000,
+    });
+    expect(JSON.stringify(await row())).not.toContain(secret);
+    await repairAttachmentConversions(runtime({ ATTACHMENT_PASSWORDS: "1" }), now + 3600000);
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "invalid_password_config",
+    });
+    await repairAttachmentConversions(runtime({}), now + 2 * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_required" });
+    for (const value of [`{"${secret}`, "[]", `"${secret}"`, "null", "1", "false"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Validate each independent operator configuration.
+      const error = await repairAttachmentConversions(
+        runtime({ ATTACHMENT_CONVERSION_CONFIG: value }),
+        now,
+      ).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "invalid_conversion_config" });
+      expect(String(error)).not.toContain(secret);
+    }
+  });
   it("does not expose stale or corrupt derivative content", async () => {
     await source();
     const toMarkdown = async (file: { name: string }) => ({
@@ -692,6 +835,278 @@ describe("private bounded attachment conversion", () => {
       attachmentSha256: original.sha256,
       limit: 8,
     });
+  });
+  it("keeps a submitted encrypted PDF item while the isolated PDF loader is absent", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    const upload = vi.fn(async () => ({ id: "loader-pdf-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "loader-pdf-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "loader-chunk", text: "PDF total 34,567 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const withoutLoader = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => [syntheticPdfPassword],
+    });
+    const enabled = { ...withoutLoader, PDF_LOADER: env.PDF_LOADER! };
+    await repairAttachmentConversions(enabled, now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "loader-pdf-item" });
+    // A deployment built without the loader binding cannot verify redaction yet.
+    await repairAttachmentConversions(withoutLoader, now + 300000);
+    expect(await row()).toMatchObject({
+      state: "submitted",
+      failure_code: "backend_disabled",
+      remote_item_id: "loader-pdf-item",
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM attachment_conversion_calls").first(
+        "state",
+      ),
+    ).toBe("submitted");
+    await repairAttachmentConversions(enabled, now + 600000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a paid OCR item whose PDF password arrived in the last lookup round", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    let available = false;
+    const upload = vi.fn(async () => ({ id: "last-round-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "last-round-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "last-chunk", text: "PDF total 45,678 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => (available ? [syntheticPdfPassword] : []),
+    });
+    for (let round = 0; round < 7; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one hourly password retry.
+      await repairAttachmentConversions(enabled, now + round * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_required", password_checks: 7 });
+    // The password arrives for the eighth and last lookup round, and the PDF is uploaded once.
+    available = true;
+    await repairAttachmentConversions(enabled, now + 7 * 3600000);
+    expect(await row()).toMatchObject({ state: "submitted", password_checks: 8 });
+    // Collecting the paid result re-resolves the password for redaction; it is not a new guess.
+    await repairAttachmentConversions(enabled, now + 7 * 3600000 + 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+      password_checks: 8,
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a submitted encrypted PDF item while the private password configuration is malformed", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    const upload = vi.fn(async () => ({ id: "config-pdf-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "config-pdf-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "config-chunk", text: "PDF total 56,789 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => [syntheticPdfPassword],
+    });
+    await repairAttachmentConversions(enabled, now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "config-pdf-item" });
+    // An operator mistake in the private dictionary must not discard the paid result.
+    await repairAttachmentConversions({ ...enabled, ATTACHMENT_PASSWORDS: "{" }, now + 300000);
+    expect(await row()).toMatchObject({
+      state: "submitted",
+      failure_code: "invalid_password_config",
+      remote_item_id: "config-pdf-item",
+    });
+    await repairAttachmentConversions(enabled, now + 600000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it("polls a submitted OCR item once before applying the 24-hour limit", async () => {
+    const completed = await source("application/pdf", encode("%PDF synthetic paused scan"));
+    const queued = await source("application/pdf", encode("%PDF synthetic slow scan"), "slow");
+    const items: Record<string, { id: string; status: string }> = {
+      [`fumi-${completed.sha256}.pdf`]: { id: "paused-item", status: "completed" },
+      [`fumi-${queued.sha256}.pdf`]: { id: "slow-item", status: "running" },
+    };
+    const keys = Object.fromEntries(Object.entries(items).map(([key, item]) => [item.id, key]));
+    const upload = vi.fn(async (key: string) => ({ id: items[key]!.id, key }));
+    const get = vi.fn((id: string) => ({
+      info: async () => ({
+        id,
+        key: keys[id],
+        status: items[keys[id]!]!.status,
+        chunks_count: 1,
+      }),
+      chunks: async () => ({
+        result: [
+          { id: "paused-chunk", text: "Paused scan 45,678 yen", start_byte: 0, end_byte: 22 },
+        ],
+        result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+      }),
+    }));
+    const enabled = runtime({
+      ATTACHMENT_OCR: {
+        info: async () => ({ indexing_options: { use_ocr: true } }),
+        items: { upload, get },
+      },
+    });
+    await repairAttachmentConversions(enabled, now);
+    expect(upload).toHaveBeenCalledTimes(2);
+    // Scheduled conversion was paused for two days; the paid items were never polled.
+    await repairAttachmentConversions(enabled, now + 2 * 86400000);
+    const states = Object.fromEntries(
+      (
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key,state,failure_code FROM attachment_conversions",
+        ).all<{ raw_key: string; state: string; failure_code: string | null }>()
+      ).results.map((r) => [r.raw_key, [r.state, r.failure_code]]),
+    );
+    expect(states).toEqual({
+      [completed.raw]: ["complete", null],
+      [queued.raw]: ["blocked", "ocr_processing_timeout"],
+    });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(upload).toHaveBeenCalledTimes(2);
+  });
+  it("keeps an expired submission's durable complete receipt when the final row write fails", async () => {
+    const image = await source("image/png", encode("synthetic expired receipt"), "receipt");
+    const key = `fumi-${image.sha256}.png`;
+    const get = vi.fn(() => ({
+      info: async () => ({ id: "receipt-item", key, status: "completed", chunks_count: 1 }),
+      chunks: async () => ({
+        result: [
+          { id: "receipt-chunk", text: "Receipt total 56,789 yen", start_byte: 0, end_byte: 24 },
+        ],
+        result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+      }),
+    }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: { upload: async () => ({ id: "receipt-item", key }), get },
+    };
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "receipt-item" });
+    const actual = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    let failures = 0;
+    const database = new Proxy(env.MAIL_CATALOG, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          // Only the final row write after the receipt commit fails, once.
+          if (!sql.includes("provenance_json=?,lease_token=NULL") || failures++) return actual(sql);
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("synthetic-d1-unavailable");
+              },
+            }),
+          };
+        };
+      },
+    });
+    await repairAttachmentConversions(
+      runtime({ MAIL_CATALOG: database, ATTACHMENT_OCR: ocr }),
+      now + 2 * 86400000,
+    );
+    expect(failures).toBe(1);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM attachment_conversion_calls").first(
+        "state",
+      ),
+    ).toBe("complete");
+    // The paid result is in the receipt, so the row follows it instead of a timeout.
+    expect(await row()).toMatchObject({
+      state: "complete",
+      failure_code: null,
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it("stops waiting for a missing OCR binding after 24 hours so pending work proceeds", async () => {
+    const images = await Promise.all(
+      ["first-image", "second-image"].map((id) => source("image/png", encode(id), id)),
+    );
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload: async (key: string) => ({ id: `item-${key.slice(5, 13)}`, key }),
+        get: vi.fn(),
+      },
+    };
+    const toMarkdown = vi.fn(async (file: { name: string }) => ({
+      name: file.name,
+      format: "text",
+      data: "pending synthetic document",
+    }));
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    await source(undefined, undefined, "z-document");
+    // A later deployment lacks the OCR binding while document conversion stays available.
+    const withoutOcr = runtime({ AI: { toMarkdown } });
+    await repairAttachmentConversions(withoutOcr, now + 300000);
+    expect(toMarkdown).not.toHaveBeenCalled();
+    await repairAttachmentConversions(withoutOcr, now + 2 * 86400000);
+    await repairAttachmentConversions(withoutOcr, now + 2 * 86400000 + 300000);
+    for (const image of images)
+      expect(
+        // oxlint-disable-next-line no-await-in-loop -- Two fixed synthetic rows.
+        await env.MAIL_CATALOG.prepare(
+          "SELECT state,failure_code FROM attachment_conversions WHERE raw_key=?",
+        )
+          .bind(image.raw)
+          .first(),
+      ).toEqual({ state: "blocked", failure_code: "ocr_processing_timeout" });
+    expect(toMarkdown).toHaveBeenCalledTimes(1);
   });
   it("does not steal a newer run's claim after a stale selection", async () => {
     await source();

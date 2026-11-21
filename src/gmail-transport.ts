@@ -19,9 +19,13 @@ export class GmailImportError extends Error {
   }
 }
 
+/** A response body that stopped mid-stream: a transient network failure, not invalid content. */
+class BodyInterrupted extends Error {}
+type ChunkReader = { read(): Promise<ReadableStreamReadResult<Uint8Array>> };
+
 // The raw field can be 35 MiB of base64. Decode it incrementally rather than
 // retaining JSON text, parsed base64, a binary string and MIME at the same time.
-async function readRawJson(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<unknown> {
+async function readRawJson(reader: ChunkReader): Promise<unknown> {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   const bytes = new Uint8Array(GMAIL_IMPORT_RAW_LIMIT);
   let metadata = "";
@@ -120,10 +124,12 @@ export function createReadonlyGmailTransport(config: {
       await paced();
       let response: Response;
       try {
+        // Workers rejects `redirect: "error"` on every request; "manual" returns a
+        // redirect unfollowed, so the bearer token never leaves the fixed host.
         // oxlint-disable-next-line no-await-in-loop -- Each retry has its own short deadline and token refresh.
         response = await request(url, {
           method: "GET",
-          redirect: "error",
+          redirect: "manual",
           signal: AbortSignal.timeout(15_000),
           headers: {
             Authorization: `Bearer ${token}`,
@@ -137,12 +143,16 @@ export function createReadonlyGmailTransport(config: {
         continue;
       }
       if (!response.ok) {
+        // Do not echo provider response prose or private account details. A stream that
+        // fails to cancel must not replace the status outcome below.
+        // oxlint-disable-next-line no-await-in-loop -- Release failed response streams before retrying.
+        await response.body?.cancel().catch(() => undefined);
+        // The Gmail API does not redirect; one is not transient, so stop at once.
+        if (response.status >= 300 && response.status < 400)
+          throw new GmailImportError("gmail_invalid_response");
         const retry = response.status === 429 || response.status >= 500;
         const delayHeader = response.headers.get("Retry-After");
         const delay = delayHeader === null ? 1000 * 2 ** attempt : Number(delayHeader) * 1000;
-        // Do not echo provider response prose or private account details.
-        // oxlint-disable-next-line no-await-in-loop -- Release failed response streams before retrying.
-        await response.body?.cancel();
         if (!retry || attempt === 3) throw new GmailImportError(`gmail_http_${response.status}`);
         if (!Number.isFinite(delay) || delay > 30_000)
           throw new GmailImportError("gmail_retry_later");
@@ -152,14 +162,21 @@ export function createReadonlyGmailTransport(config: {
       }
       const reader = response.body?.getReader();
       if (!reader) throw new GmailImportError("gmail_invalid_response");
+      // Keep a dropped connection or an expired deadline distinct from malformed content.
+      const body: ChunkReader = {
+        read: () =>
+          reader.read().catch(() => {
+            throw new BodyInterrupted();
+          }),
+      };
       const chunks: Uint8Array[] = [];
       let size = 0;
       try {
         // oxlint-disable-next-line no-await-in-loop -- Await bounded raw decoding before closing its response stream.
-        if (url.searchParams.get("format") === "raw") return await readRawJson(reader);
+        if (url.searchParams.get("format") === "raw") return await readRawJson(body);
         while (true) {
           // oxlint-disable-next-line no-await-in-loop -- Bounded streaming prevents unbounded JSON allocation.
-          const chunk = await reader.read();
+          const chunk = await body.read();
           if (chunk.done) break;
           size += chunk.value.byteLength;
           if (size > limit) throw new GmailImportError("gmail_response_too_large");
@@ -176,12 +193,18 @@ export function createReadonlyGmailTransport(config: {
         );
       } catch (error) {
         if (error instanceof GmailImportError) throw error;
-        throw new GmailImportError("gmail_invalid_response");
+        if (!(error instanceof BodyInterrupted))
+          throw new GmailImportError("gmail_invalid_response");
       } finally {
         // oxlint-disable-next-line no-await-in-loop -- Always release a bounded response before the next request.
         await reader.cancel().catch(() => undefined);
         reader.releaseLock();
       }
+      // Only an interrupted body reaches here. It shares the bounded budget of a failed
+      // fetch; a GET has no side effect to repeat.
+      if (attempt === 3) throw new GmailImportError("gmail_unavailable");
+      // oxlint-disable-next-line no-await-in-loop -- Transient body failures retry with bounded backoff.
+      await sleep(1000 * 2 ** attempt);
     }
     throw new GmailImportError("gmail_unavailable");
   }

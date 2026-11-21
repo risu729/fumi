@@ -9,7 +9,7 @@ import {
   managedMailRuntime,
   type ManagedMailEnvironment,
 } from "../src/managed-search-runtime.ts";
-import { readMailResource } from "../src/mail-read.ts";
+import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
@@ -387,6 +387,50 @@ describe("optional managed body corpus and semantic retrieval", () => {
       (await searchManagedMail(context, reader, { query: "invoice", label_ids: ["SENT"] }, base))
         .matches,
     ).toEqual([]);
+  });
+  it("binds the most metadata filters D1 allows next to the source allowlist, source and labels", async () => {
+    await source("allowed", "Synthetic allowed body", canonical(1));
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
+    ).run();
+    const remote = provider(),
+      context = runtime(remote.binding, {
+        sourceRawKeys: Array.from({ length: 10 }, (_, index) => canonical(index + 1)),
+      });
+    await ready(context);
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) =>
+      Array.from({ length: count }, () => "subject:\u00c4").join(" ");
+    const matched = await searchManagedMail(
+      context,
+      reader,
+      { query: "allowed", filters: filters(MAX_SEARCH_FILTERS), archive_source: "email_routing" },
+      base,
+    );
+    expect(matched.matches.map((m) => m.message_id)).toEqual(["mail_allowed"]);
+    // Ten labels complete the worst case; live ingress has only INBOX, so the candidate is omitted.
+    const worst = await searchManagedMail(
+      context,
+      reader,
+      {
+        query: "allowed",
+        filters: filters(MAX_SEARCH_FILTERS),
+        archive_source: "email_routing",
+        label_ids: Array.from({ length: 10 }, (_, index) => `LABEL_${index}`),
+      },
+      base,
+    );
+    expect(worst.matches).toEqual([]);
+    expect(worst.coverage.omitted_candidates).toBe(1);
+    await expect(
+      searchManagedMail(
+        context,
+        reader,
+        { query: "allowed", filters: filters(MAX_SEARCH_FILTERS + 1) },
+        base,
+      ),
+    ).rejects.toMatchObject({ code: "query_too_long" });
+    expect(remote.search).toHaveBeenCalledTimes(2);
   });
   it("reserves a finite upload/query budget and never resubmits an ambiguous upload", async () => {
     await source();

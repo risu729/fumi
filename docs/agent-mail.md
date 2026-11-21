@@ -42,7 +42,10 @@ This is a single-owner inbound archive: `mail:read` permits all inbound records.
 Drafts, staged attachments, outgoing records and outbound notifications remain
 principal-owned. Scope checks run on the server even if a caller bypasses tool
 discovery. Missing or malformed grants fail closed. Requests and downloads are
-uncacheable; HTML is downloaded as opaque content and never rendered.
+uncacheable; HTML is downloaded as opaque content and never rendered. A
+`/api/mail/*` download the caller cannot read, such as a missing message, a
+`sent_` record of another principal or any message without `mail:read`, answers
+HTTP 404 with `{"error":{"code":"mail_unavailable"}}`.
 
 For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
@@ -74,22 +77,29 @@ Mail, headers, attachment filenames and HTML are untrusted data. Tool annotation
 are client hints, not authorization.
 
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
-`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
-`has:attachment`. Quote values containing spaces. `from:`, `to:` and `subject:`
-match substrings and ignore ASCII letter case. Other characters, such as full-width
-`ＰＤＦ` or `Ä`, match stored text as written in the filter or in lowercase:
-`subject:Änderung` matches `Änderung` and `änderung`, but `subject:änderung` does not
-match `Änderung`. It searches extracted metadata,
-not full bodies or attachments. Without a source filter it includes live and
-imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
-Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
-live ingress has `INBOX`. Gmail SENT messages therefore require
-`archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For compatibility,
-`SENT` without `archive_source` still lists the caller's outgoing operation records
-and accepts only an empty query. Continuation tokens bind query, source and labels;
-changing filters requires a new search. Other Gmail query syntax is rejected.
-Pending/blocked extraction remains visible. Gmail threads use retained account and
-thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
+`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and `has:attachment`.
+Quote values containing spaces. `from:`, `to:` and `subject:` match substrings and
+ignore ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match
+stored text as written in the filter or in lowercase: `subject:Änderung` matches
+`Änderung` and `änderung`, but `subject:änderung` does not match `Änderung`. A query has
+at most 1,000 characters and 33 operators, counting repeated ones; a longer query or
+more operators fail with `query_too_long`, and `get_profile` reports the operator cap as
+`limits.search_filters`. The cap keeps every search, including the `filters` of
+`search_mail_content` and `search_mail_semantic`, within D1's 100 bound parameters per
+statement: a `from:`, `to:` or `subject:` value with uppercase non-ASCII binds two
+values, and `search_mail_semantic` binds up to 33 of its own (item key, policy, ten
+approved sources, archive source and two per label). Operators join as a balanced `AND`
+tree, so 33 of them nest six levels deep instead of 33 and stay within D1's expression
+depth limit of 100. It searches extracted metadata, not full bodies or attachments.
+Without a source filter it includes live and imported archive sources. `archive_source`
+can be `all`, `gmail` or `email_routing`. Up to ten `label_ids` are ANDead: imported
+messages retain provider label IDs; live ingress has `INBOX`. Gmail SENT messages
+therefore require `archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For
+compatibility, `SENT` without `archive_source` still lists the caller's outgoing
+operation records and accepts only an empty query. Continuation tokens bind query,
+source and labels; changing filters requires a new search. Other Gmail query syntax is
+rejected. Pending/blocked extraction remains visible. Gmail threads use retained account
+and thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
 direct untrusted header hints. Neither claims a complete conversation model.
 
 `search_mail_content` is a separate lexical baseline over bounded plain-text
@@ -317,8 +327,14 @@ there is no public HTTP receipt endpoint. Events are retained before projection,
 deduplicated by provider event ID and reconciled when the provider message ID
 becomes known. Deferred events cannot overwrite terminal recipient outcomes;
 mixed recipient outcomes remain separate. Failed processing retries through the
-Queue and eventually uses `fumi-delivery-events-dlq`. Scheduled reconciliation
-updates evidence and never sends mail.
+Queue after a delay of 30 seconds doubled per attempt, at most 15 minutes, so the
+five retries span about 15 minutes before the message moves to
+`fumi-delivery-events-dlq`, which has no consumer. Scheduled reconciliation
+updates evidence and never sends mail. It runs as its own scheduled stage: its
+failure marks the run failed but does not skip MCP Events delivery in that run.
+`get_send_status` reads the submission and its recipients in one D1 batch, so
+a recipient outcome never appears beside a submission state from before it was
+projected.
 
 ## MCP Events
 
@@ -358,7 +374,11 @@ run stops leasing subscriptions four minutes after it starts; the rest stay due
 for the next run. No arbitrary callback hosts are accepted: configure only
 administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
-DNS administration. Redirects are refused on verification and delivery.
+DNS administration. Redirects are never followed. Verification and delivery POST
+with `redirect: "manual"`, because workerd rejects `redirect: "error"` before it
+connects. A 3xx response is then refused: its body is cancelled unread and its
+`Location` is never contacted. It fails callback verification, and a delivery
+retries it like any other non-2xx response.
 
 `WEBHOOK_ORIGINS` unset or `[]` trusts no origin. Any other value that is not a
 JSON array of at most ten exact HTTPS origins, such as

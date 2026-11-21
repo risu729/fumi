@@ -8,7 +8,7 @@ import {
   indexContentSearchSource,
 } from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
-import { readMailResource } from "../src/mail-read.ts";
+import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
@@ -238,6 +238,50 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "matching" }, base)).matches,
     ).toHaveLength(1);
   });
+  it("counts a projection fenced by a conversion change during repair as deferred", async () => {
+    const source = await insert("raced", "raced body needle", {
+      text: "synthetic original scanned PDF",
+      mimeType: "application/pdf",
+    });
+    const part = JSON.parse(source.attachments_json)[0]!;
+    const open = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    const conversion = env.MAIL_CATALOG.prepare(
+      `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,updated_at)
+         VALUES(?,0,?,?,?,?,?,?,?,'pending',0)`,
+    ).bind(
+      source.raw_key,
+      source.manifest_key,
+      "a".repeat(64),
+      part.key,
+      part.sha256,
+      part.size,
+      part.mimeType,
+      "b".repeat(64),
+    );
+    // A conversion starts after repair read the conversion snapshot but before it publishes.
+    const spy = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementationOnce((constraint) => {
+      const session = open(constraint);
+      const batch = session.batch.bind(session);
+      session.batch = async (statements) => {
+        await conversion.run();
+        return batch(statements);
+      };
+      return session;
+    });
+    try {
+      expect(await repairContentSearch(env, 100)).toEqual({ indexed: 0, deferred: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_search_documents").first("n"),
+    ).toBe(0);
+    // Nothing was published, so the next pass picks the source up without a retry delay.
+    expect(await repairContentSearch(env, 101)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      (await searchMailContent(env, reader, { query: "raced body" }, base)).matches,
+    ).toHaveLength(1);
+  });
   it("reindexes a live conversion before historical backlog and backfills the remaining slots", async () => {
     const historical = [];
     for (let index = 0; index < 4; index++) {
@@ -421,6 +465,47 @@ describe("bounded content retrieval", () => {
     await expect(searchMailContent(env, reader, { query: "ab" }, base)).rejects.toMatchObject({
       code: "invalid_content_query",
     });
+  });
+  it("binds the most metadata filters D1 allows next to the phrase and cursor", async () => {
+    await insert("first", "bounded filter needle");
+    await insert("second", "bounded filter needle");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
+    ).run();
+    await repairContentSearch(env);
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) =>
+      Array.from({ length: count }, () => "subject:\u00c4").join(" ");
+    const first = await searchMailContent(
+      env,
+      reader,
+      { query: "needle", filters: filters(MAX_SEARCH_FILTERS), max_results: 1 },
+      base,
+    );
+    expect(first.matches).toHaveLength(1);
+    const second = await searchMailContent(
+      env,
+      reader,
+      {
+        query: "needle",
+        filters: filters(MAX_SEARCH_FILTERS),
+        max_results: 1,
+        next_page_token: first.next_page_token!,
+      },
+      base,
+    );
+    expect([...first.matches, ...second.matches].map((m) => m.message_id).sort()).toEqual([
+      "mail_first",
+      "mail_second",
+    ]);
+    await expect(
+      searchMailContent(
+        env,
+        reader,
+        { query: "needle", filters: filters(MAX_SEARCH_FILTERS + 1) },
+        base,
+      ),
+    ).rejects.toMatchObject({ code: "query_too_long" });
   });
   it("returns the entire matching phrase when it exceeds the FTS snippet token limit", async () => {
     const query = "a".repeat(100);
