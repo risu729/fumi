@@ -56,10 +56,12 @@ smaller bounded subset until larger messages are measured in the actual runtime.
 The parser's header budget charges a minimum per line, so it may reject many small
 headers before their literal byte count reaches 64 KiB. Input, structure and
 decoded-output limits are complementary. Input whose first line is not a header is
-blocked as `invalid_mime` at any size; a header section with no end inside the
-header budget is `parser_limit`. Other malformed mail may be parsed tolerantly by
-the library. Successful decoding is not
-proof of RFC conformance, safe HTML, a safe attachment, or complete search coverage.
+blocked as `invalid_mime` at any size. Input that starts with a header but has no
+blank line ending the header section within the 64 KiB header budget is
+`parser_limit` when the input is longer than the budget, and `invalid_mime` when the
+input ends first. Other malformed mail may be parsed tolerantly by the library.
+Successful decoding is not proof of RFC conformance, safe HTML, a safe attachment, or
+complete search coverage.
 
 Permanent coverage failures are recorded as `blocked` with fixed codes, including
 missing/changed originals, invalid metadata, input/structure/output limits or a
