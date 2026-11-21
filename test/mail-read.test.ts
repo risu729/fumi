@@ -6,6 +6,7 @@ import {
   readMailAttachment,
   readMailResource,
   readMailThread,
+  resolveMailRawKey,
   searchMail,
 } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
@@ -23,9 +24,9 @@ async function insert(
 ) {
   const key = `ingest/2026-11-11/${id}/raw.eml`;
   await env.MAIL_CATALOG.prepare(
-    `INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,observed_pass,observed_revision) VALUES ('email_routing','ingress-v1',?,?,?,?,'present','missing',0,0)`,
+    `INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES ('email_routing','ingress-v1',?,?,?,?,'present','missing',?,0,0)`,
   )
-    .bind(id, key, `${key}.receipt`, date)
+    .bind(id, key, `${key}.receipt`, date, "a".repeat(64))
     .run();
   if (metadata) {
     await env.MAIL_ARCHIVE.put(
@@ -114,6 +115,111 @@ describe("bounded private mail reads", () => {
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("data");
     expect(response.headers.get("content-type")).toBe("application/octet-stream");
     expect(response.headers.get("content-disposition")).toBe("attachment");
+  });
+  it.each([
+    [
+      "blocked after a completed extraction",
+      "UPDATE mail_extractions SET status='blocked',failure_code='source_changed'",
+    ],
+    ["whose original is missing", "UPDATE archive_sources SET raw_state='missing'"],
+    ["whose original changed", `UPDATE archive_sources SET raw_sha256='${"c".repeat(64)}'`],
+  ])("serves no derived content for an extraction %s", async (_, change) => {
+    const id = await insert("stale", "2026-11-11T00:00:00.000Z");
+    const raw = "ingest/2026-11-11/stale/raw.eml";
+    await env.MAIL_ARCHIVE.put(raw, "synthetic original");
+    await env.MAIL_ARCHIVE.put("synthetic/text/stale", "synthetic text");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET body_text_key='synthetic/text/stale'",
+    ).run();
+    const download = (kind: "raw" | "body" | "text" | "attachment", method = "GET") =>
+      readMailResource(
+        new Request("https://fumi.example.invalid", { method }),
+        env,
+        principal,
+        id,
+        kind,
+        kind === "attachment" ? "part_0" : undefined,
+      );
+    for (const kind of ["body", "text", "attachment"] as const)
+      // oxlint-disable-next-line no-await-in-loop -- Each download reads one bounded object.
+      expect((await download(kind)).status).toBe(200);
+    await env.MAIL_CATALOG.prepare(change).run();
+    for (const kind of ["body", "text", "attachment"] as const)
+      for (const method of ["GET", "HEAD"])
+        // oxlint-disable-next-line no-await-in-loop -- Each rejection is checked in turn.
+        await expect(download(kind, method)).rejects.toMatchObject({
+          code: "content_unavailable",
+        });
+    expect(await (await download("raw")).text()).toBe("synthetic original");
+    const mail = await readMail(env, principal, id);
+    expect(mail).toMatchObject({
+      content: null,
+      content_truncated: false,
+      attachments: [{ attachment_id: "part_0", read_attachment_supported: false }],
+    });
+    expect(mail).not.toHaveProperty("extraction_file_uri");
+    await expect(
+      readMailAttachment(
+        env,
+        principal,
+        { message_id: id, attachment_id: "part_0" },
+        "https://fumi.example.invalid",
+      ),
+    ).rejects.toMatchObject({ code: "extraction_incomplete" });
+  });
+  it("answers HEAD downloads from object metadata without reading the body", async () => {
+    const id = await insert("head", "2026-11-11T00:00:00.000Z");
+    const archive = {
+      head: (key: string) => env.MAIL_ARCHIVE.head(key),
+      get: () => {
+        throw new Error("HEAD must not read the object body");
+      },
+    } as unknown as R2Bucket;
+    const response = await readMailResource(
+      new Request("https://fumi.example.invalid", { method: "HEAD" }),
+      { MAIL_CATALOG: env.MAIL_CATALOG, MAIL_ARCHIVE: archive },
+      principal,
+      id,
+      "attachment",
+      "part_0",
+    );
+    expect(response.status).toBe(200);
+    expect(response.body).toBeNull();
+    expect(response.headers.get("content-length")).toBe("4");
+    expect(response.headers.get("content-disposition")).toBe("attachment");
+    await expect(
+      readMailResource(
+        new Request("https://fumi.example.invalid", { method: "HEAD" }),
+        { MAIL_CATALOG: env.MAIL_CATALOG, MAIL_ARCHIVE: archive },
+        principal,
+        id,
+        "attachment",
+        "part_9",
+      ),
+    ).rejects.toMatchObject({ code: "content_unavailable" });
+  });
+  it("refuses to pick one of several sources that share an external ID", async () => {
+    const id = await insert("shared", "2026-11-11T00:00:00.000Z");
+    const key = "ingest/2026-11-11/shared-gmail/raw.eml";
+    await env.MAIL_CATALOG.prepare(
+      `INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,observed_pass,observed_revision) VALUES ('gmail','synthetic-account','shared',?,?,'2026-11-11T00:00:00.000Z','present','missing',0,0)`,
+    )
+      .bind(key, `${key}.receipt`)
+      .run();
+    const conflict = { code: "message_conflict" };
+    await expect(readMail(env, principal, id)).rejects.toMatchObject(conflict);
+    await expect(resolveMailRawKey(env, principal, id)).rejects.toMatchObject(conflict);
+    await expect(
+      readMailResource(new Request("https://fumi.example.invalid"), env, principal, id, "raw"),
+    ).rejects.toMatchObject(conflict);
+    await expect(
+      readMailAttachment(
+        env,
+        principal,
+        { message_id: id, attachment_id: "part_0" },
+        "https://fumi.example.invalid",
+      ),
+    ).rejects.toMatchObject(conflict);
   });
   it("uses a stable snapshot keyset and exact escaped filter bindings", async () => {
     await insert("older", "2026-11-10T00:00:00.000Z", { subject: "100% literal" });

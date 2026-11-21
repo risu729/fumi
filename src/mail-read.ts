@@ -34,6 +34,7 @@ interface MailRow {
   attachments_json: string | null;
   body_json_key: string | null;
   body_text_key: string | null;
+  extraction_current: 0 | 1;
 }
 interface Attachment {
   index: number;
@@ -48,7 +49,8 @@ const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.s
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
- e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key
+ e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
+ CASE WHEN e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256 THEN 1 ELSE 0 END AS extraction_current
  FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 const LIMIT = 16_000;
@@ -66,27 +68,30 @@ function externalId(id: string) {
   if (!/^mail_[a-zA-Z0-9-]{1,128}$/.test(id)) throw new MailReadError("invalid_message_id");
   return id.slice(5);
 }
+// The catalog key is (source_kind, source_namespace, external_id). Message IDs carry only
+// the external ID, so never pick an arbitrary source when corrupt data shares one.
+async function sourceRow<T>(env: MailReadEnvironment, sql: string, id: string) {
+  const rows = (
+    await env.MAIL_CATALOG.prepare(`${sql} WHERE s.external_id=? LIMIT 2`)
+      .bind(externalId(id))
+      .all<T>()
+  ).results;
+  if (!rows.length) throw new MailReadError("message_not_found");
+  if (rows.length > 1) throw new MailReadError("message_conflict");
+  return rows[0]!;
+}
 export async function resolveMailRawKey(
   env: MailReadEnvironment,
   principal: MailPrincipal,
   id: string,
 ) {
   requireRead(principal);
-  const row = await env.MAIL_CATALOG.prepare(
-    "SELECT raw_key FROM archive_sources WHERE external_id=?",
-  )
-    .bind(externalId(id))
-    .first<{ raw_key: string }>();
-  if (!row) throw new MailReadError("message_not_found");
-  return row.raw_key;
+  return (await sourceRow<{ raw_key: string }>(env, "SELECT raw_key FROM archive_sources s", id))
+    .raw_key;
 }
-async function mailRow(env: MailReadEnvironment, id: string) {
-  const row = await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.external_id=?`)
-    .bind(externalId(id))
-    .first<MailRow>();
-  if (!row) throw new MailReadError("message_not_found");
-  return row;
-}
+const mailRow = (env: MailReadEnvironment, id: string) => sourceRow<MailRow>(env, SELECT_MAIL, id);
+/** Derived content is available only while it was extracted from the present original. */
+const extractionCurrent = (row: MailRow) => row.extraction_current === 1;
 function resourceUri(base: string, id: string, kind: string) {
   return new URL(`/api/mail/${encodeURIComponent(id)}/${kind}`, base).href;
 }
@@ -143,16 +148,18 @@ export async function readMail(
     mime_type: a.mimeType,
     size: a.size,
     sha256: a.sha256,
-    read_attachment_supported: true,
+    read_attachment_supported: extractionCurrent(row),
   }));
-  const conversionRows = await attachmentConversionCoverage(env, row.raw_key, id, base);
+  const conversionRows = extractionCurrent(row)
+    ? await attachmentConversionCoverage(env, row.raw_key, id, base)
+    : [];
   const attachmentsWithCoverage = attachments.map((a) => ({
     ...a,
     conversion: conversionRows.find((c) => c.attachment_id === a.attachment_id) ?? {
       state: "not_enabled_or_pending",
     },
   }));
-  if (row.status !== "complete" || !row.body_json_key)
+  if (!extractionCurrent(row) || !row.body_json_key)
     return {
       ...data,
       attachments: attachmentsWithCoverage,
@@ -187,7 +194,7 @@ export async function readMailAttachment(
 ) {
   requireRead(principal);
   const row = await mailRow(env, args.message_id);
-  if (row.status !== "complete") throw new MailReadError("extraction_incomplete");
+  if (!extractionCurrent(row)) throw new MailReadError("extraction_incomplete");
   const entries = JSON.parse(row.attachments_json ?? "[]") as Attachment[];
   if (!args.attachment_id && !args.filename)
     throw new MailReadError("attachment_selector_required");
@@ -290,6 +297,7 @@ export async function readAttachmentConversion(
   if (!/^part_(?:[0-9]|[12][0-9]|3[01])$/.test(part) || !/^[a-f0-9]{64}$/.test(sha))
     throw new MailReadError("content_unavailable");
   const source = await mailRow(env, id);
+  if (!extractionCurrent(source)) throw new MailReadError("content_unavailable");
   const row = await env.MAIL_CATALOG.prepare(
     `SELECT a.result_key,a.result_size,a.source_sha256,a.provenance_json FROM attachment_conversions a JOIN mail_extractions e ON e.raw_key=a.raw_key AND e.manifest_key=a.manifest_key AND e.status='complete' WHERE a.raw_key=? AND a.part_index=? AND a.state='complete' AND a.result_sha256=?`,
   )
@@ -349,6 +357,8 @@ export async function readMailResource(
   if (request.method !== "GET" && request.method !== "HEAD")
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   const row = await mailRow(env, messageId);
+  // The original stays downloadable; derived files only while the extraction is current.
+  if (kind !== "raw" && !extractionCurrent(row)) throw new MailReadError("content_unavailable");
   let key: string | null =
     kind === "raw"
       ? row.raw_key
@@ -362,9 +372,11 @@ export async function readMailResource(
     key = entries.find((a) => `part_${a.index}` === attachmentId)?.key ?? null;
   }
   if (!key) throw new MailReadError("content_unavailable");
-  const object = await env.MAIL_ARCHIVE.get(key);
+  // HEAD needs only the size, so it never opens the object body.
+  const body = request.method === "HEAD" ? null : await env.MAIL_ARCHIVE.get(key);
+  const object = body ?? (request.method === "HEAD" ? await env.MAIL_ARCHIVE.head(key) : null);
   if (!object) throw new MailReadError("content_unavailable");
-  return new Response(request.method === "HEAD" ? null : object.body, {
+  return new Response(body?.body ?? null, {
     headers: {
       "Content-Type": kind === "body" ? "application/json" : "application/octet-stream",
       "Content-Disposition": "attachment",

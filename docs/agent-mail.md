@@ -106,6 +106,18 @@ UTF-16 code units per representation, one fewer when the cut would split a surro
 pair, with authenticated full-content links when truncated. Attachments use descriptors
 rather than embedding arbitrary bytes in model context.
 
+Inline bodies, `read_attachment_supported`, `read_attachment` and the body, text,
+attachment and conversion downloads use only a current extraction: status `complete`,
+original `present` in the catalog, and the extraction's original SHA-256 equal to the
+catalog's, the definition `get_mail_health` counts as current. When a completed
+extraction is later blocked (such as `source_changed` on a retry), or its original goes
+missing or changes, inline content is `null`, `read_attachment_supported` is `false`,
+`read_attachment` fails with `extraction_incomplete`, and the downloads fail with
+`content_unavailable` (HTTP 404 `mail_unavailable`), even though the old derived objects
+remain in R2. `/raw` still serves the archived original while R2 holds it. A message ID
+whose external ID matches more than one catalog source fails with `message_conflict`
+instead of choosing one.
+
 ## Attachment limits
 
 Decision by the owner, 2026-11-18 12:07 UTC: raise the limits for clients that
