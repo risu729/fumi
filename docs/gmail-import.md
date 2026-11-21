@@ -100,7 +100,10 @@ Retries verify existing R2 checksums and provenance rather than replacing eviden
 The runner persists the current list of IDs and next token before retrieving mail. It
 retrieves and archives one original at a time; the client spaces Gmail requests by at
 least 250 ms and retries transient network failures, HTTP 429 and server failures up to
-four attempts. Numeric Retry-After values up to thirty seconds are honored; longer or
+four attempts. A response body that fails mid-stream, including one cut off by the
+request deadline, is a transient network failure: it shares those attempts and ends as
+`gmail_unavailable`, while malformed content stops at once as `gmail_invalid_response`.
+Numeric Retry-After values up to thirty seconds are honored; longer or
 unsupported retry dates stop cleanly for later operator retry. HTTP 401/403/404 stop
 without discarding IDs or advancing the page. In particular, a message deleted from
 Gmail after listing remains an unresolved coverage gap unless already archived.

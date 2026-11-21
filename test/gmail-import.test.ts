@@ -843,6 +843,57 @@ describe("read-only Gmail transport", () => {
       }),
     ).toThrow("readonly_scope_required");
   });
+  it("retries a response body that fails mid-stream like any transient network failure", async () => {
+    const body = JSON.stringify(message());
+    let broken = 1;
+    const request = vi.fn<typeof fetch>().mockImplementation(async (url) => {
+      if (String(url).endsWith("/profile"))
+        return new Response(JSON.stringify({ emailAddress: "synthetic@example.invalid" }));
+      const text = String(url).includes("format=raw") ? body : '{"messages":[{"id":"123"}]}';
+      const fail = broken-- > 0;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text.slice(0, 12)));
+            if (fail) controller.error(new Error("synthetic connection reset"));
+            else {
+              controller.enqueue(new TextEncoder().encode(text.slice(12)));
+              controller.close();
+            }
+          },
+        }),
+      );
+    });
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const client = createReadonlyGmailTransport({
+      scopes: [GMAIL_READONLY_SCOPE],
+      expectedAccountHash: await accountHash(),
+      accessToken: async () => "synthetic-token",
+      fetch: request,
+      sleep,
+    });
+    const value = (await client.getRaw("123")) as { id: string; rawBytes: Uint8Array };
+    expect(value.id).toBe("123");
+    expect(value.rawBytes).toEqual(raw);
+    // Profile, the interrupted raw read and its retry after the first backoff.
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledWith(1000);
+    broken = 1;
+    expect(await client.list({ q: "", maxResults: 10, includeSpamTrash: true })).toEqual({
+      messages: [{ id: "123" }],
+    });
+    expect(request).toHaveBeenCalledTimes(5);
+    // A body that keeps failing uses the same bounded budget and fixed code as fetch failures.
+    broken = Infinity;
+    await expect(client.getRaw("123")).rejects.toThrow("gmail_unavailable");
+    expect(request).toHaveBeenCalledTimes(9);
+    // Complete but malformed content is not a network failure and is never retried.
+    request.mockImplementationOnce(async () => new Response('{"messages":'));
+    await expect(client.list({ q: "", maxResults: 10, includeSpamTrash: true })).rejects.toThrow(
+      "gmail_invalid_response",
+    );
+    expect(request).toHaveBeenCalledTimes(10);
+  });
   it("fails closed on auth, redirects and overlarge responses without provider prose", async () => {
     const request = vi
       .fn<typeof fetch>()
