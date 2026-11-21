@@ -6,7 +6,7 @@ import {
   type AttachmentConversionEnvironment,
 } from "../src/attachment-conversion.ts";
 import { repairContentSearch, searchMailContent } from "../src/content-search.ts";
-import { readAttachmentConversion, readMailAttachment } from "../src/mail-read.ts";
+import { readAttachmentConversion, readMail, readMailAttachment } from "../src/mail-read.ts";
 import { digest } from "../src/attachment-conversion-io.ts";
 import {
   Uint8ArrayReader,
@@ -43,9 +43,9 @@ async function source(
   await env.MAIL_ARCHIVE.put(key, bytes, { sha256 });
   const manifest = `synthetic/manifest/${id}`;
   await env.MAIL_CATALOG.prepare(
-    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-12T00:00:00.000Z','present','missing',0,0)`,
+    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-12T00:00:00.000Z','present','missing',?,0,0)`,
   )
-    .bind(id, raw, `${raw}.receipt`)
+    .bind(id, raw, `${raw}.receipt`, "a".repeat(64))
     .run();
   await env.MAIL_CATALOG.prepare(
     `INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,attachment_count,body_json_key,manifest_key,updated_at) VALUES(?,'mime-v1',?,1,?,'complete','{}',?,1,'synthetic/body-json',?,0)`,
@@ -496,6 +496,29 @@ describe("private bounded attachment conversion", () => {
         converted["result_sha256"] as string,
       ),
     ).rejects.toThrow("content_unavailable");
+  });
+  it.each([
+    ["missing", "UPDATE archive_sources SET raw_state='missing'"],
+    ["changed", `UPDATE archive_sources SET raw_sha256='${"c".repeat(64)}'`],
+  ])("does not serve conversions once the original is %s", async (_, change) => {
+    await source();
+    const toMarkdown = async (file: { name: string }) => ({
+      name: file.name,
+      format: "text",
+      data: "synthetic converted content",
+    });
+    await repairAttachmentConversions(runtime({ AI: { toMarkdown } }), now);
+    const sha = (await row())!["result_sha256"] as string;
+    const download = () =>
+      readAttachmentConversion(new Request(base), env, reader, "mail_conversion", "part_0", sha);
+    expect((await download()).status).toBe(200);
+    await env.MAIL_CATALOG.prepare(change).run();
+    await expect(download()).rejects.toThrow("content_unavailable");
+    expect(await readMail(env, reader, "mail_conversion", "full", base)).toMatchObject({
+      attachments: [
+        { read_attachment_supported: false, conversion: { state: "not_enabled_or_pending" } },
+      ],
+    });
   });
   it("automatically resolves a separate authorized related mail hint and verifies ZIP decryption", async () => {
     const password = crypto.randomUUID();

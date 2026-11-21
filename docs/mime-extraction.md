@@ -62,7 +62,9 @@ proof of RFC conformance, safe HTML, a safe attachment, or complete search cover
 Permanent coverage failures are recorded as `blocked` with fixed codes, including
 missing/changed originals, invalid metadata, input/structure/output limits or a
 conflicting derivative. A blocked extraction does not mark the processing job
-complete. Storage/service outages throw fixed diagnostics for Workflow retries.
+complete. A blocked row keeps the earlier derived keys, but no reader serves them; see
+[agent mail](agent-mail.md#tools-and-bounded-results).
+Storage/service outages throw fixed diagnostics for Workflow retries.
 No exception text, body, address, filename or subject enters Workflow results/logs.
 
 ## Persistence and retries
