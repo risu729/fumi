@@ -124,10 +124,12 @@ export function createReadonlyGmailTransport(config: {
       await paced();
       let response: Response;
       try {
+        // Workers rejects `redirect: "error"` on every request; "manual" returns a
+        // redirect unfollowed, so the bearer token never leaves the fixed host.
         // oxlint-disable-next-line no-await-in-loop -- Each retry has its own short deadline and token refresh.
         response = await request(url, {
           method: "GET",
-          redirect: "error",
+          redirect: "manual",
           signal: AbortSignal.timeout(15_000),
           headers: {
             Authorization: `Bearer ${token}`,
@@ -141,12 +143,16 @@ export function createReadonlyGmailTransport(config: {
         continue;
       }
       if (!response.ok) {
+        // Do not echo provider response prose or private account details. A stream that
+        // fails to cancel must not replace the status outcome below.
+        // oxlint-disable-next-line no-await-in-loop -- Release failed response streams before retrying.
+        await response.body?.cancel().catch(() => undefined);
+        // The Gmail API does not redirect; one is not transient, so stop at once.
+        if (response.status >= 300 && response.status < 400)
+          throw new GmailImportError("gmail_invalid_response");
         const retry = response.status === 429 || response.status >= 500;
         const delayHeader = response.headers.get("Retry-After");
         const delay = delayHeader === null ? 1000 * 2 ** attempt : Number(delayHeader) * 1000;
-        // Do not echo provider response prose or private account details.
-        // oxlint-disable-next-line no-await-in-loop -- Release failed response streams before retrying.
-        await response.body?.cancel();
         if (!retry || attempt === 3) throw new GmailImportError(`gmail_http_${response.status}`);
         if (!Number.isFinite(delay) || delay > 30_000)
           throw new GmailImportError("gmail_retry_later");
