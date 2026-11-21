@@ -279,7 +279,8 @@ export async function indexContentSearchSource(
     // The scheduled repair keeps the deferred row; Workflow retries of the same object cannot help.
     if (error instanceof InvalidSearchSource)
       throw new NonRetryableError("Content indexing unavailable");
-    throw new Error("Content indexing unavailable", { cause: error });
+    // oxlint-disable-next-line preserve-caught-error -- Causes can contain mail and SQL parameters.
+    throw new Error("Content indexing unavailable");
   }
 }
 

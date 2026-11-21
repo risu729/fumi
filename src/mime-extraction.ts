@@ -217,15 +217,22 @@ async function persistBlocked(
   };
 }
 
-async function saveObject(
-  bucket: R2Bucket,
+async function reference(
   prefix: string,
   kind: string,
   bytes: Uint8Array,
-  contentType: string,
 ): Promise<ObjectReference> {
   const digest = await sha256(bytes);
-  const key = `${prefix}/${kind}/${digest}`;
+  return { key: `${prefix}/${kind}/${digest}`, sha256: digest, size: bytes.byteLength };
+}
+
+async function saveObject(
+  bucket: R2Bucket,
+  target: ObjectReference,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<ObjectReference> {
+  const { key, sha256: digest } = target;
   const saved = await bucket.put(key, bytes, {
     onlyIf: { etagDoesNotMatch: "*" },
     sha256: digest,
@@ -240,13 +247,15 @@ async function saveObject(
     hex(stored.checksums.sha256) !== digest
   )
     throw new ExtractionBlocked("derivative_conflict");
-  return { key, sha256: digest, size: bytes.byteLength };
+  return target;
 }
 
 async function parse(bytes: Uint8Array): Promise<Email> {
   // postal-mime deliberately tolerates broken mail. Reject headerless input first.
   const start = new TextDecoder("latin1").decode(bytes.subarray(0, MIME_LIMITS.headersBytes + 4));
-  if (!/^[!-9;-~]+:[^\r\n]*(?:\r?\n|$)/.test(start) || !/\r?\n\r?\n/.test(start))
+  if (!/^[!-9;-~]+:[^\r\n]*(?:\r?\n|$)/.test(start)) throw new ExtractionBlocked("invalid_mime");
+  // Only a header section without an end inside the budget is a parser limit.
+  if (!/\r?\n\r?\n/.test(start))
     throw new ExtractionBlocked(
       start.length > MIME_LIMITS.headersBytes ? "parser_limit" : "invalid_mime",
     );
@@ -332,55 +341,70 @@ async function extract(
     related: attachment.related ?? false,
     representation: "mime-decoded-attachment",
   }));
-  boundedJson(attachmentMetadata);
   const prefix = `derived/${MIME_EXTRACTOR_VERSION}/${digest}`;
-  const textRef = text
-    ? await saveObject(bucket, prefix, "body-text", text, "text/plain; charset=utf-8")
-    : null;
-  // HTML is stored as opaque downloadable bytes; no rendering or remote fetching.
-  const htmlRef = html
-    ? await saveObject(bucket, prefix, "body-html", html, "application/octet-stream")
-    : null;
-  const bodyJson = encoder.encode(
-    JSON.stringify({ text: mail.text ?? null, html: mail.html ?? null }),
-  );
-  const bodyRef = await saveObject(bucket, prefix, "body-json", bodyJson, "application/json");
   const attachments = [];
   for (const metadata of attachmentMetadata) {
     const content = attachmentBytes[metadata.index];
     if (!content) throw new ExtractionBlocked("invalid_mime");
-    // oxlint-disable-next-line no-await-in-loop -- Bound storage concurrency and attachment memory.
-    const reference = await saveObject(
-      bucket,
-      prefix,
-      "attachment",
-      content,
-      "application/octet-stream",
-    );
     attachments.push({
       ...metadata,
-      ...reference,
+      // oxlint-disable-next-line no-await-in-loop -- Hash bounded attachments one at a time.
+      ...(await reference(prefix, "attachment", content)),
       sourceSha256: digest,
       extractorVersion: MIME_EXTRACTOR_VERSION,
     });
   }
+  // Check the stored records, including keys and digests, before any R2 write so a
+  // permanent block leaves no unreferenced derivative behind.
   const attachmentsJson = boundedJson(attachments);
+  const textRef = text
+    ? await saveObject(
+        bucket,
+        await reference(prefix, "body-text", text),
+        text,
+        "text/plain; charset=utf-8",
+      )
+    : null;
+  // HTML is stored as opaque downloadable bytes; no rendering or remote fetching.
+  const htmlRef = html
+    ? await saveObject(
+        bucket,
+        await reference(prefix, "body-html", html),
+        html,
+        "application/octet-stream",
+      )
+    : null;
+  const bodyJson = encoder.encode(
+    JSON.stringify({ text: mail.text ?? null, html: mail.html ?? null }),
+  );
+  const bodyRef = await saveObject(
+    bucket,
+    await reference(prefix, "body-json", bodyJson),
+    bodyJson,
+    "application/json",
+  );
+  for (const attachment of attachments) {
+    const content = attachmentBytes[attachment.index];
+    if (!content) throw new ExtractionBlocked("invalid_mime");
+    // oxlint-disable-next-line no-await-in-loop -- Bound storage concurrency and attachment memory.
+    await saveObject(bucket, attachment, content, "application/octet-stream");
+  }
   // The manifest is the final R2 write and contains every derivative digest.
+  const manifestBytes = encoder.encode(
+    JSON.stringify({
+      extractorVersion: MIME_EXTRACTOR_VERSION,
+      parser: "postal-mime@4.2.1",
+      rawSha256: digest,
+      rawSize: source.size,
+      metadata: JSON.parse(metadataJson),
+      body: { json: bodyRef, text: textRef, html: htmlRef },
+      attachments,
+    }),
+  );
   const manifest = await saveObject(
     bucket,
-    prefix,
-    "manifest",
-    encoder.encode(
-      JSON.stringify({
-        extractorVersion: MIME_EXTRACTOR_VERSION,
-        parser: "postal-mime@4.2.1",
-        rawSha256: digest,
-        rawSize: source.size,
-        metadata: JSON.parse(metadataJson),
-        body: { json: bodyRef, text: textRef, html: htmlRef },
-        attachments,
-      }),
-    ),
+    await reference(prefix, "manifest", manifestBytes),
+    manifestBytes,
     "application/json",
   );
   const current = await bucket.head(rawKey);
