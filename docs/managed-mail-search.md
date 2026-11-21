@@ -97,9 +97,10 @@ Discovery, the projection write, the cleanup fence, upload and poll claims, retr
 and coverage counts use only a current extraction, the definition in
 [agent mail](agent-mail.md#tools-and-bounded-results) and `get_mail_health`: status
 `complete`, original `present` in the catalog, and the extraction's original SHA-256
-equal to the catalog's. When a completed extraction is later blocked, or its original
-goes missing or changes, the next repair deletes its local rows and discovery does not
-select it again, so nothing is uploaded or polled for it. `search_mail_semantic` treats
+equal to the catalog's. When a completed extraction is later blocked, a migration0013
+trigger deletes its local rows with that status change; when its original goes missing
+or changes, the next repair deletes them. Discovery does not select it again, so nothing
+is uploaded or polled for it. `search_mail_semantic` treats
 its remote items as unmapped candidates (counted in `omitted_candidates`), and coverage
 `documents` no longer counts them. The projection write applies the cleanup fence to the
 new row itself, so a source that goes stale between discovery and that write is not

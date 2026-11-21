@@ -969,7 +969,8 @@ describe("optional managed body corpus and semantic retrieval", () => {
       originals.push(original);
     }
     const catalog = env.MAIL_CATALOG;
-    let fired = false;
+    let fired = false,
+      selected = 0;
     // The originals go stale right after discovery selected them, before their parts are read and written.
     const racing = new Proxy(catalog, {
       get(target, property) {
@@ -986,6 +987,7 @@ describe("optional managed body corpus and semantic retrieval", () => {
               all: async () => {
                 const rows = await statement.bind(...values).all();
                 fired = true;
+                selected = rows.results.length;
                 await catalog.batch(
                   kinds.map((kind, index) =>
                     catalog.prepare(staleUpdates[kind]).bind(originals[index]!.raw.key),
@@ -1001,6 +1003,8 @@ describe("optional managed body corpus and semantic retrieval", () => {
     const remote = provider();
     await repairManagedMailCorpus({ ...runtime(remote.binding), MAIL_CATALOG: racing });
     expect(fired).toBe(true);
+    // Discovery did select all three sources while they were still current.
+    expect(selected).toBe(3);
     expect(remote.upload).not.toHaveBeenCalled();
     expect(
       (await env.MAIL_CATALOG.prepare("SELECT raw_key,part FROM managed_mail_documents").all())
