@@ -240,7 +240,8 @@ checks in `src/attachment-conversion-pdf-encryption.ts` finds it:
 - the classic table and trailer or the cross-reference stream dictionary at every
   `startxref`, `/Prev` and `/XRefStm` offset found anywhere in the bytes, including
   inside strings, comments and streams, because a parser seeks to those offsets; a
-  `/Prev` or `/XRefStm` name may also start with the byte order mark.
+  `/Prev` or `/XRefStm` name may also start with the byte order mark, and an offset
+  may follow `+` or `-` signs, because LibPDF reads `/Prev +N` and `/Prev --N` as N.
 
 It is also routed to decryption when it does not start with `%PDF-`; has no offset; has
 an offset outside the file, or one that, after white-space, is not `xref` followed later

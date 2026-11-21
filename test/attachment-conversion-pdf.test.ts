@@ -112,6 +112,11 @@ describe("encrypted PDF detection", () => {
     // LibPDF also follows a /Prev key spelled with a byte order mark.
     const bom = text.replace("/Prev ", "/#EF#BB#BFPrev ");
     expect(isEncryptedPdf(latin1(bom), "application/pdf")).toBe(true);
+    // LibPDF reads `+N` and `--N` as the number N.
+    for (const sign of ["+", "--"]) {
+      const signed = text.replace("/Prev ", `/Prev ${sign}`);
+      expect(isEncryptedPdf(latin1(signed), "application/pdf")).toBe(true);
+    }
     // Without /Prev no offset reaches the string, so a parser never reads that section.
     const unreachable = text.replace(`/Prev ${xrefAt + 2} `, "");
     expect(isEncryptedPdf(latin1(unreachable), "application/pdf")).toBe(false);

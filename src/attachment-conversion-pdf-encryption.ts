@@ -12,7 +12,9 @@ const regular = (char: string | undefined) =>
   char !== undefined && !"\0\t\n\f\r ()<>[]{}/%".includes(char);
 const space = (char: string | undefined) => char !== undefined && "\0\t\n\f\r ".includes(char);
 // White-space only: a comment where a parser expects these tokens makes the PDF unreadable here.
-const offsetPattern = /(?:startxref|\/(?:\xef\xbb\xbf)?(?:Prev|XRefStm))[\0\t\n\f\r ]*(\d+|%)/g;
+// LibPDF reads a number after any `+` or `-` signs, such as `+N` or `--N`, as N.
+const offsetPattern =
+  /(?:startxref|\/(?:\xef\xbb\xbf)?(?:Prev|XRefStm))[\0\t\n\f\r ]*[+-]*(\d+|%)/g;
 const objectPattern = /\d+[\0\t\n\f\r ]+\d+[\0\t\n\f\r ]+obj/y;
 
 function nameEnd(text: string, index: number, limit: number) {
