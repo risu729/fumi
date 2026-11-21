@@ -133,6 +133,41 @@ async function convertedFixture(original: Awaited<ReturnType<typeof source>>) {
   );
   return parts;
 }
+async function convertedPart(original: Awaited<ReturnType<typeof source>>, text: string) {
+  const attachment = await object(
+      `Synthetic original attachment ${original.raw.key}`,
+      "stale-original",
+    ),
+    derivative = await object(text, "stale-ocr-text"),
+    attachments = [{ index: 0, ...attachment, mimeType: "application/pdf" }];
+  const manifest = await object(
+    JSON.stringify({ rawSha256: original.raw.sha256, body: { text: original.body }, attachments }),
+    "stale-manifest",
+  );
+  await env.MAIL_CATALOG.batch([
+    env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET manifest_key=?,attachments_json=?,attachment_count=1 WHERE raw_key=?",
+    ).bind(manifest.key, JSON.stringify(attachments), original.raw.key),
+    env.MAIL_CATALOG.prepare(`INSERT INTO attachment_conversions(raw_key,mime_sha256,part_index,manifest_key,source_key,source_sha256,source_size,
+    source_mime,policy_hash,state,result_key,result_sha256,result_size,representation,provenance_json,updated_at) VALUES(?,?,0,?,?,?,?,'application/pdf','conversion-v1','complete',?,?,?,'managed_ocr_indexed_text','{}',0)`).bind(
+      original.raw.key,
+      original.raw.sha256,
+      manifest.key,
+      attachment.key,
+      attachment.sha256,
+      attachment.size,
+      derivative.key,
+      derivative.sha256,
+      derivative.size,
+    ),
+  ]);
+}
+const staleUpdates = {
+  missing: "UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?",
+  changed: `UPDATE archive_sources SET raw_sha256='${"b".repeat(64)}' WHERE raw_key=?`,
+  blocked:
+    "UPDATE mail_extractions SET status='blocked',failure_code='source_changed' WHERE raw_key=?",
+} as const;
 function provider() {
   const items = new Map<string, { key: string; bytes: Uint8Array }>();
   const upload = vi.fn(async (key: string, blob: Blob) => {
@@ -838,5 +873,140 @@ describe("optional managed body corpus and semantic retrieval", () => {
     expect(result.coverage.documents).toEqual([]);
     expect(result.coverage.omitted_candidates).toBe(1);
     expect(reads).toEqual([]);
+  });
+
+  it("uploads, serves and counts only an extraction of the original the catalog holds now", async () => {
+    const originals = [];
+    for (const id of ["missing", "changed", "blocked", "current"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Four synthetic messages with one converted part each.
+      const original = await source(
+        id,
+        `Stale needle ${id} body.`,
+        canonical(originals.length + 1),
+      );
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Stale needle ${id} attachment.`);
+      originals.push(original);
+    }
+    const remote = provider(),
+      context = runtime(remote.binding, { maxUploads: 20 }),
+      now = Date.now();
+    for (let round = 0; round < 4; round++)
+      // oxlint-disable-next-line no-await-in-loop -- The bounded two-part worker needs four upload/poll rounds for eight parts.
+      await ready(context, now + round * 600002);
+    expect(remote.upload).toHaveBeenCalledTimes(8);
+    await env.MAIL_CATALOG.batch(
+      (["missing", "changed", "blocked"] as const).map((kind, index) =>
+        env.MAIL_CATALOG.prepare(staleUpdates[kind]).bind(originals[index]!.raw.key),
+      ),
+    );
+    const result = await searchManagedMail(
+      context,
+      reader,
+      { query: "stale needle", mode: "hybrid" },
+      base,
+    );
+    expect(result.matches.map((match) => [match.message_id, match.citation.part])).toEqual([
+      ["mail_current", "body"],
+      ["mail_current", "part_0"],
+    ]);
+    expect(result.coverage).toMatchObject({
+      documents: [{ state: "ready", count: 2 }],
+      omitted_candidates: 6,
+    });
+    const calls = (
+      await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls ORDER BY call_id").all()
+    ).results;
+    const current = [
+      { raw_key: originals[3]!.raw.key, part: "body", state: "ready" },
+      { raw_key: originals[3]!.raw.key, part: "part_0", state: "ready" },
+    ];
+    // Cleanup and discovery select the same sources: stale rows go once and are never rediscovered.
+    for (let round = 4; round < 7; round++) {
+      // oxlint-disable-next-line no-await-in-loop -- Repeated repairs must reach a fixed point.
+      await ready(context, now + round * 600002);
+      expect(
+        // oxlint-disable-next-line no-await-in-loop -- Checked after each repair.
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key,part,state FROM managed_mail_documents ORDER BY raw_key,part",
+        ).all(),
+      ).toMatchObject({ results: current });
+    }
+    expect(remote.upload).toHaveBeenCalledTimes(8);
+    // Remote copies and their upload identities stay; removing them needs a reviewed decision.
+    expect(remote.items.size).toBe(8);
+    expect(
+      (await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls ORDER BY call_id").all())
+        .results,
+    ).toEqual(calls);
+  });
+  it("never uploads or projects an extraction whose original went missing, changed or was blocked", async () => {
+    const stale = [];
+    for (const kind of ["missing", "changed", "blocked"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
+      const original = await source(kind, `Never ${kind} body.`, canonical(stale.length + 1));
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Never ${kind} attachment.`);
+      // oxlint-disable-next-line no-await-in-loop -- The original goes stale before the first repair.
+      await env.MAIL_CATALOG.prepare(staleUpdates[kind]).bind(original.raw.key).run();
+      stale.push(original);
+    }
+    const remote = provider();
+    await ready(runtime(remote.binding));
+    expect(remote.upload).not.toHaveBeenCalled();
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM managed_mail_documents",
+      ).first(),
+    ).toEqual({ count: 0 });
+  });
+  it("projects no part when the original goes stale between discovery and the projection write", async () => {
+    const kinds = ["missing", "changed", "blocked"] as const;
+    const originals = [];
+    for (const kind of kinds) {
+      // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
+      const original = await source(kind, `Race ${kind} body.`, canonical(originals.length + 1));
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Race ${kind} attachment.`);
+      originals.push(original);
+    }
+    const catalog = env.MAIL_CATALOG;
+    let fired = false;
+    // The originals go stale right after discovery selected them, before their parts are read and written.
+    const racing = new Proxy(catalog, {
+      get(target, property) {
+        if (property !== "prepare") return Reflect.get(target, property, target) as unknown;
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (
+            fired ||
+            !sql.startsWith("SELECT e.raw_key,e.manifest_key,e.raw_sha256,e.body_text_key")
+          )
+            return statement;
+          return {
+            bind: (...values: unknown[]) => ({
+              all: async () => {
+                const rows = await statement.bind(...values).all();
+                fired = true;
+                await catalog.batch(
+                  kinds.map((kind, index) =>
+                    catalog.prepare(staleUpdates[kind]).bind(originals[index]!.raw.key),
+                  ),
+                );
+                return rows;
+              },
+            }),
+          };
+        };
+      },
+    });
+    const remote = provider();
+    await repairManagedMailCorpus({ ...runtime(remote.binding), MAIL_CATALOG: racing });
+    expect(fired).toBe(true);
+    expect(remote.upload).not.toHaveBeenCalled();
+    expect(
+      (await env.MAIL_CATALOG.prepare("SELECT raw_key,part FROM managed_mail_documents").all())
+        .results,
+    ).toEqual([]);
   });
 });
