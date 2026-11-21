@@ -47,7 +47,7 @@ async function stored(kind: string, bytes: Uint8Array) {
   return { key, sha256: digest, size: bytes.byteLength };
 }
 
-/** A completed extraction shaped like src/mime-extraction.ts output. */
+/** A completed extraction shaped like src/mime-extraction.ts output, of a present original. */
 async function seedParent(
   body: { text: string | null; html: string | null } = { text: parentText, html: null },
   attachments: { filename: string | null; mimeType: string; content: Uint8Array }[] = [],
@@ -87,6 +87,11 @@ async function seedParent(
       bodyRef.key,
     )
     .run();
+  await env.MAIL_CATALOG.prepare(`INSERT OR REPLACE INTO archive_sources (source_kind,source_namespace,external_id,raw_key,
+    receipt_key,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision)
+    VALUES ('email_routing','ingress-v1','synthetic-parent',?,?,'present','missing',?,0,0)`)
+    .bind(rawKey, `${prefix}/receipt.json`, "0".repeat(64))
+    .run();
 }
 
 function context() {
@@ -124,6 +129,7 @@ beforeEach(async () => {
       "outbound_attachments",
       "mail_events",
       "mail_extractions",
+      "archive_sources",
     ].map((table) => env.MAIL_CATALOG.prepare(`DELETE FROM ${table}`)),
   );
   const objects = (await env.MAIL_ARCHIVE.list()).objects;
@@ -297,6 +303,107 @@ describe("Gmail-style reply and forward composition", () => {
     const resumed = await sendMail(ctx, principal, reply, "prepared-reply");
     expect(resumed.state).toBe("accepted");
     expect(sent(send).text).toContain(`${attribution}\n\n> First line`);
+  });
+
+  // A completed extraction stays in D1 after its original goes missing or changes, or after a
+  // retry blocks it; none of these may feed a quote, a forward or a copied attachment.
+  const notCurrent = {
+    "original missing": "UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?",
+    "original changed": `UPDATE archive_sources SET raw_sha256='${"1".repeat(64)}' WHERE raw_key=?`,
+    "blocked after complete":
+      "UPDATE mail_extractions SET status='blocked',failure_code='source_changed' WHERE raw_key=?",
+  };
+  it.each(Object.entries(notCurrent))(
+    "composes from and copies only a current parent extraction: %s",
+    async (_case, sql) => {
+      const content = encoder.encode("synthetic stale attachment");
+      await seedParent(undefined, [{ filename: "notes.txt", mimeType: "text/plain", content }]);
+      const { ctx, send } = context();
+      const draft = await createDraft(ctx, principal, reply);
+      await env.MAIL_CATALOG.prepare(sql).bind(rawKey).run();
+      const forward = {
+        from_address: "sender@example.invalid",
+        to: ["next@example.invalid"],
+        subject: "",
+        payload: {},
+      };
+      await expect(sendMail(ctx, principal, reply, "stale-reply")).rejects.toMatchObject({
+        code: "reply_not_found",
+      });
+      await expect(
+        sendMail(ctx, principal, { ...reply, quote: false }, "stale-unquoted"),
+      ).rejects.toMatchObject({ code: "reply_not_found" });
+      await expect(previewMail(ctx, principal, reply)).rejects.toMatchObject({
+        code: "reply_not_found",
+      });
+      await expect(createDraft(ctx, principal, reply)).rejects.toMatchObject({
+        code: "reply_not_found",
+      });
+      await expect(
+        updateDraft(ctx, principal, draft.draft_id, 1, { ...reply, payload: { text: "Edited" } }),
+      ).rejects.toMatchObject({ code: "reply_not_found" });
+      await expect(
+        sendDraft(ctx, principal, draft.draft_id, 1, "stale-draft"),
+      ).rejects.toMatchObject({ code: "reply_not_found" });
+      await expect(
+        forwardMail(ctx, principal, rawKey, forward, "stale-forward"),
+      ).rejects.toMatchObject({ code: "message_not_found" });
+      await expect(
+        bindArchivedAttachment(ctx, principal, rawKey, 0, await sha256(content)),
+      ).rejects.toMatchObject({ code: "attachment_not_found" });
+      expect(send).not.toHaveBeenCalled();
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT (SELECT COUNT(*) FROM outbound_operations) AS operations,(SELECT COUNT(*) FROM outbound_drafts) AS drafts,(SELECT COUNT(*) FROM outbound_attachments) AS attachments",
+        ).first(),
+      ).toEqual({ operations: 0, drafts: 1, attachments: 0 });
+    },
+  );
+
+  it("still settles same-key retries after the parent extraction stops being current", async () => {
+    await seedParent();
+    const { ctx, send } = context();
+    // Provider message IDs are unique per accepted operation.
+    send.mockImplementation(async () => ({ messageId: crypto.randomUUID() }));
+    const forward = {
+      from_address: "sender@example.invalid",
+      to: ["next@example.invalid"],
+      subject: "",
+      payload: {},
+    };
+    const replied = await sendMail(ctx, principal, reply, "settled-reply");
+    const forwarded = await forwardMail(ctx, principal, rawKey, forward, "settled-forward");
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    let batches = 0;
+    const interrupted = {
+      ...ctx,
+      MAIL_CATALOG: {
+        withSession: () => ({
+          prepare: session.prepare.bind(session),
+          batch: async (statements: D1PreparedStatement[]) => {
+            batches++;
+            if (batches === 2) throw new Error("synthetic preclaim crash");
+            return session.batch(statements);
+          },
+        }),
+      } as unknown as D1Database,
+    };
+    await expect(sendMail(interrupted, principal, reply, "prepared-stale")).rejects.toThrow();
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+      .bind("1".repeat(64), rawKey)
+      .run();
+    // Request hashes are unchanged, so retries match their operations before anything is composed.
+    expect((await sendMail(ctx, principal, reply, "settled-reply")).operation_id).toBe(
+      replied.operation_id,
+    );
+    expect(
+      (await forwardMail(ctx, principal, rawKey, forward, "settled-forward")).operation_id,
+    ).toBe(forwarded.operation_id);
+    const resumed = await sendMail(ctx, principal, reply, "prepared-stale");
+    expect(resumed.state).toBe("accepted");
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(sent(send, 2).text).toContain(`${attribution}\n\n> First line`);
+    expect(sent(send, 2).headers).toEqual(sent(send).headers);
   });
 
   it("matches operations from before request_hash on their original digest", async () => {

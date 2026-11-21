@@ -44,13 +44,20 @@ interface Attachment {
   size: number;
   sha256: string;
 }
+/**
+ * A mail_extractions row `e` is current for its archive_sources row `s` only while it is
+ * complete and was extracted from the original the catalog holds now. Every reader of
+ * derived content uses this, and it matches current_complete in mail-health.ts.
+ */
+export const CURRENT_EXTRACTION_SQL =
+  "e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256";
 const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_kind,s.source_namespace,
  g.message_id AS gmail_message_id,g.thread_id AS gmail_thread_id,g.internal_date AS gmail_internal_date,
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
  e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
- CASE WHEN e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256 THEN 1 ELSE 0 END AS extraction_current
+ CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current
  FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 const LIMIT = 16_000;

@@ -17,6 +17,13 @@ download the decoded UTF-8 plain text through `/api/mail/<id>/text`; attachment
 citations download the exact decoded bytes. Each digest hashes the download bytes.
 Use `read_email` to inspect the message metadata and any omitted representations.
 
+Search, indexing and repair use only a current extraction, the definition in
+[agent mail](agent-mail.md#tools-and-bounded-results) and `get_mail_health`: status
+`complete`, original `present` in the catalog, and the extraction's original SHA-256
+equal to the catalog's. Chunks indexed before the original went missing or changed stay
+in D1 but are not returned, and repair does not index such an extraction. A retry that
+blocks the extraction removes its chunks through the existing trigger.
+
 The `query` is a literal, case-insensitive phrase of 3–200 UTF-16 code units, with
 at least three Unicode characters. Japanese phrases and exact numeric strings
 work without whitespace segmentation. Quotes and FTS operators are treated as
@@ -57,10 +64,11 @@ original hashes/URLs, with the representation explicitly labeled. Decrypted PDF
 binaries, ZIP extraction manifests, HTML-only bodies and non-UTF-8 text are not silently
 treated as text. Unsupported, pending or blocked conversion is excluded. Per-message
 coverage lists conversion state and omitted or truncated content. Aggregate coverage
-reports indexed versus extracted messages; pending/blocked MIME extraction is excluded
-from this denominator. A zero-hit search is not proof that a phrase is absent from every
-original or attachment. Metadata search and authenticated downloads remain available
-independently of content indexing.
+reports indexed versus extracted messages; pending/blocked MIME extraction, and an
+extraction whose original is missing or changed, is excluded from this denominator. A
+zero-hit search is not proof that a phrase is absent from every original or attachment.
+Metadata search and authenticated downloads remain available independently of content
+indexing.
 
 Every derivative is read within a byte bound and checked against its recorded
 SHA-256. Missing or changed bytes defer the whole projection; partial chunks are
