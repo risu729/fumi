@@ -187,6 +187,23 @@ Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this proje
 agents, because the Grok Bot side has no runtime. The signed, retrying `webhook`
 adapter above implements [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
+Decision (owner, 2026-11-21 17:18 UTC): the proxy design is accepted.
+
+- **Repository.** The proxy lives in its own repository, not in fumi.
+- **Account choice.** The proxy reads techo `main:state/active` on every request
+  and forwards to that account's Grok automation webhook. It re-signs the request
+  with that account's `whsec_` secret and keeps the same `webhook-id`.
+- **Deduplication.** One Durable Object deduplicates by `webhook-id` for 7 days.
+- **Unknown result.** When Grok does not answer in time, fumi's next attempt
+  resends, which may produce a duplicate run. The Grok routine checks existing
+  drafts and replies for the `messageId` before acting.
+- **No fallback.** The proxy never falls back to the inactive account.
+- **Where URLs live.**
+  - The Grok trigger URLs and secrets are Worker secrets of the proxy.
+  - The proxy URL is the `destination.adapter.url` of fumi's private routing
+    artifact.
+  - Neither is kept in a repository.
+
 ## Input disclosure and source integrity
 
 Match `inputFields` remain the four bounded metadata fields. The owner manifest

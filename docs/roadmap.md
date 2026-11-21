@@ -174,8 +174,11 @@ establish production delivery.
 - [x] Sign the generic webhook with Standard Webhooks, retry it with a stable
       `webhook-id`, and send identifiers and classification only
       ([ADR 0003](adr/0003-signed-notification-webhooks.md)).
-- [ ] Design and build the Grok Bot webhook proxy: signature check, `webhook-id`
-      deduplication and active-account forwarding.
+- [x] Design the Grok Bot webhook proxy: signature check, `webhook-id`
+      deduplication and active-account forwarding (owner, 2026-11-21 17:18 UTC; see
+      [routing dispatch](routing-dispatch.md)).
+- [ ] Build and deploy the proxy in its own repository, and verify that a Grok run
+      reads `messageId` from the webhook body.
 - [x] Fence the active generic destination by generation, drain old uncertainty
       before activation, and preserve stable operation identity across revisions.
 - [x] Implement authenticated dispatch, stable idempotency keys, an outbox,
