@@ -15,11 +15,13 @@ and JWT checks and a dedicated `mail:import` grant:
 | Method | Path | Result |
 | --- | --- | --- |
 | POST | `/api/admin/gmail-import/start` | Create or verify the configured immutable run |
-| GET | `/api/admin/gmail-import/status` | Counts, pending size, revision and lease state |
+| GET | `/api/admin/gmail-import/status` | Counts, pending size, revision, lease state and [downstream coverage](#downstream-coverage-per-run) |
 | POST | `/api/admin/gmail-import/page` | Process one persisted page of at most ten IDs |
 
-Requests have no body or query parameters. They cannot supply tokens, account
-namespaces, queries, destinations or cutoffs. The adapter is mounted after
+Requests have no body. Only status accepts one optional `after` query parameter, a
+provider message ID that positions its coverage window inside the configured run; start
+and page accept no query parameters. Requests cannot supply tokens, runs, account
+namespaces, Gmail queries, destinations or cutoffs. The adapter is mounted after
 `authenticate` and the same-origin check; it is not a standalone authentication
 boundary. It is deliberately absent from ordinary MCP mail tools.
 
@@ -141,16 +143,72 @@ table. The reconciler understands Gmail receipts, reconstructs catalog and provi
 provenance, and records incomplete raw/receipt pairs without fabricating forwarding or
 stopping unrelated pages. Catalog discovery feeds the existing bounded MIME processing
 repair loop. Import completion establishes archival durability; MIME completion and
-search coverage are separate checks.
+search coverage are separate checks, reported per run as
+[downstream coverage](#downstream-coverage-per-run).
 
 Historical sources always have `notify_events=0`; this is enforced by the catalog
 schema as well as the runner. Import and later MIME completion emit neither received,
 ready nor failed-mail historical notifications. Import does not forward mail.
 
 No real mailbox or credentials belong in repository fixtures, logs or API errors.
-Operator status returns counts only; provider bodies and exceptions become fixed
-codes. Keep OAuth material, private import configuration and acceptance evidence
-outside source control.
+Operator status returns counts and fixed codes, plus at most one provider message ID of
+the configured run as its coverage cursor; provider bodies and exceptions become fixed
+codes. Keep OAuth material, private import configuration and acceptance evidence outside
+source control.
+
+## Downstream coverage per run
+
+Status `complete` and `imported_count` describe archival import only. The status
+response adds `downstream`, which classifies up to 1,000 of the run's import items
+per request in provider message ID order. `window.items` counts the classified items,
+and `window.truncated` is true when more remain. Then `window.next_after` is the last
+classified provider message ID: pass it as `?after=` to read the next window, and
+sum the windows. Without `after`, the first window is returned. Example for a
+completed run of four sources:
+
+```json
+{
+  "status": "complete",
+  "imported_count": 4,
+  "revision": 1,
+  "pending_count": 0,
+  "busy": false,
+  "downstream": {
+    "window": { "after": null, "items": 4, "limit": 1000, "truncated": false, "next_after": null, "order": "provider_message_id" },
+    "archive": { "original_present": 4, "original_missing_or_unknown": 0 },
+    "mime": { "complete": 2, "blocked": 1, "failed": 0, "pending": 1, "unknown": 0, "blocked_reasons": { "input_too_large": 1 }, "failed_reasons": {} },
+    "lexical_index": { "ready": 1, "retry": 0, "pending": 1, "not_applicable": 2, "ready_with_omissions": 0 },
+    "managed_corpus": { "ready": 0, "in_progress": 0, "attention": 0, "none": 4 }
+  }
+}
+```
+
+Each item counts once in every group:
+
+| Group | Values |
+| --- | --- |
+| `archive` | `original_present`: the catalog observes the original; otherwise `original_missing_or_unknown` |
+| `mime` | `complete`: a `mime-v1` extraction matching the present original's hash. `blocked`: a durable extraction coverage reason, counted by fixed code in `blocked_reasons`. `failed`: no extraction and a failed `mime-v1` job, counted by fixed job code in `failed_reasons`. `pending`: no extraction yet, with the original present. `unknown`: anything else, such as an extraction over a missing or changed original |
+| `lexical_index` | Only for MIME `complete`: `ready` (indexed for the current manifest, with `ready_with_omissions` as the subset whose coverage lists omitted or truncated parts), `retry` (a deferred indexing attempt is scheduled), `pending` (not indexed yet). Every other item is `not_applicable` |
+| `managed_corpus` | Optional managed retrieval rows of any policy: `ready` (all rows ready), `attention` (any `blocked` or `unknown` row), `in_progress` (any other row state), `none` (no rows, such as a source never selected for managed retrieval). Existing rows are still counted by state after managed retrieval is disabled or a source leaves its scope, and rows of an earlier policy until repair replaces them |
+
+The window reads the run's items by the existing `(import_id,message_id)` key and
+looks each one up by primary or unique key in the catalog, extraction, processing,
+lexical and managed tables. It needs no migration and scans no other rows. The
+import row and the coverage window are separate reads, and windows are not one
+transactional snapshot: sum them after processing settles when exact totals matter.
+If the coverage read fails, `downstream` is `{"status": "unknown", "reason": "<code>"}`
+with a fixed code, and the archival fields remain.
+The response contains counts, fixed codes and the cursor only: no object keys,
+addresses, message content or provider error text. Coverage does not list R2,
+re-verify originals or retry anything. Use the existing
+[processing repair](processing-workflows.md) and [content search](content-search.md)
+repair paths for pending, failed or deferred stages. Overlapping runs count a shared
+source in each run.
+
+Synthetic workerd tests cover pending, blocked, failed, indexed, deferred and mixed
+runs, managed row states, window continuation, cursor validation, a failed coverage
+read and the query plan. They do not establish production import coverage.
 
 ## Primary references
 

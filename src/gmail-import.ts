@@ -413,3 +413,118 @@ export async function runGmailImportPage(
       .run();
   }
 }
+
+export const IMPORT_COVERAGE_LIMIT = 1000;
+const MIME_STATES = ["complete", "blocked", "failed", "pending", "unknown"] as const;
+const LEXICAL_STATES = ["ready", "retry", "pending", "not_applicable"] as const;
+const MANAGED_STATES = ["ready", "in_progress", "attention", "none"] as const;
+// Every source lookup uses a primary or unique key; only the bounded sample is grouped.
+const mimeComplete =
+  "(e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256)";
+export const IMPORT_COVERAGE_SQL = `WITH observed AS (SELECT message_id,raw_key FROM gmail_import_items
+    WHERE import_id=? AND message_id>? ORDER BY message_id LIMIT ${IMPORT_COVERAGE_LIMIT + 1}),
+  sample AS (SELECT message_id,raw_key FROM observed ORDER BY message_id LIMIT ${IMPORT_COVERAGE_LIMIT}),
+  item AS (SELECT
+    CASE WHEN s.raw_state='present' THEN 'present' ELSE 'missing_or_unknown' END AS archive,
+    CASE WHEN ${mimeComplete} THEN 'complete' WHEN e.status='blocked' THEN 'blocked'
+    WHEN e.status IS NULL AND j.state='failed' THEN 'failed'
+    WHEN e.status IS NULL AND s.raw_state='present' THEN 'pending' ELSE 'unknown' END AS mime,
+    CASE WHEN e.status='blocked' THEN e.failure_code
+    WHEN e.status IS NULL AND j.state='failed' THEN COALESCE(j.failure_code,'unspecified') END AS mime_reason,
+    CASE WHEN NOT COALESCE(${mimeComplete},0) THEN 'not_applicable'
+    WHEN d.status='ready' AND d.manifest_key=e.manifest_key THEN 'ready'
+    WHEN d.status='retry' AND d.manifest_key=e.manifest_key THEN 'retry' ELSE 'pending' END AS lexical,
+    CASE WHEN COALESCE(${mimeComplete},0) AND d.status='ready' AND d.manifest_key=e.manifest_key AND json_valid(d.coverage_json)
+    AND COALESCE(json_array_length(d.coverage_json,'$.omitted'),0)>0 THEN 1 ELSE 0 END AS lexical_omissions,
+    (SELECT CASE WHEN COUNT(*)=0 THEN 'none' WHEN SUM(m.state IN ('blocked','unknown'))>0 THEN 'attention'
+    WHEN SUM(m.state='ready')=COUNT(*) THEN 'ready' ELSE 'in_progress' END
+    FROM managed_mail_documents m WHERE m.raw_key=i.raw_key) AS managed
+    FROM sample i LEFT JOIN archive_sources s ON s.raw_key=i.raw_key
+    LEFT JOIN mail_extractions e ON e.raw_key=i.raw_key AND e.extractor_version='mime-v1'
+    LEFT JOIN processing_jobs j ON j.raw_key=i.raw_key AND j.pipeline_version='mime-v1'
+    LEFT JOIN mail_search_documents d ON d.raw_key=i.raw_key)
+  SELECT archive,mime,mime_reason,lexical,lexical_omissions,managed,COUNT(*) AS n,
+    (SELECT COUNT(*) FROM observed) AS observed,(SELECT MAX(message_id) FROM sample) AS last_id
+  FROM item GROUP BY archive,mime,mime_reason,lexical,lexical_omissions,managed`;
+const tally = <T extends string>(keys: readonly T[]) =>
+  Object.fromEntries(keys.map((key) => [key, 0])) as Record<T, number>;
+interface CoverageRow {
+  archive: string;
+  mime: string;
+  mime_reason: string | null;
+  lexical: string;
+  lexical_omissions: number;
+  managed: string;
+  n: number;
+  observed: number;
+  last_id: string | null;
+}
+
+/**
+ * Downstream stage counts for at most 1,000 of one run's items, read in provider
+ * message ID order through the existing `(import_id,message_id)` key and primary-key
+ * lookups. Counts only: no keys, addresses, content or provider error text.
+ */
+export async function gmailImportCoverage(
+  db: Pick<D1Database, "prepare">,
+  importId: string,
+  after: string | null,
+) {
+  if (!gmailNamespace(importId)) throw new GmailImportError("invalid_import_id");
+  if (after !== null && !gmailId(after)) throw new GmailImportError("invalid_coverage_cursor");
+  const rows = (
+    await db
+      .prepare(IMPORT_COVERAGE_SQL)
+      .bind(importId, after ?? "")
+      .all<CoverageRow>()
+  ).results;
+  const archive = tally(["original_present", "original_missing_or_unknown"] as const);
+  const mime = tally(MIME_STATES);
+  const reasons: Record<"blocked" | "failed", Record<string, number>> = { blocked: {}, failed: {} };
+  const lexical = { ...tally(LEXICAL_STATES), ready_with_omissions: 0 };
+  const managed = tally(MANAGED_STATES);
+  let items = 0;
+  for (const row of rows) {
+    const n = row.n;
+    if (
+      !Number.isSafeInteger(n) ||
+      n <= 0 ||
+      !(MIME_STATES as readonly string[]).includes(row.mime) ||
+      !(LEXICAL_STATES as readonly string[]).includes(row.lexical) ||
+      !(MANAGED_STATES as readonly string[]).includes(row.managed)
+    )
+      throw new GmailImportError("invalid_coverage_evidence");
+    items += n;
+    archive[row.archive === "present" ? "original_present" : "original_missing_or_unknown"] += n;
+    mime[row.mime as (typeof MIME_STATES)[number]] += n;
+    if (row.mime === "blocked" || row.mime === "failed") {
+      // Reasons are fixed schema codes; anything else is never echoed.
+      const code =
+        row.mime_reason && /^[a-z_]{1,64}$/.test(row.mime_reason)
+          ? row.mime_reason
+          : "unrecognized";
+      reasons[row.mime][code] = (reasons[row.mime][code] ?? 0) + n;
+    }
+    lexical[row.lexical as (typeof LEXICAL_STATES)[number]] += n;
+    if (row.lexical_omissions === 1) lexical.ready_with_omissions += n;
+    managed[row.managed as (typeof MANAGED_STATES)[number]] += n;
+  }
+  const truncated = (rows[0]?.observed ?? 0) > IMPORT_COVERAGE_LIMIT;
+  const last = rows[0]?.last_id ?? null;
+  if (items > IMPORT_COVERAGE_LIMIT || (truncated && !gmailId(last)))
+    throw new GmailImportError("invalid_coverage_evidence");
+  return {
+    window: {
+      after,
+      items,
+      limit: IMPORT_COVERAGE_LIMIT,
+      truncated,
+      next_after: truncated ? last : null,
+      order: "provider_message_id",
+    },
+    archive,
+    mime: { ...mime, blocked_reasons: reasons.blocked, failed_reasons: reasons.failed },
+    lexical_index: lexical,
+    managed_corpus: managed,
+  };
+}

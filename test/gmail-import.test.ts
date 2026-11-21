@@ -661,12 +661,13 @@ describe("trusted Gmail import operator handler", () => {
     ).toEqual({ status: "complete", imported: 1 });
     const status = await handleGmailImport(new Request(`${url}status`), env, operator, runtime);
     expect(status.headers.get("cache-control")).toBe("no-store");
-    expect(await status.json()).toEqual({
+    expect(await status.json()).toMatchObject({
       status: "complete",
       imported_count: 1,
       revision: 1,
       pending_count: 0,
       busy: false,
+      downstream: { window: { items: 1 }, mime: { pending: 1 } },
     });
     expect(runtime.transport.list).toHaveBeenCalledTimes(1);
   });
