@@ -369,6 +369,44 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "retry needle" }, base)).matches,
     ).toMatchObject([{ message_id: "mail_z-live-retry" }]);
   });
+  it("searches and indexes only an extraction of the original the catalog holds now", async () => {
+    const missing = await insert("stale-missing", "stale needle one");
+    const changed = await insert("stale-changed", "stale needle two");
+    const blocked = await insert("stale-blocked", "stale needle three");
+    const current = await insert("stale-current", "stale needle four");
+    for (const row of [missing, changed, blocked, current])
+      // oxlint-disable-next-line no-await-in-loop -- Four synthetic messages, indexed in order.
+      expect(await indexMailContent(env, row)).toBe(true);
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?")
+      .bind(missing.raw_key)
+      .run();
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+      .bind("b".repeat(64), changed.raw_key)
+      .run();
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET status='blocked',failure_code='source_changed' WHERE raw_key=?",
+    )
+      .bind(blocked.raw_key)
+      .run();
+    const result = await searchMailContent(env, reader, { query: "stale needle" }, base);
+    expect(result.matches.map((match) => match.message_id)).toEqual(["mail_stale-current"]);
+    expect(result.coverage).toMatchObject({ extracted_messages: 1, indexed_messages: 1 });
+    // Indexing never publishes a projection of a stale extraction.
+    await env.MAIL_CATALOG.exec(
+      "DELETE FROM mail_search_chunks; DELETE FROM mail_search_documents;",
+    );
+    expect(await indexMailContent(env, missing)).toBe(false);
+    expect(await indexMailContent(env, changed)).toBe(false);
+    await completedJob(changed.raw_key, "synthetic-changed-instance");
+    expect(
+      await indexContentSearchSource(env, changed.raw_key, "synthetic-changed-instance"),
+    ).toEqual({ status: "skipped" });
+    expect(await repairContentSearch(env)).toEqual({ indexed: 1, deferred: 0 });
+    expect(await repairContentSearch(env)).toEqual({ indexed: 0, deferred: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM mail_search_documents").all(),
+    ).toMatchObject({ results: [{ raw_key: current.raw_key }] });
+  });
   it("removes obsolete indexed text on extraction invalidation and fences stale publication", async () => {
     const row = await insert("changed", "obsolete needle");
     await repairContentSearch(env);

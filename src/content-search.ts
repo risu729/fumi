@@ -1,5 +1,10 @@
 import { NonRetryableError } from "cloudflare:workflows";
-import { MailReadError, parseMailSearch, type MailReadEnvironment } from "./mail-read.ts";
+import {
+  CURRENT_EXTRACTION_SQL,
+  MailReadError,
+  parseMailSearch,
+  type MailReadEnvironment,
+} from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { pairBoundary, truncateCodeUnits } from "./utf16.ts";
 
@@ -172,7 +177,8 @@ export async function indexMailContent(
   }
   const db = env.MAIL_CATALOG.withSession("first-primary");
   const attempt = processingFence(expectedInstanceId);
-  const guard = `EXISTS (SELECT 1 FROM mail_extractions e WHERE raw_key=? AND extractor_version='mime-v1' AND status='complete' AND manifest_key=?${attempt.sql}) AND (SELECT json_group_array(json_array(part_index,state,result_sha256,policy_hash)) FROM (SELECT part_index,state,result_sha256,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index))=?`;
+  // Only a current extraction is published: its original is still present and unchanged.
+  const guard = `EXISTS (SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.raw_key=? AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=?${attempt.sql}) AND (SELECT json_group_array(json_array(part_index,state,result_sha256,policy_hash)) FROM (SELECT part_index,state,result_sha256,policy_hash FROM attachment_conversions WHERE raw_key=? AND manifest_key=? ORDER BY part_index))=?`;
   const guardValues = [
     source.raw_key,
     source.manifest_key,
@@ -239,7 +245,7 @@ async function deferContentIndex(
 ) {
   const attempt = processingFence(expectedInstanceId);
   await env.MAIL_CATALOG.prepare(`INSERT INTO mail_search_documents(raw_key,manifest_key,status,coverage_json,next_attempt_at)
-    SELECT ?,?,'retry','{}',? WHERE EXISTS (SELECT 1 FROM mail_extractions e WHERE raw_key=? AND status='complete' AND manifest_key=?${attempt.sql})
+    SELECT ?,?,'retry','{}',? WHERE EXISTS (SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.raw_key=? AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=?${attempt.sql})
     ON CONFLICT(raw_key) DO UPDATE SET next_attempt_at=excluded.next_attempt_at
     WHERE mail_search_documents.status='retry' AND mail_search_documents.manifest_key=excluded.manifest_key`)
     .bind(
@@ -263,8 +269,8 @@ export async function indexContentSearchSource(
   const attempt = processingFence(expectedInstanceId);
   const source =
     await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json,d.status AS search_status,d.manifest_key AS search_manifest
-    FROM mail_extractions e LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
-    WHERE e.raw_key=? AND e.extractor_version='mime-v1' AND e.status='complete'${attempt.sql}`)
+    FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+    WHERE e.raw_key=? AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL}${attempt.sql}`)
       .bind(rawKey, ...attempt.bindings)
       .first<Extraction & { search_status: string | null; search_manifest: string | null }>();
   if (!source) return { status: "skipped" };
@@ -289,7 +295,7 @@ export async function repairContentSearch(env: MailReadEnvironment, now = Date.n
     await env.MAIL_CATALOG.prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json
     FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
     LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
-    WHERE s.raw_state='present' AND e.status='complete' AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))
+    WHERE ${CURRENT_EXTRACTION_SQL} AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))
     ORDER BY CASE s.source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(d.next_attempt_at,0),e.raw_key LIMIT 3`)
       .bind(now)
       .all<Extraction>()
@@ -367,7 +373,7 @@ export async function searchMailContent(
     FROM mail_search_fts JOIN mail_search_chunks c ON c.id=mail_search_fts.rowid
     JOIN mail_search_documents d ON d.raw_key=c.raw_key AND d.status='ready'
     JOIN archive_sources s ON s.raw_key=c.raw_key
-    JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND e.status='complete' AND e.manifest_key=d.manifest_key
+    JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=d.manifest_key
     WHERE mail_search_fts MATCH ? AND c.id<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
     ORDER BY c.id DESC LIMIT ?`)
       .bind(`"${query.replaceAll('"', '""')}"`, before, ...parsed.values, limit + 1)
@@ -390,7 +396,8 @@ export async function searchMailContent(
   const coverage = await env.MAIL_CATALOG.prepare(`SELECT
     COUNT(*) AS extracted_messages,
     SUM(CASE WHEN d.status='ready' AND d.manifest_key=e.manifest_key THEN 1 ELSE 0 END) AS indexed_messages
-    FROM mail_extractions e LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key WHERE e.status='complete'`).first();
+    FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key WHERE ${CURRENT_EXTRACTION_SQL}`).first();
   return {
     matches: page.map((row) => ({
       message_id: `mail_${row.external_id}`,

@@ -85,6 +85,15 @@ async function storeBody(text: string) {
   return key;
 }
 
+/** The catalog row that keeps a seeded parent extraction current: its original, present. */
+async function catalogOriginal(rawKey: string) {
+  await env.MAIL_CATALOG.prepare(`INSERT OR REPLACE INTO archive_sources (source_kind,source_namespace,external_id,raw_key,
+    receipt_key,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision)
+    VALUES ('email_routing','ingress-v1',?,?,?,'present','missing',?,0,0)`)
+    .bind(rawKey.replaceAll(/[^a-zA-Z0-9-]/g, "-"), rawKey, `${rawKey}.receipt`, "0".repeat(64))
+    .run();
+}
+
 beforeAll(async () => applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS));
 beforeEach(async () => {
   await env.MAIL_CATALOG.batch(
@@ -95,6 +104,7 @@ beforeEach(async () => {
       "outbound_drafts",
       "outbound_attachments",
       "mail_events",
+      "archive_sources",
     ].map((table) => env.MAIL_CATALOG.prepare(`DELETE FROM ${table}`)),
   );
   const objects = (await env.MAIL_ARCHIVE.list()).objects;
@@ -307,6 +317,7 @@ describe("durable outbound submission in workerd", () => {
         await storeBody("Synthetic parent body"),
       )
       .run();
+    await catalogOriginal(rawKey);
     await sendMail(ctx, principal, { ...input, reply_message_id: rawKey }, "reply");
     expect((send.mock.calls[0]?.[0] as EmailMessageBuilder | undefined)?.headers).toEqual({
       "In-Reply-To": "<parent@example.invalid>",
@@ -337,6 +348,7 @@ describe("durable outbound submission in workerd", () => {
         VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
         .bind(rawKey, "0".repeat(64), JSON.stringify(metadata), await storeBody("Parent"))
         .run();
+      await catalogOriginal(rawKey);
     };
     const headers = (call: number) =>
       (send.mock.calls[call]?.[0] as EmailMessageBuilder | undefined)?.headers;
@@ -400,6 +412,7 @@ describe("durable outbound submission in workerd", () => {
       // ...and only the newest 20 References were kept, dropping the thread root.
       [{ references: ids(5, 25) }, { references: ids(0, 25) }],
     ] as const;
+    await catalogOriginal(rawKey);
     for (const [index, [earlier, stored]] of cases.entries()) {
       const parent = { messageId: "<parent@example.invalid>" };
       // The current rule over `earlier` yields what the earlier rule built from `stored`.
@@ -519,7 +532,7 @@ describe("durable outbound submission in workerd", () => {
       VALUES ('email_routing','ingress-v1','synthetic-envelope',?,? ,?,'forwarded','present','valid',?,0,0)`)
       .bind(rawKey, "ingest/synthetic-envelope/receipt.json", JSON.stringify(receipt), sha)
       .run();
-    await sendMail(
+    const defaulted = await sendMail(
       ctx,
       domainPrincipal,
       { ...noSender, reply_message_id: rawKey },
@@ -537,6 +550,42 @@ describe("durable outbound submission in workerd", () => {
     expect((send.mock.calls[2]?.[0] as EmailMessageBuilder | undefined)?.from).toBe(
       "override@example.invalid",
     );
+    // The default sender is part of the request hash, so a same-key retry still finds its
+    // operation after the parent's original goes missing; a new reply fails when composing.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET raw_state = 'missing' WHERE raw_key = ?",
+    )
+      .bind(rawKey)
+      .run();
+    expect(
+      await sendMail(
+        ctx,
+        domainPrincipal,
+        { ...noSender, reply_message_id: rawKey },
+        "default-reply",
+      ),
+    ).toMatchObject({ operation_id: defaulted.operation_id, state: "accepted" });
+    await expect(
+      sendMail(
+        ctx,
+        domainPrincipal,
+        { ...noSender, reply_message_id: rawKey },
+        "default-reply-new",
+      ),
+    ).rejects.toMatchObject({ code: "reply_not_found" });
+    // Previews and drafts take their default sender from a current extraction only.
+    await expect(
+      previewMail(ctx, domainPrincipal, { ...noSender, reply_message_id: rawKey }),
+    ).rejects.toMatchObject({ code: "reply_sender_unavailable" });
+    await expect(
+      createDraft(ctx, domainPrincipal, { ...noSender, reply_message_id: rawKey }),
+    ).rejects.toMatchObject({ code: "reply_sender_unavailable" });
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS operations FROM outbound_operations WHERE idempotency_key = 'default-reply-new'",
+      ).first(),
+    ).toEqual({ operations: 0 });
     await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources WHERE raw_key = ?")
       .bind(rawKey)
       .run();

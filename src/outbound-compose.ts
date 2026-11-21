@@ -1,4 +1,5 @@
 import { readVerified } from "./attachment-conversion-io.ts";
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 import { MIME_LIMITS } from "./mime-extraction.ts";
 import { truncateCodeUnits } from "./utf16.ts";
 
@@ -261,19 +262,25 @@ function bytes(part: ComposedPart): number {
   return encoder.encode((part.text ?? "") + (part.html ?? "")).byteLength;
 }
 
+/**
+ * The parent as its current extraction describes it, or null when no current extraction
+ * exists: a blocked one, or one whose original has gone missing or changed since.
+ */
 export async function loadParent(
   db: Pick<D1Database, "prepare">,
   bucket: R2Bucket,
   rawKey: string,
   includeBody = true,
-): Promise<ParentMail> {
+): Promise<ParentMail | null> {
   const row = await db
     .prepare(
-      "SELECT metadata_json, attachments_json, body_json_key FROM mail_extractions WHERE raw_key = ? AND extractor_version = 'mime-v1' AND status = 'complete'",
+      `SELECT e.metadata_json, e.attachments_json, e.body_json_key FROM mail_extractions e
+      JOIN archive_sources s ON s.raw_key = e.raw_key
+      WHERE e.raw_key = ? AND e.extractor_version = 'mime-v1' AND ${CURRENT_EXTRACTION_SQL}`,
     )
     .bind(rawKey)
     .first<{ metadata_json: string; attachments_json: string; body_json_key: string }>();
-  if (!row) throw new ComposeError("original_unavailable");
+  if (!row) return null;
   // Extraction derivatives are content-addressed: the key ends with the SHA-256.
   const digest = row.body_json_key.slice(row.body_json_key.lastIndexOf("/") + 1);
   if (includeBody && !digestPattern.test(digest)) throw new ComposeError("original_unavailable");
