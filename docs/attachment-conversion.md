@@ -76,13 +76,15 @@ hash, so changing or removing it deliberately starts a new policy budget and can
 reprocess selected parts. A call cap alone does not restrict processing to test
 mail. Existing completed downloads remain governed by current MIME provenance.
 
-`enabled:false` disables work. `documents` also requires an `AI` binding. `ocr`
-requires `ATTACHMENT_OCR`, a server-owned **instance** binding, and its `info()`
-must confirm `indexing_options.use_ocr:true` before upload. Use a dedicated private
-instance; copies of opted-in originals enter its built-in storage and retention
-must be managed there separately. No instance name, model, URL or credentials can
-come from a message or MCP request. Absent configuration/bindings makes no paid
-requests. Synthetic tests inject these documented binding methods locally.
+`enabled:false` disables work. Malformed JSON, a value that is not an object or a schema
+mismatch stops the run with the fixed code `invalid_conversion_config`, which never
+quotes the value. `documents` also requires an `AI` binding. `ocr` requires
+`ATTACHMENT_OCR`, a server-owned **instance** binding, and its `info()` must confirm
+`indexing_options.use_ocr:true` before upload. Use a dedicated private instance; copies
+of opted-in originals enter its built-in storage and retention must be managed there
+separately. No instance name, model, URL or credentials can come from a message or MCP
+request. Absent configuration/bindings makes no paid requests. Synthetic tests inject
+these documented binding methods locally.
 
 `maxCalls` is a finite reservation cap (1–1000) for the exact canonical policy,
 including revision and options. A reservation precedes each potentially billable
@@ -128,7 +130,8 @@ OCR submission persists the item ID before a later invocation polls. Queued/runn
 items defer for five minutes; polling never uploads again. Complete ingestion must
 fit one page of at most 32 indexed chunks, all returned with matching item identity
 and complete pagination. Partial/oversized output is blocked. A missing OCR binding,
-a missing PDF loader or a lost password defers the item without uploading again.
+a missing PDF loader, a lost password or a malformed `ATTACHMENT_PASSWORDS` defers the
+item without uploading again.
 The 24-hour limit counts from submission. After it, the next run still polls the
 item once when the OCR binding is present and keeps a completed result. Any other
 outcome of that run blocks the row. A provider failure or rejected output keeps its
@@ -161,27 +164,58 @@ UTF-8 bodies, each at most 24 KiB, with one-second get/stream deadlines and a
 four-second lookup window. Password-shaped English or Japanese hints remain guesses
 until cryptographic verification. Untrusted message text never grants archive access. A
 private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original SHA-256 supplies
-optional manual candidates. Both sources are validated and combined with at most eight
-distinct strings of 1–128 characters. No credential is accepted through MCP or
-attachment HTTP routes. Password lookup has a five-second deadline. Candidate strings
+optional manual candidates. Malformed JSON or a schema mismatch there blocks the
+encrypted item as `invalid_password_config`. Like a missing password, it is rechecked
+hourly, because a fix to the dictionary does not change the conversion policy hash that
+would otherwise reopen a blocked item. A submitted OCR item likewise keeps its
+submission and waits with that code, like a missing binding, so a corrected dictionary
+still collects the paid result within the 24-hour limit. Both sources are validated and
+combined with at most eight distinct strings of 1–128 characters. No credential is
+accepted through MCP or attachment HTTP routes. Password lookup has a five-second
+deadline and runs only for an item known to be encrypted: an encrypted PDF, or a ZIP
+whose entry list, read and checked against the limits below before anything is
+decrypted, has an encrypted entry. An unencrypted ZIP makes no lookup. Candidate strings
 and provider/parser exceptions are never persisted in the ledger, exposed through MCP or
 logged.
 
 Cryptographic verification decides success. ZIP processing permits eight entries,
 2 MiB per member, 4 MiB total expansion, a maximum 40:1 declared expansion ratio,
-and a shared five-second abort signal. It rejects unsafe paths, corrupt payloads,
+and a five-second abort signal shared by every decryption and decompression, which
+starts after the password lookup. It rejects unsafe paths, corrupt payloads,
 and nested processing; no filesystem, worker scripts or WASM are used. Password
 required/rejected coverage is reconsidered hourly for at most eight lookup rounds,
-allowing a later password message to arrive. Further attempts require a deliberate
-policy revision. Other permanent failures are not retried automatically.
+allowing a later password message to arrive. A round is counted in `password_checks`
+when a lookup for an encrypted item returns, including one that finds no candidate, and
+before any candidate is tried, so a failure while decrypting still uses the round. A
+lookup that times out or fails, and a storage failure before it, uses no round: the item
+returns to `pending` as `temporarily_unavailable` (a submitted OCR item stays
+`submitted` within its 24-hour limit) and is retried after five minutes, like any other
+transient failure. A failure after the lookup, such as saving extracted
+members, uses the round. After eight rounds the item is blocked as
+`password_attempt_budget`. Further attempts require a deliberate policy revision. A
+submitted encrypted PDF re-resolves its password to redact the OCR text; that lookup
+uses no round, so a password found in the eighth round still collects the paid result,
+and its waits are bounded by the 24-hour submission limit instead. Other permanent
+failures are not retried automatically.
 
-Verified members are separate immutable R2 derivatives. UTF-8 `.txt`, `.md` and
-`.csv` members contribute searchable text; other members remain downloadable with
-explicit `unsupported_member` coverage. Nested documents/archives are not recursively
-converted. A ZIP without supported text still exposes an extraction manifest and
-members without falsely indexing manifest metadata as document evidence. Candidate
-values are redacted from newly generated searchable ZIP text before hashing it.
-This does not retroactively remove password text already present in original mail.
+zip.js reports a wrong password and a corrupt encrypted entry with the same errors: a
+synthetic check on 2026-11-21 10:15 UTC with zip.js 2.24.0 found that a correct password
+with a corrupted declared size fails as `Invalid uncompressed size` (stored
+AES/ZipCrypto, deflated AES) or `Invalid CRC32` (deflated ZipCrypto), while wrong
+passwords fail as `Invalid password`, `Invalid CRC32` (stored ZipCrypto) or
+`Invalid compressed data` (deflated). So such an encrypted entry ends as
+`password_rejected` and is retried within the eight rounds instead of being blocked as
+`invalid_archive`, which would end retries for an archive whose right password had not
+arrived yet.
+
+Verified members are separate immutable R2 derivatives. UTF-8 `.txt`, `.md` and `.csv`
+members contribute searchable text; other members remain downloadable with explicit
+`unsupported_member` coverage. Nested documents/archives are not recursively converted.
+A ZIP without supported text still exposes an extraction manifest and members without
+falsely indexing manifest metadata as document evidence. Candidate values found for an
+encrypted ZIP are redacted from all of its newly generated searchable text and member
+names before hashing it. This does not retroactively remove password text already
+present in original mail.
 
 ## Search and authenticated downloads
 

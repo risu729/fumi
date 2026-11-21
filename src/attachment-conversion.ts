@@ -165,8 +165,16 @@ export async function listSearchableAttachmentDerivatives(
 }
 function config(env: AttachmentConversionEnvironment): Config | null {
   if (!env.ATTACHMENT_CONVERSION_CONFIG) return null;
-  const value = record(JSON.parse(env.ATTACHMENT_CONVERSION_CONFIG));
-  if (value["enabled"] === false) return null;
+  // Parser messages can quote private configuration, so only the fixed code leaves here.
+  let value: unknown;
+  try {
+    value = JSON.parse(env.ATTACHMENT_CONVERSION_CONFIG);
+  } catch {
+    throw new ConversionBlocked("invalid_conversion_config");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new ConversionBlocked("invalid_conversion_config");
+  if ((value as Record<string, unknown>)["enabled"] === false) return null;
   const parsed = v.safeParse(AttachmentConversionConfigSchema, value);
   if (!parsed.success) throw new ConversionBlocked("invalid_conversion_config");
   return parsed.output;
@@ -175,7 +183,14 @@ function passwords(env: AttachmentConversionEnvironment, sha: string): string[] 
   if (!env.ATTACHMENT_PASSWORDS) return [];
   if (env.ATTACHMENT_PASSWORDS.length > 65536)
     throw new ConversionBlocked("invalid_password_config");
-  const all = v.safeParse(PasswordSchema, JSON.parse(env.ATTACHMENT_PASSWORDS));
+  let value: unknown;
+  try {
+    value = JSON.parse(env.ATTACHMENT_PASSWORDS);
+  } catch {
+    // A parser message can quote candidate text.
+    throw new ConversionBlocked("invalid_password_config");
+  }
+  const all = v.safeParse(PasswordSchema, value);
   if (!all.success) throw new ConversionBlocked("invalid_password_config");
   return all.output[sha] ?? [];
 }
@@ -267,7 +282,13 @@ async function discover(
     );
   }
 }
-const submissionWaitCodes = ["password_required", "password_rejected", "backend_disabled"];
+// Conditions an operator or a later message can fix defer a paid submission instead of discarding it.
+const submissionWaitCodes = [
+  "password_required",
+  "password_rejected",
+  "backend_disabled",
+  "invalid_password_config",
+];
 async function processRow(
   env: AttachmentConversionEnvironment,
   cfg: Config,
@@ -368,6 +389,16 @@ async function processRow(
       );
     }
   };
+  // Called only for an item known to be encrypted. A round is counted once the lookup returns,
+  // before any candidate is tried, so a lookup failure is an ordinary transient retry while a
+  // crash during decryption still uses a round. At most eight rounds per policy.
+  const lookupPasswords = async () => {
+    if (row.password_checks >= 8) throw new ConversionBlocked("password_attempt_budget");
+    const found = await candidates(env, row);
+    const counted = await update("password_checks=password_checks+1");
+    if (!counted.meta.changes) throw new Error("conversion_fence_lost");
+    return found;
+  };
   let remoteStarted = false;
   let submissionExpired = false;
   try {
@@ -420,9 +451,6 @@ async function processRow(
         if (!cfg.pdf) throw new ConversionBlocked("encrypted_pdf");
         // Like a missing OCR binding, a missing loader defers the paid item instead of discarding it.
         if (!env.PDF_LOADER) throw new ConversionBlocked("backend_disabled");
-        if (row.password_checks >= 8) throw new ConversionBlocked("password_attempt_budget");
-        await update("password_checks=password_checks+1");
-        secrets = await candidates(env, row);
         const original = await readVerified(
           env.MAIL_ARCHIVE,
           row.source_key,
@@ -430,6 +458,10 @@ async function processRow(
           CONVERSION_LIMITS.sourceBytes,
           row.source_size,
         );
+        // Re-resolving the password that already unlocked this upload is not a new guess, so it
+        // uses no round: a password found in the last round must not discard the paid result.
+        // The 24-hour submission limit bounds these hourly waits instead.
+        secrets = await candidates(env, row);
         await unlockPdf(env.PDF_LOADER, original, secrets);
         output.bytes = conversionText(new TextDecoder().decode(output.bytes), secrets);
       }
@@ -443,9 +475,7 @@ async function processRow(
       );
       if (isEncryptedPdf(bytes, mime)) {
         if (!cfg.pdf || !env.PDF_LOADER) throw new ConversionBlocked("encrypted_pdf");
-        if (row.password_checks >= 8) throw new ConversionBlocked("password_attempt_budget");
-        await update("password_checks=password_checks+1");
-        secrets = await candidates(env, row);
+        secrets = await lookupPasswords();
         const clear = await unlockPdf(env.PDF_LOADER, bytes, secrets);
         const saved = await saveConversionObject(env.MAIL_ARCHIVE, clear.bytes, "pdf");
         preprocessing = {
@@ -464,9 +494,7 @@ async function processRow(
         throw new ConversionBlocked("backend_disabled");
       if (!output) {
         if (zip) {
-          if (row.password_checks >= 8) throw new ConversionBlocked("password_attempt_budget");
-          await update("password_checks=password_checks+1");
-          output = await convertZip(env.MAIL_ARCHIVE, bytes, await candidates(env, row));
+          output = await convertZip(env.MAIL_ARCHIVE, bytes, lookupPasswords);
         } else {
           if (ocr) await boundedRpc(() => verifyOcr(env.ATTACHMENT_OCR!));
           const reservation = await db.batch([
@@ -611,7 +639,11 @@ async function processRow(
               : "pending",
       blocked ? error.code : remoteStarted ? "provider_outcome_unknown" : "temporarily_unavailable",
       now +
-        (blocked && ["password_required", "password_rejected"].includes(error.code)
+        // A broken private dictionary does not change the policy hash, so its blocked items
+        // are rechecked hourly like a missing password instead of waiting for a new policy.
+        (blocked &&
+        (["password_required", "password_rejected"].includes(error.code) ||
+          (error.code === "invalid_password_config" && !submissionWait))
           ? 3600000
           : 300000),
       row.state === "submitted" ? row.updated_at : now,
@@ -644,7 +676,7 @@ export async function repairAttachmentConversions(
       .run();
     const rows = (
       await env.MAIL_CATALOG.prepare(
-        `SELECT * FROM attachment_conversions WHERE policy_hash=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} ORDER BY CASE state WHEN 'submitted' THEN 0 ELSE 1 END,next_attempt_at,raw_key,part_index LIMIT 2`,
+        `SELECT * FROM attachment_conversions WHERE policy_hash=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected','invalid_password_config')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} ORDER BY CASE state WHEN 'submitted' THEN 0 ELSE 1 END,next_attempt_at,raw_key,part_index LIMIT 2`,
       )
         .bind(policy, now, now, ...scope.values)
         .all<Row>()
@@ -655,7 +687,7 @@ export async function repairAttachmentConversions(
       const claimTime = Math.max(now, Date.now());
       // oxlint-disable-next-line no-await-in-loop -- Only two conversions, never concurrent attachment buffers/RPCs.
       const claim = await env.MAIL_CATALOG.prepare(
-        `UPDATE attachment_conversions SET lease_token=?,lease_until=? WHERE raw_key=? AND part_index=? AND policy_hash=? AND state=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} AND EXISTS(SELECT 1 FROM attachment_conversion_control WHERE id=1 AND token=? AND lease_until>?)`,
+        `UPDATE attachment_conversions SET lease_token=?,lease_until=? WHERE raw_key=? AND part_index=? AND policy_hash=? AND state=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected','invalid_password_config')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} AND EXISTS(SELECT 1 FROM attachment_conversion_control WHERE id=1 AND token=? AND lease_until>?)`,
       )
         .bind(
           partToken,
