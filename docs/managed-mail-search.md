@@ -134,7 +134,8 @@ accepted provider request.
 ## Evidence returned through MCP
 
 `search_mail_semantic` requires `mail:read`. Query length is 1–1,000 characters and
-results are limited to ten. Metadata filters use the existing archive operators;
+results are limited to ten. Metadata filters use the existing archive operators, at
+most 1,000 characters and 33 operators ([agent mail](agent-mail.md));
 `archive_source` and retained label IDs are optional. The tool requests at most
 thirty ranked provider candidates and applies these filters locally. This may
 return fewer matches even when additional relevant documents exist. It reports

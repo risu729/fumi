@@ -21,7 +21,8 @@ The `query` is a literal, case-insensitive phrase of 3–200 UTF-16 code units, 
 at least three Unicode characters. Japanese phrases and exact numeric strings
 work without whitespace segmentation. Quotes and FTS operators are treated as
 data. The optional `filters` argument uses the existing `from:`, `to:`, `subject:`,
-`after:`, `before:` and `has:attachment` metadata syntax. Shorter terms fail
+`after:`, `before:` and `has:attachment` metadata syntax, with the same limit of
+1,000 characters and 33 operators ([agent mail](agent-mail.md)). Shorter phrases fail
 explicitly instead of silently producing empty results. This is lexical retrieval,
 not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains open.
 

@@ -412,6 +412,26 @@ function decodeCursor(value: string): Cursor {
     throw new MailReadError("invalid_page_token");
   }
 }
+/** D1 binds at most 100 parameters per statement. */
+const D1_BOUND_PARAMETERS = 100;
+/**
+ * The most parameters a caller binds besides the parsed filters. search_mail_semantic binds
+ * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
+ * and two per label for up to ten labels (33). search_emails binds at most 26 (snapshot,
+ * archive source, 20 for labels, three for the cursor, limit) and search_mail_content 3.
+ */
+const CALLER_BOUND_PARAMETERS = 33;
+/** Each filter binds at most two values: a from:, to: or subject: value with uppercase non-ASCII. */
+export const MAX_SEARCH_FILTERS = Math.floor((D1_BOUND_PARAMETERS - CALLER_BOUND_PARAMETERS) / 2);
+/**
+ * Joins filters as a balanced AND tree. A flat `a AND b AND c` chain nests one level per
+ * filter, and D1 rejects expression trees deeper than 100 next to the callers' own clauses.
+ */
+function balancedAnd(clauses: string[]): string {
+  if (clauses.length === 1) return clauses[0]!;
+  const middle = Math.ceil(clauses.length / 2);
+  return `(${balancedAnd(clauses.slice(0, middle))} AND ${balancedAnd(clauses.slice(middle))})`;
+}
 export function parseMailSearch(query: string) {
   if (query.length > 1000) throw new MailReadError("query_too_long");
   const clauses: string[] = [];
@@ -419,6 +439,7 @@ export function parseMailSearch(query: string) {
   const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
   if (tokens.join(" ").replaceAll(" ", "") !== query.replace(/\s/g, ""))
     throw new MailReadError("unsupported_query");
+  if (tokens.length > MAX_SEARCH_FILTERS) throw new MailReadError("query_too_long");
   for (const token of tokens) {
     const match = /^(from|to|subject|after|before|has):(.+)$/.exec(token);
     if (!match) throw new MailReadError("unsupported_query");
@@ -451,7 +472,7 @@ export function parseMailSearch(query: string) {
       values.push(...patterns);
     }
   }
-  return { clauses, values };
+  return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };
 }
 export async function searchMail(
   env: MailReadEnvironment,
