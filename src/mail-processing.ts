@@ -23,11 +23,14 @@ const retry: WorkflowStepConfig = {
 
 // Service errors may contain SQL parameters or object metadata. Persist/log only
 // fixed diagnostics in Workflows, while its engine owns retries and checkpoints.
+// A NonRetryableError carries only a fixed message and marks an outcome that no
+// retry of this attempt can change, so it passes through and skips the retries.
 async function redacted<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
-  } catch {
-    throw new Error("Mail processing step failed");
+  } catch (error) {
+    if (error instanceof NonRetryableError) throw error;
+    throw new Error("Mail processing step failed", { cause: error });
   }
 }
 
@@ -56,7 +59,9 @@ export class MailProcessing extends WorkflowEntrypoint<Env, ProcessingParams> {
             params.pipelineVersion,
           );
           if (current?.instance_id !== event.instanceId || current.state !== "running") {
-            throw new Error("Processing attempt is no longer active");
+            // Another attempt took over, or the job is already terminal. Only a new
+            // attempt with its own identity can make progress, never a retry of this one.
+            throw new NonRetryableError("Processing attempt is no longer active");
           }
           return indexArchiveSource(
             this.env.MAIL_ARCHIVE,
