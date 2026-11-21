@@ -895,6 +895,48 @@ describe("private bounded attachment conversion", () => {
     });
     expect(upload).toHaveBeenCalledTimes(1);
   });
+  it("keeps a submitted encrypted PDF item while the private password configuration is malformed", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    const upload = vi.fn(async () => ({ id: "config-pdf-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "config-pdf-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "config-chunk", text: "PDF total 56,789 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => [syntheticPdfPassword],
+    });
+    await repairAttachmentConversions(enabled, now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "config-pdf-item" });
+    // An operator mistake in the private dictionary must not discard the paid result.
+    await repairAttachmentConversions({ ...enabled, ATTACHMENT_PASSWORDS: "{" }, now + 300000);
+    expect(await row()).toMatchObject({
+      state: "submitted",
+      failure_code: "invalid_password_config",
+      remote_item_id: "config-pdf-item",
+    });
+    await repairAttachmentConversions(enabled, now + 600000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
   it("polls a submitted OCR item once before applying the 24-hour limit", async () => {
     const completed = await source("application/pdf", encode("%PDF synthetic paused scan"));
     const queued = await source("application/pdf", encode("%PDF synthetic slow scan"), "slow");

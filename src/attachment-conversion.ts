@@ -282,7 +282,13 @@ async function discover(
     );
   }
 }
-const submissionWaitCodes = ["password_required", "password_rejected", "backend_disabled"];
+// Conditions an operator or a later message can fix defer a paid submission instead of discarding it.
+const submissionWaitCodes = [
+  "password_required",
+  "password_rejected",
+  "backend_disabled",
+  "invalid_password_config",
+];
 async function processRow(
   env: AttachmentConversionEnvironment,
   cfg: Config,

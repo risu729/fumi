@@ -130,7 +130,8 @@ OCR submission persists the item ID before a later invocation polls. Queued/runn
 items defer for five minutes; polling never uploads again. Complete ingestion must
 fit one page of at most 32 indexed chunks, all returned with matching item identity
 and complete pagination. Partial/oversized output is blocked. A missing OCR binding,
-a missing PDF loader or a lost password defers the item without uploading again.
+a missing PDF loader, a lost password or a malformed `ATTACHMENT_PASSWORDS` defers the
+item without uploading again.
 The 24-hour limit counts from submission. After it, the next run still polls the
 item once when the OCR binding is present and keeps a completed result. Any other
 outcome of that run blocks the row. A provider failure or rejected output keeps its
@@ -165,6 +166,9 @@ until cryptographic verification. Untrusted message text never grants archive ac
 private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original SHA-256 supplies
 optional manual candidates. Malformed JSON or a schema mismatch there blocks the
 encrypted item as `invalid_password_config`; it is not retried as a transient failure.
+A submitted OCR item instead keeps its submission and waits with that code, like a
+missing binding, so a corrected dictionary still collects the paid result within the
+24-hour limit.
 Both sources are validated and combined with at most eight distinct strings of 1–128
 characters. No credential is accepted through MCP or attachment HTTP routes. Password
 lookup has a five-second deadline and runs only for an item known to be encrypted: an
