@@ -1,8 +1,9 @@
 import { cursorFor, type EventName, type StoredEvent, type Subscription } from "./event-store.ts";
 import { standardWebhookHeaders } from "./webhook-signature.ts";
 
-/** An adapter must validate addresses at connection time and refuse redirects, or
- * use createAllowlistedWebhookHttp with administrator-controlled trusted origins. */
+/** An adapter must validate addresses at connection time and refuse redirects without
+ * following them, or use createAllowlistedWebhookHttp with administrator-controlled
+ * trusted origins. */
 export interface WebhookHttp {
   post(url: string, body: string, headers: Headers): Promise<Response>;
 }
@@ -61,13 +62,21 @@ export function createAllowlistedWebhookHttp(
     async post(value, body, headers) {
       const url = validateCallback(value);
       if (!trusted.has(url.origin)) throw new Error("Callback origin is not trusted");
-      return send(url.href, {
+      // workerd rejects redirect: "error" before it connects. "manual" returns a 3xx as
+      // an ordinary response without contacting its Location, so refuse it here.
+      const response = await send(url.href, {
         method: "POST",
         body,
         headers,
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(POST_TIMEOUT_MS),
       });
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel().catch(() => undefined);
+        // A redirect fails verification and is retried like other non-2xx deliveries.
+        throw new Error("Callback redirect refused");
+      }
+      return response;
     },
   };
 }
