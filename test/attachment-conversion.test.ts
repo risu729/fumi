@@ -670,6 +670,192 @@ describe("private bounded attachment conversion", () => {
       limit: 8,
     });
   });
+  it("keeps a submitted encrypted PDF item while the isolated PDF loader is absent", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    const original = await source("application/pdf", bytes);
+    const key = `fumi-${original.sha256}.pdf`;
+    const upload = vi.fn(async () => ({ id: "loader-pdf-item", key }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload,
+        get: () => ({
+          info: async () => ({ id: "loader-pdf-item", key, status: "completed", chunks_count: 1 }),
+          chunks: async () => ({
+            result: [
+              { id: "loader-chunk", text: "PDF total 34,567 yen", start_byte: 0, end_byte: 20 },
+            ],
+            result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+          }),
+        }),
+      },
+    };
+    const withoutLoader = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, pdf: true }),
+      ATTACHMENT_OCR: ocr,
+      resolveAttachmentPasswords: async () => [syntheticPdfPassword],
+    });
+    const enabled = { ...withoutLoader, PDF_LOADER: env.PDF_LOADER! };
+    await repairAttachmentConversions(enabled, now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "loader-pdf-item" });
+    // A deployment built without the loader binding cannot verify redaction yet.
+    await repairAttachmentConversions(withoutLoader, now + 300000);
+    expect(await row()).toMatchObject({
+      state: "submitted",
+      failure_code: "backend_disabled",
+      remote_item_id: "loader-pdf-item",
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM attachment_conversion_calls").first(
+        "state",
+      ),
+    ).toBe("submitted");
+    await repairAttachmentConversions(enabled, now + 600000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it("polls a submitted OCR item once before applying the 24-hour limit", async () => {
+    const completed = await source("application/pdf", encode("%PDF synthetic paused scan"));
+    const queued = await source("application/pdf", encode("%PDF synthetic slow scan"), "slow");
+    const items: Record<string, { id: string; status: string }> = {
+      [`fumi-${completed.sha256}.pdf`]: { id: "paused-item", status: "completed" },
+      [`fumi-${queued.sha256}.pdf`]: { id: "slow-item", status: "running" },
+    };
+    const keys = Object.fromEntries(Object.entries(items).map(([key, item]) => [item.id, key]));
+    const upload = vi.fn(async (key: string) => ({ id: items[key]!.id, key }));
+    const get = vi.fn((id: string) => ({
+      info: async () => ({
+        id,
+        key: keys[id],
+        status: items[keys[id]!]!.status,
+        chunks_count: 1,
+      }),
+      chunks: async () => ({
+        result: [
+          { id: "paused-chunk", text: "Paused scan 45,678 yen", start_byte: 0, end_byte: 22 },
+        ],
+        result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+      }),
+    }));
+    const enabled = runtime({
+      ATTACHMENT_OCR: {
+        info: async () => ({ indexing_options: { use_ocr: true } }),
+        items: { upload, get },
+      },
+    });
+    await repairAttachmentConversions(enabled, now);
+    expect(upload).toHaveBeenCalledTimes(2);
+    // Scheduled conversion was paused for two days; the paid items were never polled.
+    await repairAttachmentConversions(enabled, now + 2 * 86400000);
+    const states = Object.fromEntries(
+      (
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key,state,failure_code FROM attachment_conversions",
+        ).all<{ raw_key: string; state: string; failure_code: string | null }>()
+      ).results.map((r) => [r.raw_key, [r.state, r.failure_code]]),
+    );
+    expect(states).toEqual({
+      [completed.raw]: ["complete", null],
+      [queued.raw]: ["blocked", "ocr_processing_timeout"],
+    });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(upload).toHaveBeenCalledTimes(2);
+  });
+  it("keeps an expired submission's durable complete receipt when the final row write fails", async () => {
+    const image = await source("image/png", encode("synthetic expired receipt"), "receipt");
+    const key = `fumi-${image.sha256}.png`;
+    const get = vi.fn(() => ({
+      info: async () => ({ id: "receipt-item", key, status: "completed", chunks_count: 1 }),
+      chunks: async () => ({
+        result: [
+          { id: "receipt-chunk", text: "Receipt total 56,789 yen", start_byte: 0, end_byte: 24 },
+        ],
+        result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+      }),
+    }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: { upload: async () => ({ id: "receipt-item", key }), get },
+    };
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "receipt-item" });
+    const actual = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    let failures = 0;
+    const database = new Proxy(env.MAIL_CATALOG, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          // Only the final row write after the receipt commit fails, once.
+          if (!sql.includes("provenance_json=?,lease_token=NULL") || failures++) return actual(sql);
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("synthetic-d1-unavailable");
+              },
+            }),
+          };
+        };
+      },
+    });
+    await repairAttachmentConversions(
+      runtime({ MAIL_CATALOG: database, ATTACHMENT_OCR: ocr }),
+      now + 2 * 86400000,
+    );
+    expect(failures).toBe(1);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM attachment_conversion_calls").first(
+        "state",
+      ),
+    ).toBe("complete");
+    // The paid result is in the receipt, so the row follows it instead of a timeout.
+    expect(await row()).toMatchObject({
+      state: "complete",
+      failure_code: null,
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it("stops waiting for a missing OCR binding after 24 hours so pending work proceeds", async () => {
+    const images = await Promise.all(
+      ["first-image", "second-image"].map((id) => source("image/png", encode(id), id)),
+    );
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: {
+        upload: async (key: string) => ({ id: `item-${key.slice(5, 13)}`, key }),
+        get: vi.fn(),
+      },
+    };
+    const toMarkdown = vi.fn(async (file: { name: string }) => ({
+      name: file.name,
+      format: "text",
+      data: "pending synthetic document",
+    }));
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    await source(undefined, undefined, "z-document");
+    // A later deployment lacks the OCR binding while document conversion stays available.
+    const withoutOcr = runtime({ AI: { toMarkdown } });
+    await repairAttachmentConversions(withoutOcr, now + 300000);
+    expect(toMarkdown).not.toHaveBeenCalled();
+    await repairAttachmentConversions(withoutOcr, now + 2 * 86400000);
+    await repairAttachmentConversions(withoutOcr, now + 2 * 86400000 + 300000);
+    for (const image of images)
+      expect(
+        // oxlint-disable-next-line no-await-in-loop -- Two fixed synthetic rows.
+        await env.MAIL_CATALOG.prepare(
+          "SELECT state,failure_code FROM attachment_conversions WHERE raw_key=?",
+        )
+          .bind(image.raw)
+          .first(),
+      ).toEqual({ state: "blocked", failure_code: "ocr_processing_timeout" });
+    expect(toMarkdown).toHaveBeenCalledTimes(1);
+  });
   it("does not steal a newer run's claim after a stale selection", async () => {
     await source();
     const toMarkdown = vi.fn();
