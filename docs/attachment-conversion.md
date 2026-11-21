@@ -165,17 +165,18 @@ four-second lookup window. Password-shaped English or Japanese hints remain gues
 until cryptographic verification. Untrusted message text never grants archive access. A
 private `ATTACHMENT_PASSWORDS` JSON dictionary keyed by original SHA-256 supplies
 optional manual candidates. Malformed JSON or a schema mismatch there blocks the
-encrypted item as `invalid_password_config`; it is not retried as a transient failure.
-A submitted OCR item instead keeps its submission and waits with that code, like a
-missing binding, so a corrected dictionary still collects the paid result within the
-24-hour limit.
-Both sources are validated and combined with at most eight distinct strings of 1–128
-characters. No credential is accepted through MCP or attachment HTTP routes. Password
-lookup has a five-second deadline and runs only for an item known to be encrypted: an
-encrypted PDF, or a ZIP whose entry list, read and checked against the limits below
-before anything is decrypted, has an encrypted entry. An unencrypted ZIP makes no
-lookup. Candidate strings and provider/parser exceptions are never persisted in the
-ledger, exposed through MCP or logged.
+encrypted item as `invalid_password_config`. Like a missing password, it is rechecked
+hourly, because a fix to the dictionary does not change the conversion policy hash that
+would otherwise reopen a blocked item. A submitted OCR item likewise keeps its
+submission and waits with that code, like a missing binding, so a corrected dictionary
+still collects the paid result within the 24-hour limit. Both sources are validated and
+combined with at most eight distinct strings of 1–128 characters. No credential is
+accepted through MCP or attachment HTTP routes. Password lookup has a five-second
+deadline and runs only for an item known to be encrypted: an encrypted PDF, or a ZIP
+whose entry list, read and checked against the limits below before anything is
+decrypted, has an encrypted entry. An unencrypted ZIP makes no lookup. Candidate strings
+and provider/parser exceptions are never persisted in the ledger, exposed through MCP or
+logged.
 
 Cryptographic verification decides success. ZIP processing permits eight entries,
 2 MiB per member, 4 MiB total expansion, a maximum 40:1 declared expansion ratio,

@@ -584,7 +584,7 @@ describe("private bounded attachment conversion", () => {
       password_checks: 1,
     });
   });
-  it("blocks malformed private password and conversion configuration with fixed codes", async () => {
+  it("defers on malformed private passwords and blocks malformed conversion configuration", async () => {
     const writer = new ZipWriter(new Uint8ArrayWriter(), {
       useWebWorkers: false,
       useCompressionStream: true,
@@ -595,11 +595,20 @@ describe("private bounded attachment conversion", () => {
     await source("application/zip", await writer.close());
     const secret = "synthetic-config-secret";
     await repairAttachmentConversions(runtime({ ATTACHMENT_PASSWORDS: `{"${secret}` }), now);
+    // The blocked item is rechecked hourly, so a corrected dictionary reopens it.
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "invalid_password_config",
+      next_attempt_at: now + 3600000,
+    });
+    expect(JSON.stringify(await row())).not.toContain(secret);
+    await repairAttachmentConversions(runtime({ ATTACHMENT_PASSWORDS: "1" }), now + 3600000);
     expect(await row()).toMatchObject({
       state: "blocked",
       failure_code: "invalid_password_config",
     });
-    expect(JSON.stringify(await row())).not.toContain(secret);
+    await repairAttachmentConversions(runtime({}), now + 2 * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_required" });
     for (const value of [`{"${secret}`, "[]", `"${secret}"`, "null", "1", "false"]) {
       // oxlint-disable-next-line no-await-in-loop -- Validate each independent operator configuration.
       const error = await repairAttachmentConversions(

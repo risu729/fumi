@@ -639,7 +639,11 @@ async function processRow(
               : "pending",
       blocked ? error.code : remoteStarted ? "provider_outcome_unknown" : "temporarily_unavailable",
       now +
-        (blocked && ["password_required", "password_rejected"].includes(error.code)
+        // A broken private dictionary does not change the policy hash, so its blocked items
+        // are rechecked hourly like a missing password instead of waiting for a new policy.
+        (blocked &&
+        (["password_required", "password_rejected"].includes(error.code) ||
+          (error.code === "invalid_password_config" && !submissionWait))
           ? 3600000
           : 300000),
       row.state === "submitted" ? row.updated_at : now,
@@ -672,7 +676,7 @@ export async function repairAttachmentConversions(
       .run();
     const rows = (
       await env.MAIL_CATALOG.prepare(
-        `SELECT * FROM attachment_conversions WHERE policy_hash=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} ORDER BY CASE state WHEN 'submitted' THEN 0 ELSE 1 END,next_attempt_at,raw_key,part_index LIMIT 2`,
+        `SELECT * FROM attachment_conversions WHERE policy_hash=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected','invalid_password_config')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} ORDER BY CASE state WHEN 'submitted' THEN 0 ELSE 1 END,next_attempt_at,raw_key,part_index LIMIT 2`,
       )
         .bind(policy, now, now, ...scope.values)
         .all<Row>()
@@ -683,7 +687,7 @@ export async function repairAttachmentConversions(
       const claimTime = Math.max(now, Date.now());
       // oxlint-disable-next-line no-await-in-loop -- Only two conversions, never concurrent attachment buffers/RPCs.
       const claim = await env.MAIL_CATALOG.prepare(
-        `UPDATE attachment_conversions SET lease_token=?,lease_until=? WHERE raw_key=? AND part_index=? AND policy_hash=? AND state=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} AND EXISTS(SELECT 1 FROM attachment_conversion_control WHERE id=1 AND token=? AND lease_until>?)`,
+        `UPDATE attachment_conversions SET lease_token=?,lease_until=? WHERE raw_key=? AND part_index=? AND policy_hash=? AND state=? AND (state IN ('pending','submitted') OR (state='blocked' AND failure_code IN ('password_required','password_rejected','invalid_password_config')) OR (state='unknown' AND EXISTS(SELECT 1 FROM attachment_conversion_calls c WHERE c.source_identity=attachment_conversions.attempt_identity AND c.state IN ('submitted','complete','blocked')))) AND next_attempt_at<=? AND lease_until<=? AND ${scope.sql} AND ${sourceFence} AND EXISTS(SELECT 1 FROM attachment_conversion_control WHERE id=1 AND token=? AND lease_until>?)`,
       )
         .bind(
           partToken,
