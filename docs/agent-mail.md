@@ -280,8 +280,8 @@ input, which is how they were hashed. A `prepared` operation resumes from its
 archived `input.json` and is never composed again. The current-extraction check runs
 when composing, after this lookup, so a parent that stops being current does not
 change a request's digest or stop a same-key retry. The send paths still read reply
-headers from any completed extraction for that reason; a new send then fails at
-composition.
+headers, and the default sender when `from_address` is omitted, from any completed
+extraction for that reason; a new send then fails at composition.
 
 The digest includes the reply's `In-Reply-To` and `References`, which are derived
 from the parent's stored headers. The `References` rule above changed on

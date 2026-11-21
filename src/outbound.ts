@@ -325,10 +325,12 @@ async function normalize(
     if (item["reply_message_id"] === undefined) fail("from_address_required");
     scope(principal, "mail:read");
     const replyKey = text(item["reply_message_id"], 512, true);
+    // The default sender is part of the request hash like the reply headers below, so sends
+    // accept any completed extraction here too; compose() requires a current one.
     const source = await db(ctx)
       .prepare(`SELECT s.receipt_snapshot FROM archive_sources s
       JOIN mail_extractions e ON e.raw_key = s.raw_key
-      WHERE s.raw_key = ? AND s.receipt_state = 'valid' AND ${CURRENT_EXTRACTION_SQL}`)
+      WHERE s.raw_key = ? AND s.receipt_state = 'valid' AND ${options.currentParent ? CURRENT_EXTRACTION_SQL : "e.status = 'complete'"}`)
       .bind(replyKey)
       .first<{ receipt_snapshot: string | null }>();
     const receipt = source?.receipt_snapshot

@@ -531,7 +531,7 @@ describe("durable outbound submission in workerd", () => {
       VALUES ('email_routing','ingress-v1','synthetic-envelope',?,? ,?,'forwarded','present','valid',?,0,0)`)
       .bind(rawKey, "ingest/synthetic-envelope/receipt.json", JSON.stringify(receipt), sha)
       .run();
-    await sendMail(
+    const defaulted = await sendMail(
       ctx,
       domainPrincipal,
       { ...noSender, reply_message_id: rawKey },
@@ -549,6 +549,30 @@ describe("durable outbound submission in workerd", () => {
     expect((send.mock.calls[2]?.[0] as EmailMessageBuilder | undefined)?.from).toBe(
       "override@example.invalid",
     );
+    // The default sender is part of the request hash, so a same-key retry still finds its
+    // operation after the parent's original goes missing; a new reply fails when composing.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET raw_state = 'missing' WHERE raw_key = ?",
+    )
+      .bind(rawKey)
+      .run();
+    expect(
+      await sendMail(
+        ctx,
+        domainPrincipal,
+        { ...noSender, reply_message_id: rawKey },
+        "default-reply",
+      ),
+    ).toMatchObject({ operation_id: defaulted.operation_id, state: "accepted" });
+    await expect(
+      sendMail(
+        ctx,
+        domainPrincipal,
+        { ...noSender, reply_message_id: rawKey },
+        "default-reply-new",
+      ),
+    ).rejects.toMatchObject({ code: "reply_not_found" });
+    expect(send).toHaveBeenCalledTimes(3);
     await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources WHERE raw_key = ?")
       .bind(rawKey)
       .run();
