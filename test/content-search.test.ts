@@ -39,9 +39,9 @@ async function insert(
     attachments_json: JSON.stringify(part ? [part] : []),
   };
   await env.MAIL_CATALOG.prepare(
-    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-11T00:00:00.000Z','present','missing',0,0)`,
+    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-11T00:00:00.000Z','present','missing',?,0,0)`,
   )
-    .bind(id, row.raw_key, `${row.raw_key}.receipt`)
+    .bind(id, row.raw_key, `${row.raw_key}.receipt`, "a".repeat(64))
     .run();
   await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,attachment_count,body_json_key,body_text_key,body_html_key,manifest_key,updated_at)
     VALUES(?,'mime-v1',?,1,?,'complete',?,?,?,?,?,?,?,0)`)
