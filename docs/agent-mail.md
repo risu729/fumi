@@ -290,8 +290,14 @@ there is no public HTTP receipt endpoint. Events are retained before projection,
 deduplicated by provider event ID and reconciled when the provider message ID
 becomes known. Deferred events cannot overwrite terminal recipient outcomes;
 mixed recipient outcomes remain separate. Failed processing retries through the
-Queue and eventually uses `fumi-delivery-events-dlq`. Scheduled reconciliation
-updates evidence and never sends mail.
+Queue after a delay of 30 seconds doubled per attempt, at most 15 minutes, so the
+five retries span about 15 minutes before the message moves to
+`fumi-delivery-events-dlq`, which has no consumer. Scheduled reconciliation
+updates evidence and never sends mail. It runs as its own scheduled stage: its
+failure marks the run failed but does not skip MCP Events delivery in that run.
+`get_send_status` reads the submission and its recipients in one D1 batch, so
+a recipient outcome never appears beside a submission state from before it was
+projected.
 
 ## MCP Events
 
