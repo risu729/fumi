@@ -476,6 +476,140 @@ describe("private bounded attachment conversion", () => {
       0,
     );
   });
+  it("does not look up or count passwords for an unencrypted ZIP during a storage outage", async () => {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Plain ZIP invoice 11,111 yen")));
+    await source("application/zip", await writer.close());
+    let outage = true;
+    const archive = new Proxy(env.MAIL_ARCHIVE, {
+      get(target, property) {
+        if (property === "put" && outage)
+          return async () => {
+            throw new Error("synthetic storage outage");
+          };
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? (value as () => unknown).bind(target) : value;
+      },
+    });
+    const resolveCandidates = vi.fn(async () => ["synthetic-unused-candidate"]);
+    const enabled = runtime({
+      MAIL_ARCHIVE: archive,
+      resolveAttachmentPasswords: resolveCandidates,
+    });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    outage = false;
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "local_zip_text",
+      password_checks: 0,
+    });
+    expect(resolveCandidates).not.toHaveBeenCalled();
+  });
+  it("counts only completed password lookups for an encrypted ZIP, within a fixed budget", async () => {
+    const password = crypto.randomUUID();
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      password,
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Encrypted ZIP 22,222 yen")));
+    await source("application/zip", await writer.close());
+    let lookup: () => Promise<string[]> = async () => {
+      throw new Error("synthetic resolver timeout");
+    };
+    const enabled = runtime({ resolveAttachmentPasswords: async () => lookup() });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    // Completed lookups that find no password or a wrong one each use one of eight rounds.
+    lookup = async () => [];
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({ failure_code: "password_required", password_checks: 1 });
+    lookup = async () => ["wrong-synthetic-password"];
+    for (let round = 1; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one hourly password retry.
+      await repairAttachmentConversions(enabled, now + 9 * 300000 + round * 3600000);
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "password_attempt_budget",
+      password_checks: 8,
+    });
+    lookup = async () => [password];
+    await repairAttachmentConversions(enabled, now + 9 * 300000 + 9 * 3600000);
+    expect(await row()).toMatchObject({ failure_code: "password_attempt_budget" });
+  });
+  it("does not count a failed password lookup for an encrypted PDF", async () => {
+    const bytes = Uint8Array.from(atob(encryptedPdf), (c) => c.charCodeAt(0));
+    await source("application/pdf", bytes);
+    let failing = true;
+    const enabled = runtime({
+      ATTACHMENT_CONVERSION_CONFIG: JSON.stringify({ ...policy, ocr: false, pdf: true }),
+      PDF_LOADER: env.PDF_LOADER!,
+      resolveAttachmentPasswords: async () => {
+        if (failing) throw new Error("synthetic resolver timeout");
+        return [syntheticPdfPassword];
+      },
+    });
+    for (let round = 0; round < 9; round++)
+      // oxlint-disable-next-line no-await-in-loop -- Each round is one scheduled run five minutes apart.
+      await repairAttachmentConversions(enabled, now + round * 300000);
+    expect(await row()).toMatchObject({
+      state: "pending",
+      failure_code: "temporarily_unavailable",
+      password_checks: 0,
+    });
+    failing = false;
+    await repairAttachmentConversions(enabled, now + 9 * 300000);
+    expect(await row()).toMatchObject({
+      state: "complete",
+      representation: "local_decrypted_pdf",
+      password_checks: 1,
+    });
+  });
+  it("blocks malformed private password and conversion configuration with fixed codes", async () => {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+      useCompressionStream: true,
+      password: crypto.randomUUID(),
+      level: 0,
+    });
+    await writer.add("invoice.txt", new Uint8ArrayReader(encode("Encrypted ZIP 33,333 yen")));
+    await source("application/zip", await writer.close());
+    const secret = "synthetic-config-secret";
+    await repairAttachmentConversions(runtime({ ATTACHMENT_PASSWORDS: `{"${secret}` }), now);
+    expect(await row()).toMatchObject({
+      state: "blocked",
+      failure_code: "invalid_password_config",
+    });
+    expect(JSON.stringify(await row())).not.toContain(secret);
+    for (const value of [`{"${secret}`, "[]", `"${secret}"`, "null", "1", "false"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Validate each independent operator configuration.
+      const error = await repairAttachmentConversions(
+        runtime({ ATTACHMENT_CONVERSION_CONFIG: value }),
+        now,
+      ).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "invalid_conversion_config" });
+      expect(String(error)).not.toContain(secret);
+    }
+  });
   it("does not expose stale or corrupt derivative content", async () => {
     await source();
     const toMarkdown = async (file: { name: string }) => ({
