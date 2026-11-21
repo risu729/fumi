@@ -1,3 +1,4 @@
+import { NonRetryableError } from "cloudflare:workflows";
 import { MailReadError, parseMailSearch, type MailReadEnvironment } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { pairBoundary, truncateCodeUnits } from "./utf16.ts";
@@ -38,20 +39,24 @@ interface Conversion {
   representation: string | null;
   policy_hash: string;
 }
-class UnsupportedEncoding extends Error {}
+// The stored object can never yield the recorded text: R2 answered, but the object
+// is absent, over its bound, not the recorded digest, or not UTF-8. Reading it again
+// returns the same answer; D1 and R2 request failures stay ordinary errors.
+class InvalidSearchSource extends Error {}
+class UnsupportedEncoding extends InvalidSearchSource {}
 
 async function verifiedText(bucket: R2Bucket, key: string, digest: string, maximum: number) {
   const object = await bucket.get(key);
-  if (!object) throw new Error("Search source unavailable");
+  if (!object) throw new InvalidSearchSource("Search source unavailable");
   if (object.size > maximum) {
     await object.body.cancel();
-    throw new Error("Search source exceeds bound");
+    throw new InvalidSearchSource("Search source exceeds bound");
   }
   const bytes = await object.arrayBuffer();
   const actual = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
-  if (actual !== digest) throw new Error("Search source changed");
+  if (actual !== digest) throw new InvalidSearchSource("Search source changed");
   try {
     return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
@@ -269,8 +274,12 @@ export async function indexContentSearchSource(
     return {
       status: (await indexMailContent(env, source, expectedInstanceId)) ? "ready" : "skipped",
     };
-  } catch {
+  } catch (error) {
     await deferContentIndex(env, source, now, expectedInstanceId);
+    // The scheduled repair keeps the deferred row; Workflow retries of the same object cannot help.
+    if (error instanceof InvalidSearchSource)
+      throw new NonRetryableError("Content indexing unavailable");
+    // oxlint-disable-next-line preserve-caught-error -- Causes can contain mail and SQL parameters.
     throw new Error("Content indexing unavailable");
   }
 }
@@ -290,8 +299,11 @@ export async function repairContentSearch(env: MailReadEnvironment, now = Date.n
   for (const row of rows) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- Bound decoded mail memory to one message.
-      await indexMailContent(env, row);
-      indexed += 1;
+      if (await indexMailContent(env, row)) indexed += 1;
+      // The extraction or conversion changed after this pass read it, and its trigger
+      // removed the projection. Nothing was published, and the next pass selects the
+      // source again while its extraction stays complete.
+      else deferred += 1;
     } catch {
       deferred += 1;
       // oxlint-disable-next-line no-await-in-loop -- Persist a fixed retry outcome before continuing.

@@ -531,7 +531,16 @@ export async function handleMailResource(
   if (request.method !== "GET" && request.method !== "HEAD")
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   if (kind !== "body") throw new MailReadError("content_unavailable");
-  const mail = await getSentMail(env, p, messageId.slice(5));
+  let mail;
+  try {
+    mail = await getSentMail(env, p, messageId.slice(5));
+  } catch (error) {
+    // A missing, foreign or unreadable record is an unavailable download, as for
+    // inbound mail. Storage failures stay internal errors.
+    if (error instanceof OutboundError && error.code !== "storage_unavailable")
+      throw new MailReadError(error.code);
+    throw error;
+  }
   const data = await publicResult(env, { input: mail.input });
   return new Response(request.method === "HEAD" ? null : JSON.stringify(data), {
     headers: {
