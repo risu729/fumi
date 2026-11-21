@@ -48,8 +48,16 @@ MIME jobs insert a separate extraction stage before completion. Only small outco
 counters leave that stage; message content stays in R2/D1. A durable blocked
 extraction fails the job with its coverage reason retained in `mail_extractions`.
 Each stage has five retries with exponential delay starting at ten seconds and a
-one-minute timeout. Catalog writes and checkpoint changes use one D1 batch guarded
-by both observation revision and the currently running instance. Single-source
+one-minute timeout. A stage that finds its attempt no longer active fails at once
+without those retries: before observation (another attempt owns the ledger row or the
+job is no longer `running`), after extraction (`attempt_inactive`) and at completion
+(the ledger row belongs to another attempt or has already failed). Retrying the same
+attempt cannot change that answer; an operator retry gets a new instance identity. The
+failure stage that follows only updates a ledger row that still has this attempt's
+instance and is pending or running, so a newer attempt's row and a terminal state stay
+as they are. D1 and R2 request failures inside a stage, including the ledger read
+itself, keep the five retries. Catalog writes and checkpoint changes use one D1 batch
+guarded by both observation revision and the currently running instance. Single-source
 observations advance the revision without advancing the sweep cursor or pass.
 They fence stale scans; superseded attempts cannot write stale observations.
 Retries are idempotent, including completion writes repeated after a lost response.
@@ -162,8 +170,9 @@ Existing catalog repair alone cannot recover failed live archival.
 ## Validation and references
 
 Local tests use synthetic mail and the actual Workers Workflow engine. They cover
-step retries, exhausted failure, controlled retry, stale-attempt fencing, lost
-start responses, completion persistence, retention boundaries and scan failure.
+step retries, exhausted failure, controlled retry, stale-attempt fencing without step
+retries, lost start responses, completion persistence, retention boundaries and scan
+failure.
 The built-artifact test runs native Email/Cron events, recovers a pre-migration
 message, then verifies immediate processing of a second message without a scan.
 No real mail is sent and no provisioned resource is accessed by these tests.
