@@ -130,10 +130,13 @@ fit one page of at most 32 indexed chunks, all returned with matching item ident
 and complete pagination. Partial/oversized output is blocked. A missing OCR binding,
 a missing PDF loader or a lost password defers the item without uploading again.
 The 24-hour limit counts from submission. After it, the next run still polls the
-item when the OCR binding is present and keeps a completed result; otherwise the row
-is blocked as `ocr_processing_timeout`, including one still waiting for a binding, a
-password or a provider that keeps failing. So a pause in scheduled runs does not
-discard a finished item. Fixed diagnostics omit provider exception text.
+item once when the OCR binding is present and keeps a completed result. Any other
+outcome of that run blocks the row as `ocr_processing_timeout`: an item still queued
+or running, a wait for a binding or a password, or any failure before the result is
+committed to the call receipt, including a transient one. A result already committed
+to the receipt is kept even if the row write after it fails. So a pause in scheduled
+runs does not discard a finished item unless that one collection attempt fails.
+Fixed diagnostics omit provider exception text.
 
 The ledger distinguishes `pending`, `running`, `submitted`, `complete`, `blocked`
 and `unknown`. Each result records source manifest, original key/hash/size/MIME,

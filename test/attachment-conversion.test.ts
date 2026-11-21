@@ -764,6 +764,63 @@ describe("private bounded attachment conversion", () => {
     expect(get).toHaveBeenCalledTimes(2);
     expect(upload).toHaveBeenCalledTimes(2);
   });
+  it("keeps an expired submission's durable complete receipt when the final row write fails", async () => {
+    const image = await source("image/png", encode("synthetic expired receipt"), "receipt");
+    const key = `fumi-${image.sha256}.png`;
+    const get = vi.fn(() => ({
+      info: async () => ({ id: "receipt-item", key, status: "completed", chunks_count: 1 }),
+      chunks: async () => ({
+        result: [
+          { id: "receipt-chunk", text: "Receipt total 56,789 yen", start_byte: 0, end_byte: 24 },
+        ],
+        result_info: { count: 1, total: 1, limit: 32, offset: 0 },
+      }),
+    }));
+    const ocr = {
+      info: async () => ({ indexing_options: { use_ocr: true } }),
+      items: { upload: async () => ({ id: "receipt-item", key }), get },
+    };
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr }), now);
+    expect(await row()).toMatchObject({ state: "submitted", remote_item_id: "receipt-item" });
+    const actual = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    let failures = 0;
+    const database = new Proxy(env.MAIL_CATALOG, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          // Only the final row write after the receipt commit fails, once.
+          if (!sql.includes("provenance_json=?,lease_token=NULL") || failures++) return actual(sql);
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("synthetic-d1-unavailable");
+              },
+            }),
+          };
+        };
+      },
+    });
+    await repairAttachmentConversions(
+      runtime({ MAIL_CATALOG: database, ATTACHMENT_OCR: ocr }),
+      now + 2 * 86400000,
+    );
+    expect(failures).toBe(1);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT state FROM attachment_conversion_calls").first(
+        "state",
+      ),
+    ).toBe("complete");
+    // The paid result is in the receipt, so the row follows it instead of a timeout.
+    expect(await row()).toMatchObject({
+      state: "complete",
+      failure_code: null,
+      representation: "managed_ocr_indexed_text",
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
   it("stops waiting for a missing OCR binding after 24 hours so pending work proceeds", async () => {
     const images = await Promise.all(
       ["first-image", "second-image"].map((id) => source("image/png", encode(id), id)),

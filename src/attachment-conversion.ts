@@ -583,8 +583,20 @@ async function processRow(
         ...receipt,
         ...(blocked ? { failure_code: error.code } : {}),
       });
-    else if (attempt && row.state === "submitted" && blocked && !submissionWait)
-      await saveAttempt("blocked", { ...receipt, failure_code: error.code });
+    else if (
+      attempt &&
+      row.state === "submitted" &&
+      blocked &&
+      !submissionWait &&
+      !(await saveAttempt("blocked", { ...receipt, failure_code: error.code }))
+    ) {
+      // A receipt that already holds the result (e.g. a failed row write after its commit) wins.
+      const current = await findAttempt();
+      if (current) {
+        await restore(current);
+        return;
+      }
+    }
     // Provider exception text is deliberately discarded: it may echo document/password data.
     await update(
       "state=?,failure_code=?,lease_token=NULL,lease_until=0,next_attempt_at=?,updated_at=?",
