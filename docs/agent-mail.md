@@ -123,11 +123,12 @@ missing or changes, inline content is `null`, `read_attachment_supported` is `fa
 `content_unavailable` (HTTP 404 `mail_unavailable`), even though the old derived objects
 remain in R2. `/raw` still serves the archived original while R2 holds it.
 `search_mail_content` returns no match from such a message
-([content search](content-search.md)). `copy_attachment` fails with
+([content search](content-search.md)), and `search_mail_semantic` cites none of its
+parts ([managed retrieval](managed-mail-search.md)). `copy_attachment` fails with
 `attachment_not_found`, and replies and forwards follow
-[reply quoting and forwarding](#reply-quoting-and-forwarding). A message ID
-whose external ID matches more than one catalog source fails with `message_conflict`
-instead of choosing one.
+[reply quoting and forwarding](#reply-quoting-and-forwarding). A message ID whose
+external ID matches more than one catalog source fails with `message_conflict` instead
+of choosing one.
 
 ## Attachment limits
 
