@@ -133,11 +133,13 @@ and complete pagination. Partial/oversized output is blocked. A missing OCR bind
 a missing PDF loader or a lost password defers the item without uploading again.
 The 24-hour limit counts from submission. After it, the next run still polls the
 item once when the OCR binding is present and keeps a completed result. Any other
-outcome of that run blocks the row as `ocr_processing_timeout`: an item still queued
-or running, a wait for a binding or a password, or any failure before the result is
-committed to the call receipt, including a transient one. A result already committed
-to the receipt is kept even if the row write after it fails. So a pause in scheduled
-runs does not discard a finished item unless that one collection attempt fails.
+outcome of that run blocks the row. A provider failure or rejected output keeps its
+own code, such as `ocr_failed` or `output_limit`. An item still queued or running, a
+wait for a binding or a password, or any other failure before the result is committed
+to the call receipt, including a transient one, becomes `ocr_processing_timeout`. A
+result already committed to the receipt is kept even if the row write after it
+fails. So a pause in scheduled runs does not discard a finished item unless that one
+collection attempt fails.
 Fixed diagnostics omit provider exception text.
 
 The ledger distinguishes `pending`, `running`, `submitted`, `complete`, `blocked`
