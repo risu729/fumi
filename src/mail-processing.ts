@@ -30,7 +30,8 @@ async function redacted<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     if (error instanceof NonRetryableError) throw error;
-    throw new Error("Mail processing step failed", { cause: error });
+    // oxlint-disable-next-line preserve-caught-error -- Causes can contain mail and SQL parameters.
+    throw new Error("Mail processing step failed");
   }
 }
 
