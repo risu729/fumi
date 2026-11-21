@@ -267,6 +267,7 @@ async function discover(
     );
   }
 }
+const submissionWaitCodes = ["password_required", "password_rejected", "backend_disabled"];
 async function processRow(
   env: AttachmentConversionEnvironment,
   cfg: Config,
@@ -368,6 +369,7 @@ async function processRow(
     }
   };
   let remoteStarted = false;
+  let submissionExpired = false;
   try {
     await update("attempt_identity=?", identity);
     attempt = await findAttempt();
@@ -382,6 +384,8 @@ async function processRow(
         return;
       }
     }
+    // Applied after a poll, so a pause in scheduled runs cannot discard a finished paid item.
+    submissionExpired = row.state === "submitted" && now - row.updated_at > 86400000;
     if (row.source_size > CONVERSION_LIMITS.sourceBytes) throw new ConversionBlocked("source_size");
     const mime = row.source_mime;
     const zip = mime === "application/zip" || mime === "application/x-zip-compressed";
@@ -402,18 +406,20 @@ async function processRow(
       : {};
     let secrets: readonly string[] = [];
     if (row.state === "submitted") {
-      if (now - row.updated_at > 86400000) throw new ConversionBlocked("ocr_processing_timeout");
       if (!env.ATTACHMENT_OCR) throw new ConversionBlocked("backend_disabled");
       if (!row.remote_item_id) throw new ConversionBlocked("invalid_provider_response");
       output = await boundedRpc(() =>
         collectOcr(env.ATTACHMENT_OCR!, row.remote_item_id!, itemKey(row.source_sha256, mime)),
       );
       if (!output) {
+        if (submissionExpired) throw new ConversionBlocked("ocr_processing_timeout");
         await update("lease_token=NULL,lease_until=0,next_attempt_at=?", now + 300000);
         return;
       }
       if (preprocessing["encrypted_pdf"] === true) {
-        if (!cfg.pdf || !env.PDF_LOADER) throw new ConversionBlocked("encrypted_pdf");
+        if (!cfg.pdf) throw new ConversionBlocked("encrypted_pdf");
+        // Like a missing OCR binding, a missing loader defers the paid item instead of discarding it.
+        if (!env.PDF_LOADER) throw new ConversionBlocked("backend_disabled");
         if (row.password_checks >= 8) throw new ConversionBlocked("password_attempt_budget");
         await update("password_checks=password_checks+1");
         secrets = await candidates(env, row);
@@ -562,19 +568,35 @@ async function processRow(
       provenance,
       now,
     );
-  } catch (error) {
+  } catch (caught) {
+    // After 24 hours, a submission that still cannot complete stops waiting.
+    const error =
+      submissionExpired &&
+      !(caught instanceof ConversionBlocked && !submissionWaitCodes.includes(caught.code))
+        ? new ConversionBlocked("ocr_processing_timeout")
+        : caught;
     const blocked = error instanceof ConversionBlocked;
     const submissionWait =
-      row.state === "submitted" &&
-      blocked &&
-      ["password_required", "password_rejected", "backend_disabled"].includes(error.code);
+      row.state === "submitted" && blocked && submissionWaitCodes.includes(error.code);
     if (attempt && remoteStarted)
       await saveAttempt(blocked ? "blocked" : "unknown", {
         ...receipt,
         ...(blocked ? { failure_code: error.code } : {}),
       });
-    else if (attempt && row.state === "submitted" && blocked && !submissionWait)
-      await saveAttempt("blocked", { ...receipt, failure_code: error.code });
+    else if (
+      attempt &&
+      row.state === "submitted" &&
+      blocked &&
+      !submissionWait &&
+      !(await saveAttempt("blocked", { ...receipt, failure_code: error.code }))
+    ) {
+      // A receipt that already holds the result (e.g. a failed row write after its commit) wins.
+      const current = await findAttempt();
+      if (current) {
+        await restore(current);
+        return;
+      }
+    }
     // Provider exception text is deliberately discarded: it may echo document/password data.
     await update(
       "state=?,failure_code=?,lease_token=NULL,lease_until=0,next_attempt_at=?,updated_at=?",
