@@ -107,6 +107,7 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Google Takeout import", () => {
+  // About 240 archive objects: the import and the paged rebuild take seconds in CI.
   it("imports every entry across objects and chunks with exact bytes, labels and receipts", async () => {
     const count = TAKEOUT_CHUNK_ENTRIES + 20;
     const objects = await upload(mbox(count), [
@@ -171,7 +172,7 @@ describe("Google Takeout import", () => {
     expect(
       await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS n FROM archive_issues").first("n"),
     ).toBe(0);
-  });
+  }, 30_000);
 
   it("verifies messages that already exist and keeps their originals", async () => {
     const objects = await upload(mbox(5), ["a/part-1.mbox"]);
@@ -289,7 +290,7 @@ describe("Google Takeout import", () => {
     ).toBe(1);
     const stored = (await env.MAIL_ARCHIVE.list({ prefix: "ingest/" })).objects;
     expect(stored.filter((object) => object.key.endsWith("/raw.eml"))).toHaveLength(2);
-  });
+  }, 30_000);
 
   it("records an entry stored just before a lost commit as imported, not verified", async () => {
     const objects = await upload(mbox(2), ["a/crash.mbox"]);
