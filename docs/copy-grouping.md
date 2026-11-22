@@ -30,7 +30,7 @@ run without holding back the others; the run reports it as `deferred`.
 | `subject` | Unfolded raw `Subject` with whitespace runs collapsed (encoded words are not decoded) |
 | `header_date` | `Date` as an ISO time when it parses, otherwise its collapsed text |
 | `group_id`, `group_rule` | The copy group (below) |
-| `message_id_conflict` | 1 when an earlier signed original has the same Message-ID and no shared body hash |
+| `message_id_conflict` | 1 when an earlier signed original has the same Message-ID and no shared body hash or another From |
 
 An original whose recorded SHA-256 no longer matches the R2 object's checksum and
 `sha256` metadata is `blocked` with `source_changed`; a missing object is
@@ -53,12 +53,12 @@ Each original first gets its own group key, and the group ID is the SHA-256 of
 | `dkim_headers` | No Message-ID, a body hash, From and Date present | smallest `bh`, From, To, Subject, Date | No Message-ID, equal From, To, Subject and Date, and at least one equal `bh` |
 | `single` | Anything else | the raw key | Nothing |
 
-The insert finds the earliest matching row in the same statement and takes its
-group ID; otherwise the row starts its own group. So an assignment never changes
-after it is written, and concurrent runs cannot split a group. Same Message-ID with
-conflicting body hashes is not grouped and sets `message_id_conflict` on the later
-row. A signed and an unsigned copy with the same Message-ID are not grouped, so an
-unsigned original that a forwarding hop signs stays two results.
+The insert finds the earliest matching row in the same statement and takes its group ID;
+otherwise the row starts its own group. So an assignment never changes after it is
+written, and concurrent runs cannot split a group. Same Message-ID with conflicting body
+hashes or another From is not grouped and sets `message_id_conflict` on the later row. A
+signed and an unsigned copy with the same Message-ID are not grouped, so an unsigned
+original that a forwarding hop signs stays two results.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.

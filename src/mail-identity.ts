@@ -216,9 +216,9 @@ function matchSql(rule: GroupRule): {
       return { sql: "SELECT NULL AS group_id WHERE 0", values: () => [] };
   }
 }
-/** Same Message-ID, both signed, no shared body hash: not grouped, and recorded. */
+/** Same Message-ID, both signed, no shared body hash or another From: not grouped, and recorded. */
 const CONFLICT_SQL = `EXISTS(SELECT 1 FROM mail_identity m WHERE m.status='complete' AND m.message_id=?
-  AND m.dkim_bh_json!='[]' AND NOT ${OVERLAP})`;
+  AND m.dkim_bh_json!='[]' AND (NOT ${OVERLAP} OR m.from_address IS NOT ?))`;
 
 export async function identityStatement(
   db: D1Database,
@@ -257,7 +257,7 @@ export async function identityStatement(
       ...match.values(result),
       await groupId(key),
       rule,
-      ...(conflict ? [result.messageId, JSON.stringify(result.bodyHashes)] : []),
+      ...(conflict ? [result.messageId, JSON.stringify(result.bodyHashes), result.from] : []),
       now,
     );
 }
