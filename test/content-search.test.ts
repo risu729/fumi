@@ -473,7 +473,7 @@ describe("bounded content retrieval", () => {
       "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
     ).run();
     await repairContentSearch(env);
-    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    // Each subject:Ä binds two values, the most a filter can bind.
     const filters = (count: number) =>
       Array.from({ length: count }, () => "subject:\u00c4").join(" ");
     const first = await searchMailContent(
@@ -506,6 +506,24 @@ describe("bounded content retrieval", () => {
         base,
       ),
     ).rejects.toMatchObject({ code: "query_too_long" });
+  });
+  it("filters by metadata values longer than D1's LIKE pattern limit", async () => {
+    await insert("long-subject", "long filter needle");
+    await insert("short-subject", "long filter needle");
+    const subject = "令和八年度合成請求書のご案内（試験用）";
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject',?) WHERE raw_key LIKE '%/long-subject/%'",
+    )
+      .bind(subject)
+      .run();
+    await repairContentSearch(env);
+    const result = await searchMailContent(
+      env,
+      reader,
+      { query: "needle", filters: `subject:${subject}` },
+      base,
+    );
+    expect(result.matches.map((m) => m.message_id)).toEqual(["mail_long-subject"]);
   });
   it("returns the entire matching phrase when it exceeds the FTS snippet token limit", async () => {
     const query = "a".repeat(100);
