@@ -24,6 +24,8 @@ interface MailRow {
   gmail_label_ids_json: string | null;
   gmail_imported_at: string | null;
   gmail_thread_anchor: string | null;
+  /** The receipt's `forward.reason` of a live capture, such as `gmail_relay`. */
+  forward_reason: string | null;
   external_id: string;
   raw_key: string;
   received_at: string | null;
@@ -58,6 +60,8 @@ const MAIL_COLUMNS = `s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
+ CASE WHEN s.source_kind='email_routing' AND json_valid(s.receipt_snapshot)
+   THEN json_extract(s.receipt_snapshot,'$.forward.reason') END AS forward_reason,
  e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
  CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current`;
 const MAIL_JOINS = `LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
@@ -160,7 +164,9 @@ function summary(row: MailRow) {
             imported_at: row.gmail_imported_at,
             smtp_envelope_available: false,
           }
-        : {}),
+        : row.forward_reason === "gmail_relay"
+          ? { via: "gmail_forwarding" }
+          : {}),
     },
     size_estimate: row.raw_size,
     extraction: { status: row.status ?? "pending", failure_code: row.failure_code },

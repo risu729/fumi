@@ -57,7 +57,9 @@ For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
 `from_address` overrides it within the caller's configured sender policy.
 Imported Gmail has no trusted SMTP envelope and requires an explicit permitted
-sender when replying. Header To/From never supplies it. New messages require an
+sender when replying. So does mail [Gmail forwarded to fumi](gmail-relay.md), whose
+envelope recipient is fumi's forwarding address; its provenance shows
+`via: gmail_forwarding`. Header To/From never supplies it. New messages require an
 explicit sender. Recipients are always explicit;
 replying never infers reply-all or adds an archive CC/BCC.
 

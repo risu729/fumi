@@ -117,6 +117,29 @@ function headerDate(value: string | undefined): string | null {
   return Number.isFinite(time) ? new Date(time).toISOString() : bounded(text);
 }
 
+/** Header values a Gmail-forwarded delivery is checked by ([gmail-relay.ts](./gmail-relay.ts)). */
+export interface RelayHeaders {
+  messageId: string | null;
+  /** Every `X-Fumi-Ingest-ID` value, trimmed, in header order. */
+  ingestIds: string[];
+}
+
+/** `complete` says the bytes are the whole original, not a prefix of it. */
+export function parseRelayHeaders(
+  bytes: Uint8Array,
+  complete = false,
+): RelayHeaders | IdentityFailure {
+  const block = headerBlock(bytes, complete);
+  if (block === "header_limit" || block === "invalid_header") return block;
+  const list = headers(block);
+  return {
+    messageId: normalizeMessageId(list.find((header) => header.name === "message-id")?.value),
+    ingestIds: list
+      .filter((header) => header.name === "x-fumi-ingest-id")
+      .map((header) => header.value.trim()),
+  };
+}
+
 /** `complete` says the bytes are the whole original, not a prefix of it. */
 export function parseHeaderIdentity(
   bytes: Uint8Array,

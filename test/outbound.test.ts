@@ -594,6 +594,63 @@ describe("durable outbound submission in workerd", () => {
       .run();
   });
 
+  it("gives a Gmail-forwarded capture no default reply sender", async () => {
+    const { ctx, send } = context();
+    const domainPrincipal = { ...principal, fromAddresses: [], fromDomains: ["example.invalid"] };
+    const rawKey = "ingest/synthetic-relay/raw.eml";
+    const sha = "0".repeat(64);
+    // The envelope recipient is fumi's forwarding address, not where the mail was sent.
+    const receipt = {
+      schemaVersion: 4,
+      ingestId: "synthetic-relay",
+      receivedAt: "2026-11-11T00:00:00Z",
+      envelope: {
+        from: "owner+caf_=relay=example.invalid@gmail.com",
+        to: "relay@example.invalid",
+      },
+      reportedRawSize: 1,
+      archive: { status: "stored", key: rawKey, size: 1, sha256: sha },
+      forward: { status: "skipped", reason: "gmail_relay" },
+    };
+    await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions (raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,
+      metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
+      VALUES (?,'mime-v1',?,1,'synthetic','complete',?,'[]',?,'synthetic-manifest',0)`)
+      .bind(
+        rawKey,
+        sha,
+        JSON.stringify({ messageId: "<relay@example.invalid>" }),
+        await storeBody("Synthetic relayed body"),
+      )
+      .run();
+    await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,
+      receipt_snapshot,forward_status,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision)
+      VALUES ('email_routing','ingress-v1','synthetic-relay',?,?,?,'skipped','present','valid',?,0,0)`)
+      .bind(rawKey, "ingest/synthetic-relay/receipt.json", JSON.stringify(receipt), sha)
+      .run();
+    const reply = {
+      to: input.to,
+      subject: input.subject,
+      payload: input.payload,
+      reply_message_id: rawKey,
+    };
+    await expect(sendMail(ctx, domainPrincipal, reply, "relay-default")).rejects.toMatchObject({
+      code: "reply_sender_unavailable",
+    });
+    await sendMail(
+      ctx,
+      domainPrincipal,
+      { ...reply, from_address: "owner@example.invalid" },
+      "relay-explicit",
+    );
+    expect(send).toHaveBeenCalledOnce();
+    expect((send.mock.calls[0]?.[0] as EmailMessageBuilder | undefined)?.from).toBe(
+      "owner@example.invalid",
+    );
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_extractions WHERE raw_key = ?")
+      .bind(rawKey)
+      .run();
+  });
+
   it("binds attachment bytes/hash/owner and detects storage mutation", async () => {
     const { ctx, send } = context();
     const attachment = await uploadAttachment(ctx, principal, {

@@ -48,6 +48,7 @@ code or evidence shows a better option.
 - [0002: Deploy every main commit and apply its migrations](adr/0002-continuous-deployment.md)
 - [0003: Signed notification webhooks with identifiers only](adr/0003-signed-notification-webhooks.md)
 - [0004: Gmail backfill from Google Takeout, and grouping copies of one message](adr/0004-gmail-takeout-import-and-copy-grouping.md)
+- [0005: Capture mail delivered directly to Gmail through Gmail forwarding](adr/0005-capture-mail-delivered-directly-to-gmail.md)
 
 Decisions made before ADRs were introduced stay in their owning pages, for
 example the library selections in [libraries](libraries.md). They move to an ADR
@@ -58,6 +59,7 @@ only when they change.
 Capture and archive:
 
 - [Initial email capture and ingress runbook](ingress.md)
+- [Mail delivered directly to Gmail](gmail-relay.md)
 - [Mail API activation](mail-activation.md)
 - [Archive catalog and reconciliation](archive-catalog.md)
 - [Archive health](archive-health.md)

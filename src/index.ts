@@ -17,6 +17,12 @@ import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
 import { ensureTakeoutWorkflow } from "./gmail-takeout-import.ts";
 import { repairMailIdentity } from "./mail-identity.ts";
 import { classifyForwardError, type ForwardErrorReason } from "./forward-failure.ts";
+import {
+  isGmailRelay,
+  recordRelay,
+  relayedCopyOf,
+  RELAY_LOOKUP_TIMEOUT_MS,
+} from "./gmail-relay.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 export { TakeoutImport } from "./gmail-takeout-workflow.ts";
@@ -94,6 +100,16 @@ async function capture(message: ForwardableEmailMessage): Promise<Uint8Array<Arr
   }
 }
 
+async function captureOutcome(
+  message: ForwardableEmailMessage,
+): Promise<Uint8Array<ArrayBuffer> | Extract<ArchiveOutcome, { status: "failed" }>> {
+  try {
+    return await capture(message);
+  } catch (error) {
+    return { status: "failed", code: error instanceof CaptureError ? error.code : "read_failed" };
+  }
+}
+
 async function archiveRaw(
   message: ForwardableEmailMessage,
   bucket: R2Bucket,
@@ -101,12 +117,18 @@ async function archiveRaw(
   metadata: Record<string, string>,
   bounded: boolean,
 ): Promise<ArchiveOutcome> {
-  let bytes: Uint8Array<ArrayBuffer>;
-  try {
-    bytes = await capture(message);
-  } catch (error) {
-    return { status: "failed", code: error instanceof CaptureError ? error.code : "read_failed" };
-  }
+  const bytes = await captureOutcome(message);
+  if (!(bytes instanceof Uint8Array)) return bytes;
+  return storeRaw(bytes, bucket, key, metadata, bounded);
+}
+
+async function storeRaw(
+  bytes: Uint8Array<ArrayBuffer>,
+  bucket: R2Bucket,
+  key: string,
+  metadata: Record<string, string>,
+  bounded: boolean,
+): Promise<ArchiveOutcome> {
   try {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const sha256 = Array.from(new Uint8Array(digest), (byte) =>
@@ -152,8 +174,35 @@ async function forward(
   }
 }
 
+/**
+ * The relayed copy's live original, or null to archive it. Any error or a slow lookup
+ * archives the copy (fail open): copy grouping links a duplicate that slips through.
+ */
+async function relayedCopy(
+  env: Env,
+  bytes: Uint8Array,
+  receivedAt: string,
+): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      relayedCopyOf(env, bytes, receivedAt),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), RELAY_LOOKUP_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** The oldest receipt version that holds the outcome, so v1-only readers keep reading it. */
-function forwardReceipt(forwarding: ForwardOutcome | undefined) {
+function forwardReceipt(forwarding: ForwardOutcome | undefined, relay: boolean) {
+  if (relay) {
+    return { schemaVersion: 4, forward: { status: "skipped", reason: "gmail_relay" } } as const;
+  }
   if (!forwarding) {
     return { schemaVersion: 2, forward: { status: "skipped", reason: "archive_only" } } as const;
   }
@@ -295,34 +344,77 @@ export default {
     const ingestId = crypto.randomUUID();
     const receivedAt = new Date().toISOString();
     const prefix = `ingest/${receivedAt.slice(0, 10)}/${ingestId}`;
-    // Neither outcome gates the other. Both stay in the email event's awaited lifetime.
-    const [archive, forwarding] = await Promise.all([
-      archiveRaw(
-        message,
-        env.MAIL_ARCHIVE,
-        `${prefix}/raw.eml`,
-        {
-          schemaVersion: "1",
-          // A late raw write is not acceptance in standalone mode. The matching
-          // successful receipt must authorize events/actions during reconciliation.
-          eventNotifications: mode === "forward" ? "1" : "0",
-          ...(mode === "archive-only" ? { ingressMode: mode } : {}),
-          ingestId,
-          receivedAt,
-          envelopeFrom: message.from,
-          envelopeTo: message.to,
-        },
-        mode === "archive-only",
-      ),
-      mode === "forward" ? forward(message, env.FORWARD_TO, ingestId) : undefined,
-    ]);
+    // Mail that Gmail forwarded back is never forwarded to Gmail again (#161).
+    const relay = isGmailRelay(message.from, env.FORWARD_TO);
+    const rawMetadata = {
+      schemaVersion: "1",
+      // A late raw write is not acceptance in standalone mode. The matching
+      // successful receipt must authorize events/actions during reconciliation.
+      eventNotifications: mode === "forward" ? "1" : "0",
+      ...(mode === "archive-only" ? { ingressMode: mode } : {}),
+      ...(relay ? { via: "gmail_forwarding" } : {}),
+      ingestId,
+      receivedAt,
+      envelopeFrom: message.from,
+      envelopeTo: message.to,
+    };
+    let archive: ArchiveOutcome;
+    let forwarding: ForwardOutcome | undefined;
+    if (relay) {
+      const bytes = await captureOutcome(message);
+      if (bytes instanceof Uint8Array) {
+        // A copy of mail fumi already holds keeps only its D1 record. When that record
+        // cannot be written, the copy is archived instead, so no delivery goes unrecorded.
+        const original = await relayedCopy(env, bytes, receivedAt);
+        if (
+          original !== null &&
+          (await recordRelay(
+            env.MAIL_CATALOG,
+            ingestId,
+            receivedAt,
+            "duplicate_of_live",
+            original,
+          ).catch(() => false))
+        ) {
+          console.log(
+            JSON.stringify({
+              event: "ingest",
+              ingestId,
+              relay: "gmail",
+              archive: "duplicate_of_live",
+              forward: "skipped",
+            }),
+          );
+          return;
+        }
+        archive = await storeRaw(
+          bytes,
+          env.MAIL_ARCHIVE,
+          `${prefix}/raw.eml`,
+          rawMetadata,
+          mode === "archive-only",
+        );
+      } else archive = bytes;
+    } else {
+      // Neither outcome gates the other. Both stay in the email event's awaited lifetime.
+      [archive, forwarding] = await Promise.all([
+        archiveRaw(
+          message,
+          env.MAIL_ARCHIVE,
+          `${prefix}/raw.eml`,
+          rawMetadata,
+          mode === "archive-only",
+        ),
+        mode === "forward" ? forward(message, env.FORWARD_TO, ingestId) : undefined,
+      ]);
+    }
     const receipt: Receipt = {
       ingestId,
       receivedAt,
       envelope: { from: message.from, to: message.to },
       reportedRawSize: Number.isSafeInteger(message.rawSize) ? message.rawSize : null,
       archive,
-      ...forwardReceipt(forwarding),
+      ...forwardReceipt(forwarding, relay),
     };
     // setReject is permanent, not a request for SMTP retry. Do this before the
     // best-effort receipt write so its failure cannot hide missing raw bytes.
@@ -347,6 +439,7 @@ export default {
     const outcome = {
       event: "ingest",
       ingestId,
+      ...(relay ? { relay: "gmail" } : {}),
       archive: archive.status,
       forward: receipt.forward.status,
       ...(forwarding?.status === "failed"
@@ -365,6 +458,16 @@ export default {
       console.error(JSON.stringify(outcome));
     } else {
       console.log(JSON.stringify(outcome));
+    }
+    if (relay) {
+      const stored = archive.status === "stored";
+      ctx.waitUntil(
+        recordRelay(env.MAIL_CATALOG, ingestId, receivedAt, stored ? "archived" : "archive_failed")
+          .then(() => undefined)
+          .catch(() => {
+            console.error(JSON.stringify({ event: "gmail_relay", status: "deferred", ingestId }));
+          }),
+      );
     }
     if (archive.status === "stored" || receiptStatus === "stored") {
       // Delivery has already been attempted. A D1/Workflow outage never changes

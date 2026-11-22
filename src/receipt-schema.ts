@@ -68,6 +68,12 @@ export const receiptSchema = v.variant("schemaVersion", [
     ...common,
     forward: v.strictObject({ status: v.literal("skipped"), reason: v.literal("archive_only") }),
   }),
+  // A delivery Gmail forwarded back to fumi is never forwarded to Gmail again (#161).
+  v.strictObject({
+    schemaVersion: v.literal(4),
+    ...common,
+    forward: v.strictObject({ status: v.literal("skipped"), reason: v.literal("gmail_relay") }),
+  }),
   // Forwarding mode writes v3 only for a thrown forward() whose reason v1 cannot hold.
   // Other outcomes keep v1, so a v1-only reader still reads every other receipt.
   v.strictObject({
@@ -124,7 +130,7 @@ export function canonicalReceipt(receipt: ArchiveReceipt): string {
         : receipt.forward.status === "failed"
           ? { status: "failed", code: receipt.forward.code }
           : receipt.forward.status === "skipped"
-            ? { status: "skipped", reason: "archive_only" }
+            ? { status: "skipped", reason: receipt.forward.reason }
             : { status: "forwarded" },
   });
 }

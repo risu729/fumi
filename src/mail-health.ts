@@ -17,7 +17,9 @@ const KNOWN_RECEIPT_SQL = `CASE WHEN receipt_snapshot IS NOT NULL AND length(rec
           (json_extract(receipt_snapshot,'$.schemaVersion')=1 AND forward_status IN ('forwarded','failed'))
           OR (json_extract(receipt_snapshot,'$.schemaVersion')=3 AND forward_status='failed')
           OR (json_extract(receipt_snapshot,'$.schemaVersion')=2 AND forward_status='skipped'
-            AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only'))
+            AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only')
+          OR (json_extract(receipt_snapshot,'$.schemaVersion')=4 AND forward_status='skipped'
+            AND json_extract(receipt_snapshot,'$.forward.reason')='gmail_relay'))
           AND json_extract(receipt_snapshot,'$.ingestId')=external_id
           AND json_extract(receipt_snapshot,'$.archive.status') IN ('stored','failed')
           AND json_extract(receipt_snapshot,'$.forward.status')=forward_status THEN 1 ELSE 0 END ELSE 0 END`;
@@ -29,6 +31,7 @@ const TABLES = [
   "gmail_imports",
   "gmail_import_items",
   "mail_identity",
+  "gmail_relay_deliveries",
 ] as const;
 type HealthSection =
   | {
@@ -273,7 +276,7 @@ export async function getMailHealth(
         failed_forwards_truncated: totals.failures > FAILED_FORWARD_LIMIT,
       };
     };
-    const [catalog, mime, processing, imports, importedItems, scan, failures, copies] =
+    const [catalog, mime, processing, imports, importedItems, scan, failures, copies, relay] =
       await Promise.all([
         section(
           ["archive_sources"],
@@ -284,6 +287,7 @@ export async function getMailHealth(
         COALESCE(SUM(CASE WHEN known_receipt THEN json_extract(receipt_snapshot,'$.archive.status')='failed' ELSE 0 END),0) AS receipt_archive_failures,
         COALESCE(SUM(CASE WHEN known_receipt THEN forward_status='failed' ELSE 0 END),0) AS receipt_forward_failures,
         COALESCE(SUM(CASE WHEN known_receipt THEN forward_status='skipped' ELSE 0 END),0) AS receipt_forward_skipped,
+        COALESCE(SUM(CASE WHEN known_receipt THEN json_extract(receipt_snapshot,'$.forward.reason')='gmail_relay' ELSE 0 END),0) AS receipt_gmail_relay,
         COALESCE(SUM(source_kind='email_routing' AND known_receipt=0),0) AS ingress_snapshot_unknown,
         COALESCE(SUM(receipt_state='missing'),0) AS current_receipt_missing,
         COALESCE(SUM(receipt_state='invalid'),0) AS current_receipt_invalid,
@@ -296,6 +300,7 @@ export async function getMailHealth(
             "receipt_archive_failures",
             "receipt_forward_failures",
             "receipt_forward_skipped",
+            "receipt_gmail_relay",
             "ingress_snapshot_unknown",
             "current_receipt_missing",
             "current_receipt_invalid",
@@ -367,6 +372,17 @@ export async function getMailHealth(
         FROM identity`,
           ["indexed", "blocked", "pending", "message_id_conflicts", "in_multi_copy_groups"],
         ),
+        // Deliveries Gmail forwarded back (#161). Rows are best-effort observations; a
+        // dropped copy always has one, because a copy is archived when its row fails.
+        section(
+          ["gmail_relay_deliveries"],
+          `WITH observed AS (SELECT rowid AS health_row,outcome FROM gmail_relay_deliveries ORDER BY rowid DESC LIMIT ${CATALOG_LIMIT + 1}),
+        sample AS (SELECT * FROM observed ORDER BY health_row DESC LIMIT ${CATALOG_LIMIT}) SELECT ${windowCount},
+        COUNT(*) AS received,COALESCE(SUM(outcome='archived'),0) AS archived,
+        COALESCE(SUM(outcome='archive_failed'),0) AS archive_failed,
+        COALESCE(SUM(outcome='duplicate_of_live'),0) AS duplicate_of_live FROM sample`,
+          ["received", "archived", "archive_failed", "duplicate_of_live"],
+        ),
       ]);
     const sections = {
       catalog,
@@ -377,6 +393,7 @@ export async function getMailHealth(
       archive_scan: scan,
       forward_failures: failures,
       copy_grouping: copies,
+      gmail_relay: relay,
     };
     const partial = Object.values(sections).some(
       (value) => value.status === "unknown" || value.window.truncated,
@@ -393,7 +410,7 @@ export async function getMailHealth(
         mailbox_total: null,
         zero_failures_proves_complete: false,
         sections_are_transactionally_consistent: false,
-        max_queries: 9,
+        max_queries: 10,
         deadline_ms: 5000,
         caveat:
           "Uncataloged objects and events without surviving catalog/receipt evidence are not counted. Counts describe bounded catalog windows, not a complete archive or a live R2 audit. Completed Gmail scopes do not prove whole-mailbox coverage; memberships can overlap.",
