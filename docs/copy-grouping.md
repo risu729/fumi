@@ -17,11 +17,13 @@ matches. Grouping instead compares a few header values that hops keep.
 selects up to 200 present originals that have no `mail_identity` row, newest catalog
 row first, so new mail is grouped within one interval and the backlog drains behind
 it. For each one it reads only the first 64 KiB of the original (the MIME header
-budget) with a ranged R2 read and writes one row. Rows are never updated.
+budget) with a ranged R2 read and writes one row. Rows are never updated. A read that
+throws (an R2 outage) writes nothing for that original, which stays pending for a later
+run without holding back the others; the run reports it as `deferred`.
 
 | Column | Value |
 | --- | --- |
-| `message_id` | First `Message-ID` header without angle brackets, case kept. A Gmail-added `...SMTPIN_ADDED_MISSING@mx.google.com` ID is stored as absent, because it differs per account |
+| `message_id` | First `Message-ID` header without angle brackets, case kept. A Gmail-added `...SMTPIN_ADDED_MISSING@mx.google.com` or `...SMTPIN_ADDED_BROKEN@mx.google.com` ID is stored as absent, because it differs per account |
 | `dkim_bh_json` | Sorted unique `bh=` values of every `DKIM-Signature`, whitespace removed, at most 16 |
 | `from_address` | First `From` address, lowercase |
 | `to_json` | Sorted unique lowercase addresses of every `To` header, at most 100 |
@@ -33,7 +35,9 @@ budget) with a ranged R2 read and writes one row. Rows are never updated.
 An original whose recorded SHA-256 no longer matches the R2 object's checksum and
 `sha256` metadata is `blocked` with `source_changed`; a missing object is
 `source_missing`; a header section that does not end within 64 KiB is
-`header_limit`; input that does not start with a header is `invalid_header`.
+`header_limit`; input that does not start with a header is `invalid_header`. An
+original that is only headers, without a blank line, is indexed when the read covered
+the whole object.
 Blocked rows have no group and stand alone in reads. `mime-v1` is unchanged, and
 grouping does not wait for MIME extraction or depend on its 4 MiB input bound.
 
@@ -44,7 +48,7 @@ Each original first gets its own group key, and the group ID is the SHA-256 of
 
 | Rule | When | Own key | Joins an earlier row with |
 | --- | --- | --- | --- |
-| `message_id_dkim` | Message-ID and at least one body hash | Message-ID, smallest `bh` | Same Message-ID and at least one equal `bh` |
+| `message_id_dkim` | Message-ID, at least one body hash and From | Message-ID, smallest `bh`, From | Same Message-ID, equal From and at least one equal `bh` |
 | `message_id_from_date` | Message-ID, no DKIM, From and Date present | Message-ID, From, Date | Same Message-ID, no DKIM, equal From and Date |
 | `dkim_headers` | No Message-ID, a body hash, From and Date present | smallest `bh`, From, To, Subject, Date | No Message-ID, equal From, To, Subject and Date, and at least one equal `bh` |
 | `single` | Anything else | the raw key | Nothing |
@@ -53,10 +57,16 @@ The insert finds the earliest matching row in the same statement and takes its
 group ID; otherwise the row starts its own group. So an assignment never changes
 after it is written, and concurrent runs cannot split a group. Same Message-ID with
 conflicting body hashes is not grouped and sets `message_id_conflict` on the later
-row. A signed and an unsigned copy with the same Message-ID are not grouped.
+row. A signed and an unsigned copy with the same Message-ID are not grouped, so an
+unsigned original that a forwarding hop signs stays two results.
 
-Header values are untrusted. A forged Message-ID and body hash can at most hide a
-copy in default listings: `expand_copies` always shows every original, and grouping
+Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
+easily from a mail someone has seen, and DKIM is not verified here.
+
+Header values are untrusted. Someone who has seen a message can send a new one to a
+live address with the same Message-ID, From and `bh=`. It joins the group and, as a
+live capture, becomes the representative, so default listings show its content in
+place of the genuine copy. `expand_copies` always shows every original, and grouping
 never affects routing, notifications, forwarding or sending.
 
 ## Reads
@@ -65,22 +75,31 @@ never affects routing, notifications, forwarding or sending.
 their filters. Of the originals in one group that matched, one representative is
 returned: live capture first, then Gmail copies by earliest provider receipt time,
 then external ID. The earliest Gmail copy stands for the account's own copy, because
-forwarding to another account happens after the first account received it. Each
-result carries `group_id` (null for an original without an identity row yet) and
+forwarding to another account happens after the first account received it (the ADR
+says "the account's own Gmail"; earliest receipt time is how the code decides it). A
+thread read always keeps the message it was asked for as its group's representative.
+Each result carries `group_id` (null for an original without a complete identity row
+for its current SHA-256, or whose row is newer than the page snapshot) and
 `copies`, the number of the group's originals that matched the same filters.
 `expand_copies: true` returns every original with the same two fields.
 
-Pages follow representatives. The page token holds snapshots of both
-`archive_sources` and `mail_identity` rowids, and identity rows written after the
-first page are ignored for the rest of the traversal, so a group never changes
-representative between pages. A token from before this change is rejected with
-`invalid_page_token`, and changing `expand_copies` between pages is
-`page_query_mismatch`.
+Pages follow representatives. The page token holds snapshots of both `archive_sources`
+and `mail_identity` rowids, and identity rows written after the first page are ignored
+for the rest of the traversal, so new grouping never moves a representative between
+pages. A change in which originals match the filters (for example an extraction
+finishing, so a `from:` filter starts matching another copy) can still change a
+representative and repeat or skip that group on a later page. A token from before this
+change is rejected with `invalid_page_token`, and changing `expand_copies` between pages
+is `page_query_mismatch`.
 
 `search_mail_content` and `search_mail_semantic` add `group_id` to each match and,
 within one page or call, drop a match whose group, part and text digest were already
 shown. Later pages are not deduplicated. `coverage.duplicate_copies_omitted` counts
 the dropped matches, and `expand_copies: true` keeps them.
+
+Every collapsed page scans all originals that match its filters and sorts them twice,
+and the cursor applies after the collapse. That is bounded by the archive size, not by
+the page size.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
 rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a

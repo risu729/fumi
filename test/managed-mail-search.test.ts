@@ -223,7 +223,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await env.MAIL_CATALOG.exec(
-    "DELETE FROM mail_extractions; DELETE FROM archive_sources; DELETE FROM managed_mail_calls; DELETE FROM attachment_conversions;",
+    "DELETE FROM mail_identity; DELETE FROM mail_extractions; DELETE FROM archive_sources; DELETE FROM managed_mail_calls; DELETE FROM attachment_conversions;",
   );
 });
 describe("optional managed body corpus and semantic retrieval", () => {
@@ -304,6 +304,34 @@ describe("optional managed body corpus and semantic retrieval", () => {
     expect(
       await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_events").first(),
     ).toEqual({ count: 0 });
+  });
+  it("shows the same text once per copy group unless copies are expanded", async () => {
+    const copies = [await source("copy-live"), await source("copy-gmail")];
+    for (const copy of copies)
+      // oxlint-disable-next-line no-await-in-loop -- Ordered synthetic rows.
+      await env.MAIL_CATALOG.prepare(
+        `INSERT INTO mail_identity(raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at)
+        VALUES(?,'identity-v1',?,'complete',?,'message_id_dkim','2026-11-12T00:00:00.000Z')`,
+      )
+        .bind(copy.raw.key, copy.raw.sha256, "c".repeat(64))
+        .run();
+    const remote = provider(),
+      context = runtime(remote.binding);
+    await ready(context);
+    const collapsed = await searchManagedMail(context, reader, { query: "invoice" }, base);
+    expect(collapsed.matches.map((match) => match.group_id)).toEqual(["c".repeat(64)]);
+    expect(collapsed.coverage).toMatchObject({ duplicate_copies_omitted: 1 });
+    const expanded = await searchManagedMail(
+      context,
+      reader,
+      { query: "invoice", expand_copies: true },
+      base,
+    );
+    expect(expanded.matches.map((match) => match.message_id).sort()).toEqual([
+      "mail_copy-gmail",
+      "mail_copy-live",
+    ]);
+    expect(expanded.coverage).toMatchObject({ duplicate_copies_omitted: 0 });
   });
   it("never splits a surrogate pair at the 800-unit excerpt limit", async () => {
     const original = await source("emoji", `${"x".repeat(799)}\u{1f600}tail`);

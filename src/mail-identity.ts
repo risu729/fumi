@@ -36,7 +36,7 @@ export interface HeaderIdentity {
   date: string | null;
 }
 
-function headerBlock(bytes: Uint8Array): string | IdentityFailure {
+function headerBlock(bytes: Uint8Array, complete: boolean): string | IdentityFailure {
   let end = -1;
   for (let index = 0; index < bytes.length - 1; index++) {
     if (bytes[index] !== 10) continue;
@@ -49,6 +49,8 @@ function headerBlock(bytes: Uint8Array): string | IdentityFailure {
       break;
     }
   }
+  // A message may be headers only, ending without a blank line; then the read holds it all.
+  if (end < 0 && complete && bytes.length) end = bytes.length;
   if (end < 0) return bytes.length >= IDENTITY_HEADER_BYTES ? "header_limit" : "invalid_header";
   // Non-UTF-8 header bytes decode to U+FFFD: lossy, but the same bytes give the same text.
   const text = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(
@@ -74,8 +76,8 @@ function headers(block: string): { name: string; value: string }[] {
 const collapse = (value: string) => value.replace(/\s+/g, " ").trim();
 const bounded = (value: string) => (value.length > MAX_VALUE ? value.slice(0, MAX_VALUE) : value);
 
-/** Gmail adds this Message-ID when the original had none; it differs per account. */
-const GMAIL_ADDED_MESSAGE_ID = /SMTPIN_ADDED_MISSING@mx\.google\.com$/i;
+/** Gmail adds these Message-IDs when the original had none or a broken one; they differ per account. */
+const GMAIL_ADDED_MESSAGE_ID = /SMTPIN_ADDED_(?:MISSING|BROKEN)@mx\.google\.com$/i;
 export function normalizeMessageId(value: string | undefined): string | null {
   if (value === undefined) return null;
   const text = collapse(value);
@@ -115,8 +117,12 @@ function headerDate(value: string | undefined): string | null {
   return Number.isFinite(time) ? new Date(time).toISOString() : bounded(text);
 }
 
-export function parseHeaderIdentity(bytes: Uint8Array): HeaderIdentity | IdentityFailure {
-  const block = headerBlock(bytes);
+/** `complete` says the bytes are the whole original, not a prefix of it. */
+export function parseHeaderIdentity(
+  bytes: Uint8Array,
+  complete = false,
+): HeaderIdentity | IdentityFailure {
+  const block = headerBlock(bytes, complete);
   if (block === "header_limit" || block === "invalid_header") return block;
   const list = headers(block);
   const first = (name: string) => list.find((header) => header.name === name)?.value;
@@ -152,8 +158,8 @@ export function groupKey(
   rawKey: string,
 ): { rule: GroupRule; key: unknown[] } {
   const { messageId, bodyHashes, from, to, subject, date } = identity;
-  if (messageId && bodyHashes.length)
-    return { rule: "message_id_dkim", key: ["message_id_dkim", messageId, bodyHashes[0]] };
+  if (messageId && bodyHashes.length && from)
+    return { rule: "message_id_dkim", key: ["message_id_dkim", messageId, bodyHashes[0], from] };
   if (messageId && from && date)
     return { rule: "message_id_from_date", key: ["message_id_from_date", messageId, from, date] };
   if (!messageId && bodyHashes.length && from && date)
@@ -187,8 +193,8 @@ function matchSql(rule: GroupRule): {
   switch (rule) {
     case "message_id_dkim":
       return {
-        sql: `${base}'message_id_dkim' AND m.message_id=? AND ${OVERLAP} ORDER BY m.rowid LIMIT 1`,
-        values: (i) => [i.messageId, JSON.stringify(i.bodyHashes)],
+        sql: `${base}'message_id_dkim' AND m.message_id=? AND m.from_address=? AND ${OVERLAP} ORDER BY m.rowid LIMIT 1`,
+        values: (i) => [i.messageId, i.from, JSON.stringify(i.bodyHashes)],
       };
     case "message_id_from_date":
       return {
@@ -271,8 +277,9 @@ async function readIdentity(
   });
   if (!object) return "source_missing";
   const bytes = new Uint8Array(await object.arrayBuffer());
-  // The catalog digest must still describe the stored original. A header read cannot
-  // hash the whole object, so the digests R2 recorded for it at write time are compared.
+  // The catalog digest must still describe the stored original. A header read cannot hash
+  // the whole object, so the sha256 metadata written with it is compared, and R2's own
+  // checksum too when the response carries one.
   const checksum = object.checksums.sha256
     ? [...new Uint8Array(object.checksums.sha256)]
         .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -280,7 +287,7 @@ async function readIdentity(
     : rawSha256;
   if (object.customMetadata?.["sha256"] !== rawSha256 || checksum !== rawSha256)
     return "source_changed";
-  return parseHeaderIdentity(bytes);
+  return parseHeaderIdentity(bytes, bytes.byteLength >= object.size);
 }
 
 /**
@@ -301,28 +308,45 @@ export async function repairMailIdentity(
       .bind(limit)
       .all<{ raw_key: string; raw_sha256: string }>()
   ).results;
-  const results: (HeaderIdentity | IdentityFailure)[] = Array.from({ length: pending.length });
+  const results: (HeaderIdentity | IdentityFailure | null)[] = Array.from({
+    length: pending.length,
+  });
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(READ_CONCURRENCY, pending.length) }, async () => {
       while (next < pending.length) {
         const index = next++;
         const row = pending[index]!;
-        // oxlint-disable-next-line no-await-in-loop -- A fixed number of readers share the queue.
-        results[index] = await readIdentity(env.MAIL_ARCHIVE, row.raw_key, row.raw_sha256);
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- A fixed number of readers share the queue.
+          results[index] = await readIdentity(env.MAIL_ARCHIVE, row.raw_key, row.raw_sha256);
+        } catch {
+          // A failed read may be transient: leave this original pending for a later run
+          // without holding back the others.
+          results[index] = null;
+        }
       }
     }),
   );
   const time = now.toISOString();
+  const written = pending.flatMap((row, index) => {
+    const result = results[index];
+    return result ? [{ row, result }] : [];
+  });
   const statements = await Promise.all(
-    pending.map((row, index) =>
-      identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, results[index]!, time),
+    written.map(({ row, result }) =>
+      identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
     ),
   );
   // Batches run in order, so a later original sees the rows of earlier ones.
   for (let start = 0; start < statements.length; start += WRITE_BATCH)
     // oxlint-disable-next-line no-await-in-loop -- Ordered writes keep group assignment deterministic.
     await env.MAIL_CATALOG.batch(statements.slice(start, start + WRITE_BATCH));
-  const blocked = results.filter((result) => typeof result === "string").length;
-  return { indexed: pending.length - blocked, blocked, more: pending.length === limit };
+  const blocked = written.filter(({ result }) => typeof result === "string").length;
+  return {
+    indexed: written.length - blocked,
+    blocked,
+    deferred: pending.length - written.length,
+    more: pending.length === limit,
+  };
 }

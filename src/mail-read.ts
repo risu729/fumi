@@ -67,16 +67,23 @@ const SELECT_MAIL = `SELECT ${MAIL_COLUMNS} FROM archive_sources s ${MAIL_JOINS}
  * Copies of one message (ADR 0004) collapse after filters to one representative per
  * copy group: live capture first, then Gmail copies by earliest provider receipt time
  * (the account that received it first, before any forwarding hop), then external ID.
- * Rows without an identity row, or whose row is newer than the snapshot, stand alone.
+ * A thread read prefers the message it was asked for. Rows without a complete identity
+ * row for their current original, or whose row is newer than the snapshot, stand alone.
  * `copies` counts the originals of the group that matched the same filters.
  */
-function collapsedSql(where: string, order: string, expand: boolean, after = "") {
+function collapsedSql(
+  where: string,
+  order: string,
+  expand: boolean,
+  options: { after?: string; preferRawKey?: boolean } = {},
+) {
+  const { after = "", preferRawKey = false } = options;
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND i.status='complete' THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
-     ORDER BY CASE source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
+     ORDER BY ${preferRawKey ? "CASE WHEN raw_key=? THEN 0 ELSE 1 END," : ""}CASE source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
    COUNT(*) OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)) AS copies FROM matched)
  SELECT ${MAIL_COLUMNS},r.copy_group_id,r.copies FROM ranked r JOIN archive_sources s ON s.rowid=r.source_row ${MAIL_JOINS}
  WHERE ${expand ? "1" : "r.copy_rank=1"}${after ? ` AND ${after}` : ""} ORDER BY ${order} LIMIT ?`;
@@ -579,7 +586,9 @@ export async function searchMail(
     : "";
   if (cursor) values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
   const rows = (
-    await env.MAIL_CATALOG.prepare(collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, after))
+    await env.MAIL_CATALOG.prepare(
+      collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, { after }),
+    )
       .bind(...values, limit + 1)
       .all<MailRow>()
   ).results;
@@ -648,9 +657,17 @@ export async function readMailThread(
               "s.source_kind='gmail' AND ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)",
               NEWEST_FIRST,
               expand,
+              { preferRawKey: true },
             ),
           )
-            .bind(groups, row.source_namespace, row.gmail_thread_id, row.external_id, limit + 1)
+            .bind(
+              groups,
+              row.source_namespace,
+              row.gmail_thread_id,
+              row.external_id,
+              row.raw_key,
+              limit + 1,
+            )
             .all<MailRow>()
         ).results
       : (
@@ -661,6 +678,7 @@ export async function readMailThread(
     (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))`,
               NEWEST_FIRST,
               expand,
+              { preferRawKey: true },
             ),
           )
             .bind(
@@ -671,6 +689,7 @@ export async function readMailThread(
               messageId ?? null,
               reply ?? null,
               reply ?? null,
+              row.raw_key,
               limit + 1,
             )
             .all<MailRow>()

@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDENTITY_HEADER_BYTES,
   parseHeaderIdentity,
   repairMailIdentity,
 } from "../src/mail-identity.ts";
+import { getMailHealth } from "../src/mail-health.ts";
 import { readMailThread, searchMail } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
@@ -159,6 +160,16 @@ describe("header-only mail identity", () => {
         mime(headers({ messageId: "<CABC.1.SMTPIN_ADDED_MISSING@mx.google.com>", date: "soon" })),
       ),
     ).toMatchObject({ messageId: null, date: "soon" });
+    expect(
+      parseHeaderIdentity(mime(headers({ messageId: "<x.SMTPIN_ADDED_BROKEN@mx.google.com>" }))),
+    ).toMatchObject({ messageId: null });
+    // Headers only, without a blank line, is a whole message only when it is the whole read.
+    const headersOnly = encoder.encode("Subject: headers only\r\nFrom: a@example.invalid");
+    expect(parseHeaderIdentity(headersOnly)).toBe("invalid_header");
+    expect(parseHeaderIdentity(headersOnly, true)).toMatchObject({
+      subject: "headers only",
+      from: "a@example.invalid",
+    });
     expect(parseHeaderIdentity(encoder.encode("not a header\r\n\r\nbody"))).toBe("invalid_header");
     expect(parseHeaderIdentity(encoder.encode("Subject: no end\r\n"))).toBe("invalid_header");
     expect(
@@ -222,21 +233,46 @@ describe("header-only mail identity", () => {
       "2026-11-07T08:00:02.000Z",
       mime(headers({ messageId: null, bh: [BH_B], subject: "Another" })),
     );
+    // A copied Message-ID and body hash under another sender does not join the group.
+    const otherSender = await archive(
+      "email_routing",
+      "2026-11-07T06:03:00.000Z",
+      mime(headers({ bh: [BH_A], from: "intruder@example.invalid" })),
+    );
     const bare = await archive("gmail", "2026-11-07T09:00:00.000Z", mime(["Subject: bare"]));
     const bareTwin = await archive("gmail", "2026-11-07T09:00:01.000Z", mime(["Subject: bare"]));
 
-    expect(await repairMailIdentity(env, 4)).toEqual({ indexed: 4, blocked: 0, more: true });
-    expect(await repairMailIdentity(env)).toEqual({ indexed: 7, blocked: 0, more: false });
-    expect(await repairMailIdentity(env)).toEqual({ indexed: 0, blocked: 0, more: false });
+    expect(await repairMailIdentity(env, 4)).toEqual({
+      indexed: 4,
+      blocked: 0,
+      deferred: 0,
+      more: true,
+    });
+    expect(await repairMailIdentity(env)).toEqual({
+      indexed: 8,
+      blocked: 0,
+      deferred: 0,
+      more: false,
+    });
+    expect(await repairMailIdentity(env)).toEqual({
+      indexed: 0,
+      blocked: 0,
+      deferred: 0,
+      more: false,
+    });
 
     expect(await groupOf(gmail.key)).toBe(await groupOf(live.key));
     expect(await groupOf(conflict.key)).not.toBe(await groupOf(live.key));
+    expect(await groupOf(otherSender.key)).not.toBe(await groupOf(live.key));
     const rows = await identities();
-    // Newest originals are indexed first, so the copies indexed after the conflicting
-    // original record the conflict.
+    // Newest originals are indexed first; a row records a conflict with any earlier signed
+    // row of its Message-ID that shares no body hash.
+    expect(rows.find((row) => row.raw_key === otherSender.key)).toMatchObject({
+      message_id_conflict: 0,
+    });
     expect(rows.find((row) => row.raw_key === conflict.key)).toMatchObject({
       group_rule: "message_id_dkim",
-      message_id_conflict: 0,
+      message_id_conflict: 1,
     });
     expect(rows.find((row) => row.raw_key === gmail.key)).toMatchObject({ message_id_conflict: 1 });
     expect(rows.find((row) => row.raw_key === unsignedA.key)).toMatchObject({
@@ -249,7 +285,18 @@ describe("header-only mail identity", () => {
     expect(await groupOf(noIdOtherSubject.key)).not.toBe(await groupOf(noIdA.key));
     expect(await groupOf(bareTwin.key)).not.toBe(await groupOf(bare.key));
     expect(rows.find((row) => row.raw_key === bare.key)).toMatchObject({ group_rule: "single" });
-    expect(new Set(rows.map((row) => row.group_id)).size).toBe(8);
+    expect(new Set(rows.map((row) => row.group_id)).size).toBe(9);
+    const health = await getMailHealth(env, principal);
+    expect(health.sections.copy_grouping).toMatchObject({
+      status: "observed",
+      counts: {
+        indexed: 12,
+        blocked: 0,
+        pending: 0,
+        message_id_conflicts: 3,
+        in_multi_copy_groups: 6,
+      },
+    });
   });
 
   it("records originals it cannot read as blocked and never rewrites a row", async () => {
@@ -263,13 +310,50 @@ describe("header-only mail identity", () => {
       "2026-11-07T06:00:02.000Z",
       encoder.encode("no header"),
     );
-    expect(await repairMailIdentity(env)).toEqual({ indexed: 0, blocked: 3, more: false });
+    const headersOnly = await archive(
+      "email_routing",
+      "2026-11-07T06:00:03.000Z",
+      encoder.encode("Subject: headers only\r\nFrom: a@example.invalid"),
+    );
+    const unreadable = await archive(
+      "email_routing",
+      "2026-11-07T06:00:04.000Z",
+      mime(headers({})),
+    );
+    const get = env.MAIL_ARCHIVE.get.bind(env.MAIL_ARCHIVE);
+    const spy = vi.spyOn(env.MAIL_ARCHIVE, "get").mockImplementation(async (key, options) => {
+      if (key === unreadable.key) throw new Error("Synthetic R2 outage");
+      return get(key, options as R2GetOptions);
+    });
+    try {
+      // A failed read stays pending and does not hold back the other originals.
+      expect(await repairMailIdentity(env)).toEqual({
+        indexed: 1,
+        blocked: 3,
+        deferred: 1,
+        more: false,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await repairMailIdentity(env)).toEqual({
+      indexed: 1,
+      blocked: 0,
+      deferred: 0,
+      more: false,
+    });
+    expect((await identities()).find((row) => row.raw_key === headersOnly.key)).toMatchObject({
+      status: "complete",
+      group_rule: "single",
+    });
     expect(
       (await identities()).map((row) => [row.raw_key, row.status, row.failure_code, row.group_id]),
     ).toEqual([
+      [headersOnly.key, "complete", null, expect.any(String)],
       [headerless.key, "blocked", "invalid_header", null],
       [missing.key, "blocked", "source_missing", null],
       [changed.key, "blocked", "source_changed", null],
+      [unreadable.key, "complete", null, expect.any(String)],
     ]);
   });
 });
@@ -389,6 +473,47 @@ describe("collapsed reads", () => {
     expect(late.id).toMatch(/^mail_/);
   });
 
+  it("keeps the copy groups of the first page for the whole traversal", async () => {
+    const ids: string[] = [];
+    for (let index = 0; index < 3; index++) {
+      const messageId = `<snapshot-${index}@example.invalid>`;
+      for (const [kind, second] of [
+        ["email_routing", "00"],
+        ["gmail", "05"],
+      ] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- Ordered synthetic rows.
+        const copy = await archive(
+          kind,
+          `2026-11-0${7 + index}T00:00:${second}.000Z`,
+          mime(headers({ messageId, bh: [BH_A], hop: kind })),
+          { messageId },
+        );
+        ids.push(copy.id);
+      }
+    }
+    const pages = [await searchMail(env, principal, { max_results: 2 })];
+    // Grouping completes during the traversal; its pages still list every original once.
+    await repairMailIdentity(env);
+    while (pages.at(-1)!.next_page_token)
+      pages.push(
+        // oxlint-disable-next-line no-await-in-loop -- Pages follow one another.
+        await searchMail(env, principal, {
+          max_results: 2,
+          next_page_token: pages.at(-1)!.next_page_token!,
+        }),
+      );
+    expect(pages.flatMap((page) => page.emails.map((mail) => [mail.id, mail.copies]))).toEqual(
+      ids.toReversed().map((id) => [id, 1]),
+    );
+    expect(
+      (await searchMail(env, principal, {})).emails.map((mail) => [mail.id, mail.copies]),
+    ).toEqual([
+      [ids[4], 2],
+      [ids[2], 2],
+      [ids[0], 2],
+    ]);
+  });
+
   it("collapses repeated live deliveries in a thread read", async () => {
     const first = await archive(
       "email_routing",
@@ -407,8 +532,14 @@ describe("collapsed reads", () => {
       { message_id: second.id },
       "https://fumi.invalid",
     );
-    expect(thread.messages.map((mail) => [mail.id, mail.copies])).toEqual([[first.id, 2]]);
+    // The message asked for represents its own group, even though another copy is earlier.
+    expect(thread.messages.map((mail) => [mail.id, mail.copies])).toEqual([[second.id, 2]]);
     expect(thread.copies).toBe("one_representative_per_copy_group");
+    expect(
+      (
+        await readMailThread(env, principal, { message_id: first.id }, "https://fumi.invalid")
+      ).messages.map((mail) => mail.id),
+    ).toEqual([first.id]);
     const expanded = await readMailThread(
       env,
       principal,
