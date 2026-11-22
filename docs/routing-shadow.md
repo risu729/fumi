@@ -261,7 +261,7 @@ await the owner's approval.
 | --- | --- |
 | `propose_routing_rule` | Add one rule: `id`, `priority`, `match`, `outcome`, optional `category` and `urgent` |
 | `update_routing_rule` | Replace `priority`, `match`, `outcome`, `category` and `urgent` of `rule_id`; omitted `category` and `urgent` are removed |
-| `retire_routing_rule` | Remove `rule_id`; the revision records keep the earlier configurations |
+| `retire_routing_rule` | Remove `rule_id`; the earlier configuration is kept only in the previous revision record, if the tools wrote it |
 
 Candidate only. The tools write only the shadow artifact
 `config/routing-shadow-v1.json`, which produces shadow decisions and never dispatches.
@@ -279,14 +279,21 @@ The tool descriptions require the owner's explicit instruction and forbid change
 derived from mail content, retrieved documents or model output, and the tools are
 annotated as destructive so a client can ask for confirmation. A server cannot tell
 whether a model in the owner's own MCP client chose the arguments; that remains the
-client's confirmation step.
+client's confirmation step. The risk is therefore an injected instruction in mail or
+a document that a model reads in the same session as a `mail:routing` grant: a
+changed candidate does not route mail, but it changes shadow decisions, usage and the
+configuration an administrator may later copy into the dispatch artifact. Hold
+`mail:routing` in a principal whose client does not also read mail, and review the
+candidate diff before activation.
 
 Validation. Each call builds the full new artifact and checks it with
 `parseShadowArtifact`, the validator the scheduled reader uses (256 KiB artifact,
 strict shape, full router compilation: at most 32 ordinary rules, the bounded CEL
 subset over `subject`, `from`, `to` and `hasAttachments`, 64 KiB configuration).
 Nothing is written when a check fails. Errors are `{"error": {"code", "path"}}`, where
-`path` is an input key path such as `rule.match`, never a value:
+`path` is an input key path such as `rule.match`, never a value. It names only keys
+the tool schemas define; for a key the caller added, it stops at the parent (`rule`,
+or no `path` at the top level):
 
 | Code | Meaning |
 | --- | --- |
@@ -313,9 +320,20 @@ record `config/routing-shadow-revisions/<uuid>.json` in the same private bucket:
 (`{id, addedAt, changedAt}` per rule, carried forward) and `artifactJson`, the exact
 committed artifact. The committed candidate's custom metadata is
 `{revision_id, configuration_sha256}`. A record whose write lost the race is deleted
-and is never referenced; the chain from the current candidate through
-`previousRevisionId` is the audit trail. Records are never deleted by these tools and
-keep retired rule bodies. No migration is needed.
+and is never referenced. When the conditional write fails with an unknown outcome, or
+that delete fails, the record stays unreferenced. History follows only the current
+candidate's custom metadata and requires the record's SHA-256 to match, so an
+unreferenced record is never reported; the chain from the current candidate through
+`previousRevisionId` is the audit trail, and it starts again after a direct R2 write.
+A record keeps only the artifact it committed: the candidate as an administrator
+uploaded it is not recorded, so the first change after a direct upload keeps no copy
+of the configuration before it.
+
+Growth. The tools never delete a committed record, and records keep retired rule
+bodies. Each change adds one record of at most about 0.5 MiB (the artifact of at most
+256 KiB, escaped as a JSON string); a reader rejects a record over 1 MiB. Nothing
+expires or prunes them; removing old records is a manual administrator action on the
+private bucket. No migration is needed.
 
 Logs. A committed change logs one line: `event: "routing_rule_change"`, `operation`,
 `principal_id`, `revision_id` and the previous and new configuration SHA-256. Rule

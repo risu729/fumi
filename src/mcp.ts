@@ -147,7 +147,7 @@ const descriptions: Record<ToolName, string> = {
     "Operator only (mail:routing). Explain how one mail_ message was routed from stored evidence: the deciding rule, plugin or classifier outcome and the configuration SHA-256 or dispatch revision, with each stored shadow decision, dispatch job and offer state and classification. Live dispatch does not store the rule ID; it is attributed only from a current shadow decision under the active configuration. Returns no mail content. Read-only.",
   propose_routing_rule: `Operator only (mail:routing). Add one ordinary rule (id, priority, match, outcome, optional category and urgent for review) to the candidate routing configuration as a new revision. ${RULE_CHANGE_NOTE}`,
   update_routing_rule: `Operator only (mail:routing). Replace the priority, match, outcome, category and urgent of the candidate rule rule_id as a new revision; omitted category and urgent are removed. ${RULE_CHANGE_NOTE}`,
-  retire_routing_rule: `Operator only (mail:routing). Remove the candidate rule rule_id as a new revision; the revision record keeps the earlier configuration. ${RULE_CHANGE_NOTE}`,
+  retire_routing_rule: `Operator only (mail:routing). Remove the candidate rule rule_id as a new revision. A revision record keeps only the configuration it committed, so the configuration before this change is kept only when the rule change tools wrote it. ${RULE_CHANGE_NOTE}`,
 };
 function allowed(name: ToolName, p: MailPrincipal) {
   if (
@@ -201,6 +201,26 @@ function failure(error: unknown): CallToolResult {
     content: [{ type: "text", text: JSON.stringify(body) }],
     structuredContent: body,
   };
+}
+// Every input key the rule change schemas name. Only these may appear in an error path.
+const RULE_CHANGE_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(toolSchemas.propose_routing_rule.entries),
+  ...Object.keys(toolSchemas.update_routing_rule.entries),
+  ...Object.keys(toolSchemas.retire_routing_rule.entries),
+  ...Object.keys(toolSchemas.propose_routing_rule.entries.rule.entries),
+]);
+/** The schema key path of an input issue. A strict object also reports a key the
+ * caller added; such a key can carry data, so the path stops before any key that no
+ * rule change schema names. */
+function schemaKeyPath(issue: v.BaseIssue<unknown>): string | null {
+  const keys: string[] = [];
+  for (const item of issue.path ?? []) {
+    if (item.type !== "object" || typeof item.key !== "string" || !RULE_CHANGE_KEYS.has(item.key))
+      break;
+    keys.push(item.key);
+  }
+  const path = keys.join(".");
+  return /^[a-z0-9_.]{1,64}$/.test(path) ? path : null;
 }
 async function inputWithReply(
   env: McpEnvironment,
@@ -289,11 +309,7 @@ export async function dispatchMailTool(
   const parsed = v.safeParse(toolSchemas[name], input);
   if (!parsed.success) {
     if (!RULE_CHANGE_TOOLS.includes(name)) throw new MailReadError("invalid_arguments");
-    const path = v.getDotPath(parsed.issues[0]);
-    throw new RuleChangeError(
-      "invalid_arguments",
-      path !== null && /^[a-z0-9_.]{1,64}$/.test(path) ? path : null,
-    );
+    throw new RuleChangeError("invalid_arguments", schemaKeyPath(parsed.issues[0]));
   }
   switch (name) {
     case "get_mail_health":

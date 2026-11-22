@@ -427,6 +427,40 @@ describe("routing rule change validation", () => {
       expect(await revisionKeys()).toEqual([]);
     });
 
+  it("never echoes an unknown input key in the error path", async () => {
+    await configure();
+    const expected = await hash(baseConfig);
+    // A caller-chosen key name can carry data; only fixed schema paths are returned.
+    const key = "synthetic_secret_marker";
+    for (const [name, input, path] of [
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: { ...secretRule, [key]: true } },
+        "rule",
+      ],
+      [
+        "update_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule_id: "synthetic-alpha",
+          rule: { priority: 1, match: "true", outcome: "ignore", [key]: true },
+        },
+        "rule",
+      ],
+      [
+        "retire_routing_rule",
+        { expected_configuration_sha256: expected, rule_id: "synthetic-alpha", [key]: true },
+        null,
+      ],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- Each tool is checked independently.
+      const error = await rejected(call(name, input));
+      expect({ code: error.code, path: error.path }).toEqual({ code: "invalid_arguments", path });
+      expect(JSON.stringify(error)).not.toContain(key);
+    }
+    expect(await revisionKeys()).toEqual([]);
+  });
+
   it("rejects unknown and unchanged rules on update and retire", async () => {
     await configure();
     const expected = await hash(baseConfig);
