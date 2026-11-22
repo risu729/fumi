@@ -222,8 +222,10 @@ configuration has rows only while the shadow artifact holds the same configurati
 `not_yet_evaluated` counts the live messages of the window that have no decision
 under the selected configuration, at most 1,000 (1,000 means at least that many).
 These are messages the shadow repair has not reached yet, including all of them for
-an active configuration the shadow artifact does not hold, and messages that repair
-never evaluates because the raw object is not present or has no complete extraction.
+an active configuration the shadow artifact does not hold. Messages whose raw object is
+not present or whose extraction is blocked are not counted: the repair never evaluates
+them and dispatch cannot route them, so they cannot match a rule. A message whose
+extraction has not finished yet is counted.
 The repair evaluates the oldest raw keys first, so right after a new candidate is
 uploaded the most recent mail can lag for days.
 Classifier outcomes come from `routing_classifications.result_json`, grouped by

@@ -473,6 +473,18 @@ describe("routing_rule_usage", () => {
     expect(lagging.decisions.unmatched_rule_ids).toContain("synthetic-beta");
     // Historical mail is never evaluated for live usage and does not hold coverage back.
     await source(day(0), "beta historical", { notify: 0 });
+    // Neither does live mail that the repair can never evaluate: a blocked extraction or a
+    // raw object that is no longer present. Dispatch cannot route those either.
+    const blocked = await source(day(0), "beta blocked");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET status='blocked',failure_code='input_too_large' WHERE raw_key=?",
+    )
+      .bind(blocked.rawKey)
+      .run();
+    const missing = await source(day(0), "beta missing");
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?")
+      .bind(missing.rawKey)
+      .run();
     await evaluateAll();
     const settled = await usage();
     expect(settled.decisions).toMatchObject({
