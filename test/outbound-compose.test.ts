@@ -159,6 +159,11 @@ describe("Gmail-style reply and forward composition", () => {
     ).toBe("abc\n<script>d'>");
     expect(htmlToText("Price < 5 and a < b<br>c")).toBe("Price < 5 and a < b\nc");
     expect(htmlToText("<p>İİİİ</p><script>secret</script>visible")).toBe("İİİİ\nvisible");
+    // Only the listed entity names decode; an inherited Object.prototype member
+    // such as `constructor` stays literal text like any other unknown name.
+    expect(htmlToText("a&constructor;b &CONSTRUCTOR; &unknown;")).toBe(
+      "a&constructor;b &CONSTRUCTOR; &unknown;",
+    );
   });
 
   it("quotes the parent below the reply, prefixes Re: and archives the composed message", async () => {
