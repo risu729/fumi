@@ -70,8 +70,11 @@ A classified failure is a v3 receipt, and a v3 receipt with `forward_failed` and
 ```
 
 Its other fields are those of v1. The catalog snapshot copies the same fields. A
-Worker version without v3 support reports such a receipt as `unsupported_receipt`,
-so roll back only to a v3-capable version once v3 receipts exist. Receipts written
+Worker version without v3 support reports such a receipt as `unsupported_receipt`.
+The reader and the writer ship together (owner decision, 2026-11-22): a rollback to
+such a version only degrades the rows with v3 receipts, which lose the default reply
+sender and the routing envelope until a v3-capable version is deployed again and the
+reconciler rescans them. Nothing is lost. Receipts written
 before this change have no class: their `forward_failed` and missing `smtpStatus`
 mean unknown, not a confirmed rejection. The `ingest` log line adds `forwardCode`
 and, when present, `smtpStatus` for a failed forward, and nothing else.
