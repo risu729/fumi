@@ -257,4 +257,13 @@ describe("Takeout mbox splitter", () => {
     expect(splitter.end()).toEqual([]);
     expect(() => splitter.push(encoder.encode("x"))).toThrow();
   });
+
+  it("throws the first error again on every later call", () => {
+    const splitter = new TakeoutMboxSplitter();
+    splitter.push(encoder.encode(entry({ id: "1", message: first }).slice(0, -2)));
+    const error = failure(() => splitter.end());
+    expect(error.code).toBe("takeout_missing_separator");
+    expect(failure(() => splitter.end())).toEqual(error);
+    expect(failure(() => splitter.push(encoder.encode(mbox)))).toEqual(error);
+  });
 });

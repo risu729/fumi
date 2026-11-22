@@ -185,7 +185,12 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
  * Splits a Takeout mbox stream. Push chunks in order, then call `end()` once. Each
  * returned entry's `raw` is a copy that stays valid after later pushes. An entry whose
  * stripped size exceeds `rawLimit` is reported as `oversize` without retaining its
- * bytes, so memory stays near one entry plus one chunk.
+ * bytes, so memory stays near one entry plus one chunk. After an error every later
+ * call throws it again.
+ *
+ * The format cannot show a stream cut right after a blank line in the last message,
+ * so the caller must also check that it pushed the whole object (for example, the
+ * byte count against the R2 object size).
  */
 export class TakeoutMboxSplitter {
   /** Backing store; the unread bytes are #store[#start, #end). It grows by doubling. */
@@ -200,6 +205,8 @@ export class TakeoutMboxSplitter {
   /** Where the next boundary search starts, relative to the unread bytes. */
   #scanFrom = 0;
   #ended = false;
+  #failed = false;
+  #error: unknown = null;
 
   readonly #rawLimit: number;
 
@@ -208,6 +215,7 @@ export class TakeoutMboxSplitter {
   }
 
   push(chunk: Uint8Array): TakeoutItem[] {
+    if (this.#failed) throw this.#error;
     if (this.#ended) throw new Error("TakeoutMboxSplitter.push after end");
     if (chunk.length === 0) return [];
     const length = this.#end - this.#start;
@@ -224,13 +232,25 @@ export class TakeoutMboxSplitter {
     }
     this.#store.set(chunk, this.#end);
     this.#end += chunk.length;
-    return this.#drain(false);
+    return this.#run(false);
   }
 
   end(): TakeoutItem[] {
+    if (this.#failed) throw this.#error;
     if (this.#ended) return [];
     this.#ended = true;
-    return this.#drain(true);
+    return this.#run(true);
+  }
+
+  /** The first error is kept, so a retry or cleanup never reads a failed stream as complete. */
+  #run(final: boolean): TakeoutItem[] {
+    try {
+      return this.#drain(final);
+    } catch (error) {
+      this.#failed = true;
+      this.#error = error;
+      throw error;
+    }
   }
 
   get #bytes(): Uint8Array {
