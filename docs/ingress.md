@@ -41,11 +41,13 @@ else unclassified:
 | A `TimeoutError`, or `timeout` / `timed out` with no SMTP code | `timeout` | none |
 | Anything else | `forward_failed` | none |
 
-A reply code counts only when it starts the text or is followed by an enhanced
-status of the same class, so `Error 500 - internal` or `user550@...` stays
-unclassified. An enhanced status must stand alone: digits or a dot next to it (a
-version number or IPv4 address) do not match. The destination check keeps its
-own `invalid_target` code, which also covers the forwarding-loop guard.
+A reply code counts only when it starts the text or is followed by an enhanced status of
+the same class, so `Error 500 - internal` or `user550@...` stays unclassified. An
+enhanced status must stand alone: digits or a dot next to it (a version number or IPv4
+address) do not match. Only the `4` and `5` classes count: a `2.x.x` status cannot
+explain a failure and has the shape of a version number, so it stays an unclassified v1
+`forward_failed` (review fix, 2026-11-22 08:05 UTC). The destination check keeps its own
+`invalid_target` code, which also covers the forwarding-loop guard.
 
 The receipt keeps the oldest version that can hold the outcome. Success,
 `invalid_target` and an unclassified `forward_failed` stay unchanged v1 receipts.

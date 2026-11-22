@@ -37,9 +37,15 @@ describe("bounded forward failure classification", () => {
       { code: "rejected_permanent", smtpStatus: "5.7.100" },
     ],
     [
+      // A success class cannot explain a rejection, and the same shape is a version number.
       "a success-class enhanced status without a rejection class",
       new Error("2.0.0 synthetic"),
-      { code: "forward_failed", smtpStatus: "2.0.0" },
+      { code: "forward_failed" },
+    ],
+    [
+      "a version number with a success class",
+      new Error("runtime 2.1.3 failed"),
+      { code: "forward_failed" },
     ],
     ["a TimeoutError", timeoutError, { code: "timeout" }],
     ["timed-out text", new Error("Forward request timed out"), { code: "timeout" }],
@@ -126,6 +132,13 @@ describe("receipt v3 forward failure reasons", () => {
       {
         schemaVersion: 1,
         forward: { status: "failed", code: "forward_failed", smtpStatus: "5.7.1" },
+      },
+    ],
+    [
+      "a success-class status",
+      {
+        schemaVersion: 3,
+        forward: { status: "failed", code: "forward_failed", smtpStatus: "2.0.0" },
       },
     ],
     [
