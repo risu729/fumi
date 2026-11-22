@@ -178,7 +178,8 @@ establish production delivery.
       `webhook-id` deduplication and an active target set through MCP. The relay
       design was accepted 2026-11-22 14:23 UTC, and a Grok run was verified to read
       `messageId` from the webhook body. See [routing dispatch](routing-dispatch.md).
-- [ ] Build and deploy the relay in its own repository.
+- [ ] Build and deploy the relay in its own repository,
+      [risu729/tayori](https://github.com/risu729/tayori).
 - [x] Fence the active generic destination by generation, drain old uncertainty
       before activation, and preserve stable operation identity across revisions.
 - [x] Implement authenticated dispatch, stable idempotency keys, an outbox,
