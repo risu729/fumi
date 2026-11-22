@@ -69,9 +69,11 @@ export function mediaTypeEssence(value: string | null): string | null {
 
 // The HTML patterns of WHATWG MIME Sniffing ("identifying a resource with an
 // unknown MIME type"), relaxed to accept any whitespace in the doctype and after
-// a tag name, `/` after a tag name, and `<!--` followed by anything.
+// a tag name, `/` after a tag name, and `<!--` followed by anything. The `i` flag
+// without `u` folds ASCII letters only, as the spec's byte masks do: with `u`,
+// U+017F (long s) would also match `s`.
 const htmlStart =
-  /^(?:<!--|<!doctype\s+html(?:[\s>]|$)|<(?:html|head|body|script|iframe|style|title|table|font|div|h1|a|b|br|p)[\s/>])/u;
+  /^(?:<!--|<!doctype\s+html(?:[\s>]|$)|<(?:html|head|body|script|iframe|style|title|table|font|div|h1|a|b|br|p)[\s/>])/i;
 
 /** True when the first bytes look like an HTML document whatever its declared type.
  * NUL characters and leading replacement characters are removed first, so UTF-16
@@ -81,8 +83,7 @@ function looksLikeHtml(bytes: Uint8Array): boolean {
     .decode(bytes.subarray(0, 512))
     .replaceAll("\u0000", "")
     .replace(/^[\s\ufeff\ufffd]+/u, "")
-    .slice(0, 64)
-    .toLowerCase();
+    .slice(0, 64);
   return htmlStart.test(head);
 }
 
