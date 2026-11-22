@@ -322,7 +322,57 @@ describe("archive and forward ingress in workerd", () => {
     await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
     const receipt = (await receipts())[0];
     expect(receipt?.archive.status).toBe("stored");
+    expect(receipt?.schemaVersion).toBe(1);
     expect(receipt?.forward).toEqual({ status: "failed", code: "forward_failed" });
+  });
+
+  it("records a bounded rejection reason without provider text in the receipt or log", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const incoming = message();
+    incoming.forward.mockRejectedValue(
+      new Error(
+        "550 5.7.1 private-recipient@example.invalid rejected <private-id@example.invalid>",
+      ),
+    );
+    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    const receipt = (await receipts())[0]!;
+    expect(receipt).toMatchObject({
+      schemaVersion: 3,
+      archive: { status: "stored" },
+      forward: { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+    });
+    expect(parseReceipt(receipt)).toEqual(receipt);
+    for (const secret of ["private-recipient", "private-id", "rejected <"])
+      expect(JSON.stringify(receipt)).not.toContain(secret);
+    const entry: Record<string, string> = JSON.parse(String(log.mock.calls[0]?.[0]));
+    expect(entry).toEqual({
+      event: "ingest",
+      ingestId: receipt.ingestId,
+      archive: "stored",
+      forward: "failed",
+      forwardCode: "rejected_permanent",
+      smtpStatus: "5.7.1",
+      receipt: "stored",
+    });
+  });
+
+  it.each([
+    ["421 4.7.0 Try again later", 3, { code: "rejected_temporary", smtpStatus: "4.7.0" }],
+    ["Forward request timed out", 3, { code: "timeout" }],
+    ["private SMTP diagnostic", 1, { code: "forward_failed" }],
+  ] as const)("records %s with receipt v%i", async (text, schemaVersion, reason) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const incoming = message();
+    incoming.forward.mockRejectedValue(new Error(text));
+    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    const receipt = (await receipts())[0]!;
+    expect(receipt.schemaVersion).toBe(schemaVersion);
+    expect(receipt.forward).toEqual({ status: "failed", ...reason });
+    expect(parseReceipt(receipt)).toEqual(receipt);
+    const entry: Record<string, string> = JSON.parse(String(log.mock.calls[0]?.[0]));
+    expect(entry).toMatchObject({ forward: "failed", forwardCode: reason.code });
+    expect("smtpStatus" in entry).toBe("smtpStatus" in reason);
+    expect(String(log.mock.calls[0]?.[0])).not.toContain(text);
   });
 
   it("surfaces combined failures without payload or exception data in logs", async () => {
@@ -336,10 +386,16 @@ describe("archive and forward ingress in workerd", () => {
       "archive",
       "event",
       "forward",
+      "forwardCode",
       "ingestId",
       "receipt",
     ]);
-    expect(entry).toMatchObject({ archive: "failed", forward: "failed", receipt: "failed" });
+    expect(entry).toMatchObject({
+      archive: "failed",
+      forward: "failed",
+      forwardCode: "forward_failed",
+      receipt: "failed",
+    });
   });
 
   it.each([Number.NaN, -1, 1.5, MAX_RAW_BYTES + 1])(
@@ -422,12 +478,22 @@ describe("archive and forward ingress in workerd", () => {
     );
     expect(incoming.forward).not.toHaveBeenCalled();
     expect((await receipts())[0]?.archive.status).toBe("stored");
+    expect((await receipts())[0]?.forward).toEqual({ status: "failed", code: "invalid_target" });
   });
 
   it("rejects forwarding directly to the envelope recipient", async () => {
     const incoming = message();
     incoming.to = env.FORWARD_TO!.toUpperCase();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
     expect(incoming.forward).not.toHaveBeenCalled();
+    // The loop guard keeps its own v1 code, distinct from the classified SMTP reasons.
+    expect((await receipts())[0]).toMatchObject({
+      schemaVersion: 1,
+      forward: { status: "failed", code: "invalid_target" },
+    });
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      forwardCode: "invalid_target",
+    });
   });
 });

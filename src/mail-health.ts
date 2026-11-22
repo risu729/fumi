@@ -116,6 +116,7 @@ export async function getMailHealth(
         SELECT *,CASE WHEN receipt_snapshot IS NOT NULL AND length(receipt_snapshot)<=65536 AND json_valid(receipt_snapshot)
         THEN CASE WHEN (
           (json_extract(receipt_snapshot,'$.schemaVersion')=1 AND forward_status IN ('forwarded','failed'))
+          OR (json_extract(receipt_snapshot,'$.schemaVersion')=3 AND forward_status='failed')
           OR (json_extract(receipt_snapshot,'$.schemaVersion')=2 AND forward_status='skipped'
             AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only'))
           AND json_extract(receipt_snapshot,'$.ingestId')=external_id

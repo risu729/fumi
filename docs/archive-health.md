@@ -12,15 +12,15 @@ read original mail or verify that a previously observed object still exists or
 matches its saved hash. A later bounded archive reconciliation can change these
 observations. The report never claims a live bucket inventory or a complete archive.
 
-Retained validated ingress snapshots report known archive-capture and Gmail
-forwarding failures separately. V2 standalone receipts count intentional forwarding
-omission as `receipt_forward_skipped`; it is neither successful forwarding nor a
-forwarding failure. A failure remains known when a later scan finds
-the receipt object missing. Missing, malformed or absent snapshots are unknown;
-they do not prove successful capture or forwarding. Gmail imports have no SMTP
-forwarding receipt and are not counted as failed ingress snapshots. Recipient
-addresses, object keys, message IDs, cursors, policy text and provider error text
-are never returned.
+Retained validated ingress snapshots report known archive-capture and Gmail forwarding
+failures separately. V1 and v3 receipts both count as forwarding failures; v3 adds a
+[failure reason](ingress.md#forward-failure-reasons). V2 standalone receipts count
+intentional forwarding omission as `receipt_forward_skipped`; it is neither successful
+forwarding nor a forwarding failure. A failure remains known when a later scan finds the
+receipt object missing. Missing, malformed or absent snapshots are unknown; they do not
+prove successful capture or forwarding. Gmail imports have no SMTP forwarding receipt
+and are not counted as failed ingress snapshots. Recipient addresses, object keys,
+message IDs, cursors, policy text and provider error text are never returned.
 
 MIME coverage distinguishes current complete extractions, blocked records,
 present originals awaiting an extraction, and stale/unverifiable results.
