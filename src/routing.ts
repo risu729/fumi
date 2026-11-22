@@ -112,8 +112,9 @@ function order(a: { priority: number; id: string }, b: { priority: number; id: s
 
 // A deliberately restricted CEL token alphabet bounds parser recursion before parsing.
 // Strings are double quoted literals whose escapes mean the same in JSON and CEL
-// (\" \\ \b \f \n \r \t \uXXXX); JSON's \/ is not a CEL escape. Comments, collections,
-// selectors, macros, numeric operations and regular expressions are excluded.
+// (\" \\ \b \f \n \r \t \uXXXX); JSON's \/ is not a CEL escape. The CEL parser then
+// rejects surrogate escapes (\uD800-\uDFFF), which JSON would pair. Comments,
+// collections, selectors, macros, numeric operations and regular expressions are excluded.
 function preflight(expression: string) {
   if (
     expression.length > ROUTING_LIMITS.expressionBytes ||

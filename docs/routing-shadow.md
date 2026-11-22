@@ -63,7 +63,9 @@ timestamps, optional types and arbitrary functions are rejected. Double unary
 negation, comments, single-quoted, triple-quoted and raw strings are outside this
 deliberately narrow contract. String escapes are limited to `\"`, `\\`, `\b`, `\f`,
 `\n`, `\r`, `\t` and `\uXXXX`, which mean the same in JSON and CEL; JSON's `\/` is
-rejected because the CEL parser keeps it as two characters. A string literal directly
+rejected because the CEL parser keeps it as two characters. The CEL parser also
+rejects `\uD800` to `\uDFFF`, including a JSON surrogate pair, so a character outside
+the Basic Multilingual Plane is written directly. A string literal directly
 followed by `"` is rejected, so the token check and the CEL parser always split
 string literals the same way.
 
