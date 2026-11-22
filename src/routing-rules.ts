@@ -324,6 +324,9 @@ export const USAGE_SQL = {
   // Unary + keeps the planner on the raw_key range, not the primary key's source_kind.
   notYetEvaluated: `SELECT 1 FROM archive_sources s
     WHERE s.raw_key>=? AND s.raw_key<? AND +s.source_kind='email_routing' AND s.notify_events=1
+    AND s.raw_state='present'
+    AND NOT EXISTS (SELECT 1 FROM mail_extractions e
+      WHERE e.raw_key=s.raw_key AND e.extractor_version='mime-v1' AND e.status='blocked')
     AND NOT EXISTS (SELECT 1 FROM routing_shadow_decisions d
       WHERE d.raw_key=s.raw_key AND d.configuration_sha256=?)
     LIMIT ?`,
