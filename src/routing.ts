@@ -111,7 +111,9 @@ function order(a: { priority: number; id: string }, b: { priority: number; id: s
 }
 
 // A deliberately restricted CEL token alphabet bounds parser recursion before parsing.
-// Strings are JSON-style double quoted literals; comments, escapes other than JSON,
+// Strings are double quoted literals whose escapes mean the same in JSON and CEL
+// (\" \\ \b \f \n \r \t \uXXXX); JSON's \/ is not a CEL escape. The CEL parser then
+// rejects surrogate escapes (\uD800-\uDFFF), which JSON would pair. Comments,
 // collections, selectors, macros, numeric operations and regular expressions are excluded.
 function preflight(expression: string) {
   if (
@@ -123,7 +125,7 @@ function preflight(expression: string) {
   let depth = 0;
   let count = 0;
   const token =
-    /\s+|"(?:[^"\\\p{Cc}]|\\["\\/bfnrt]|\\u[a-fA-F0-9]{4})*"|[a-zA-Z][a-zA-Z0-9]*|&&|\|\||==|!=|[!().,]/uy;
+    /\s+|"(?:[^"\\\p{Cc}]|\\["\\bfnrt]|\\u[a-fA-F0-9]{4})*"|[a-zA-Z][a-zA-Z0-9]*|&&|\|\||==|!=|[!().,]/uy;
   while (offset < expression.length) {
     token.lastIndex = offset;
     const match = token.exec(expression);
@@ -153,6 +155,10 @@ function preflight(expression: string) {
     if (depth < 0 || depth > ROUTING_LIMITS.expressionDepth) throw new RoutingConfigError();
     // Long unary chains recurse independently of parentheses in CEL parsers.
     if (value === "!" && /^\s*!/.test(expression.slice(offset))) throw new RoutingConfigError();
+    // CEL reads `"""` as a triple-quoted string, but this scan reads `""` and then a
+    // new literal. Rejecting a quote directly after a literal keeps both readings equal,
+    // so text the parser treats as code cannot pass here as string content.
+    if (value.startsWith('"') && expression[offset] === '"') throw new RoutingConfigError();
   }
   if (depth !== 0) throw new RoutingConfigError();
 }

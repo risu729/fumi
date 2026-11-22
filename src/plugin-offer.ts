@@ -77,6 +77,15 @@ export interface OfferTransport {
   rpcIdentities?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
 }
+/** Resolve a configured reference to an entry the trusted map defines itself. A
+ * reference such as `constructor` matches the ID syntax but names an inherited
+ * Object.prototype member, which is never a credential or capability. */
+export function mappedEntry<T>(
+  map: Readonly<Record<string, T>> | undefined,
+  ref: string,
+): T | undefined {
+  return map && Object.hasOwn(map, ref) ? map[ref] : undefined;
+}
 export interface PluginOfferRequest {
   schemaVersion: 1;
   kind: "owner" | "notification";
@@ -183,7 +192,7 @@ export async function exchangeWebhook(
   operationId: string,
   payload: string,
 ): Promise<"accepted" | "retry"> {
-  const secret = transport.auth[adapter.authRef];
+  const secret = mappedEntry(transport.auth, adapter.authRef);
   if (!validSigningSecret(secret)) return "retry";
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -231,7 +240,7 @@ export async function exchangeOffer(
     requestSha256,
     result: "uncertain",
   };
-  const secret = adapter.kind === "rpc" ? null : transport.auth[adapter.authRef];
+  const secret = adapter.kind === "rpc" ? null : mappedEntry(transport.auth, adapter.authRef);
   if (
     adapter.kind !== "rpc" &&
     (!secret || secret.length < 24 || secret.length > 4096 || /[\r\n]/.test(secret))
@@ -239,9 +248,10 @@ export async function exchangeOffer(
     return uncertain;
   const service =
     adapter.kind !== "rpc" && adapter.serviceRef
-      ? transport.services?.[adapter.serviceRef]
+      ? mappedEntry(transport.services, adapter.serviceRef)
       : undefined;
-  const rpc = adapter.kind === "rpc" ? transport.rpcServices?.[adapter.serviceRef] : undefined;
+  const rpc =
+    adapter.kind === "rpc" ? mappedEntry(transport.rpcServices, adapter.serviceRef) : undefined;
   if (
     (adapter.kind === "rpc" && !rpc) ||
     (adapter.kind === "service" && !service) ||
