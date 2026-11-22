@@ -1,7 +1,9 @@
 import { cursorFor, type EventName, type StoredEvent, type Subscription } from "./event-store.ts";
+import { standardWebhookHeaders } from "./webhook-signature.ts";
 
-/** An adapter must validate addresses at connection time and refuse redirects, or
- * use createAllowlistedWebhookHttp with administrator-controlled trusted origins. */
+/** An adapter must validate addresses at connection time and refuse redirects without
+ * following them, or use createAllowlistedWebhookHttp with administrator-controlled
+ * trusted origins. */
 export interface WebhookHttp {
   post(url: string, body: string, headers: Headers): Promise<Response>;
 }
@@ -9,7 +11,15 @@ export interface EventRuntime {
   http: WebhookHttp;
   authorize(principalId: string, name: EventName, args: Record<string, string>): Promise<boolean>;
   now?: () => number;
+  /** Set when WEBHOOK_ORIGINS is invalid. Delivery then leases nothing, so no
+   * subscription spends a retry on a configuration error. */
+  unavailable?: "webhook_origins_invalid";
 }
+/** Upper bound of one callback POST in createAllowlistedWebhookHttp. */
+const POST_TIMEOUT_MS = 10_000;
+const LEASE_MS = 60_000;
+/** A run stops leasing subscriptions after this, before the next five-minute run starts. */
+const RUN_BUDGET_MS = 240_000;
 export function validateCallback(value: string): URL {
   let url: URL;
   try {
@@ -52,31 +62,23 @@ export function createAllowlistedWebhookHttp(
     async post(value, body, headers) {
       const url = validateCallback(value);
       if (!trusted.has(url.origin)) throw new Error("Callback origin is not trusted");
-      return send(url.href, {
+      // workerd rejects redirect: "error" before it connects. "manual" returns a 3xx as
+      // an ordinary response without contacting its Location, so refuse it here.
+      const response = await send(url.href, {
         method: "POST",
         body,
         headers,
-        redirect: "error",
-        signal: AbortSignal.timeout(10_000),
+        redirect: "manual",
+        signal: AbortSignal.timeout(POST_TIMEOUT_MS),
       });
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel().catch(() => undefined);
+        // A redirect fails verification and is retried like other non-2xx deliveries.
+        throw new Error("Callback redirect refused");
+      }
+      return response;
     },
   };
-}
-export function decodeSigningSecret(secret: string): Uint8Array<ArrayBuffer> {
-  if (!/^whsec_[A-Za-z0-9+/]+={0,2}$/.test(secret)) throw new Error("Invalid signing secret");
-  let bytes: Uint8Array<ArrayBuffer>;
-  try {
-    bytes = Uint8Array.from(atob(secret.slice(6)), (character) => character.charCodeAt(0));
-  } catch {
-    throw new Error("Invalid signing secret");
-  }
-  if (
-    bytes.length < 24 ||
-    bytes.length > 64 ||
-    btoa(String.fromCharCode(...bytes)) !== secret.slice(6)
-  )
-    throw new Error("Invalid signing secret");
-  return bytes;
 }
 export async function signedHeaders(
   secret: string,
@@ -85,24 +87,9 @@ export async function signedHeaders(
   subscriptionId: string,
   now: number,
 ): Promise<Headers> {
-  const timestamp = String(Math.floor(now / 1000));
-  const key = await crypto.subtle.importKey(
-    "raw",
-    decodeSigningSecret(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = new Uint8Array(
-    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${timestamp}.${body}`)),
-  );
-  return new Headers({
-    "Content-Type": "application/json",
-    "webhook-id": id,
-    "webhook-timestamp": timestamp,
-    "webhook-signature": `v1,${btoa(String.fromCharCode(...signature))}`,
-    "X-MCP-Subscription-Id": subscriptionId,
-  });
+  const headers = await standardWebhookHeaders(secret, id, body, now);
+  headers.set("X-MCP-Subscription-Id", subscriptionId);
+  return headers;
 }
 export function constantTimeEqual(left: string, right: string): boolean {
   const a = new TextEncoder().encode(left);
@@ -166,7 +153,9 @@ export async function deliverEvents(
   runtime: EventRuntime,
   limit = 25,
 ): Promise<{ attempted: number }> {
-  const now = runtime.now?.() ?? Date.now();
+  if (runtime.unavailable) throw new Error(runtime.unavailable);
+  const clock = () => runtime.now?.() ?? Date.now();
+  const now = clock();
   const db = database.withSession("first-primary");
   const subscriptions = await db
     .prepare(
@@ -176,25 +165,38 @@ export async function deliverEvents(
     .all<Subscription>();
   let attempted = 0;
   for (const subscription of subscriptions.results) {
+    // Unleased subscriptions stay due and are selected first by the next run.
+    if (clock() - now >= RUN_BUDGET_MS) break;
     // oxlint-disable-next-line no-await-in-loop -- Each subscription is bounded and leases are acquired before network I/O.
-    attempted += await deliverOne(db, runtime, subscription, now);
+    attempted += await deliverOne(db, runtime, subscription, clock);
   }
   return { attempted };
 }
 async function deliverOne(
   db: D1DatabaseSession,
   runtime: EventRuntime,
-  subscription: Subscription,
-  now: number,
+  candidate: Subscription,
+  clock: () => number,
 ): Promise<number> {
   const token = crypto.randomUUID();
-  const lease = await db
+  const leasedAt = clock();
+  // Lease from the current time, not the run's start, and use the leased row: another
+  // run may have advanced the cursor or set a retry backoff since the selection.
+  const subscription = await db
     .prepare(
-      `UPDATE event_subscriptions SET lease_token=?,lease_until=? WHERE id=? AND revision=? AND state='active' AND expires_at>? AND lease_until<=?`,
+      `UPDATE event_subscriptions SET lease_token=?,lease_until=? WHERE id=? AND revision=? AND state='active' AND expires_at>? AND next_attempt_at<=? AND lease_until<=? RETURNING *`,
     )
-    .bind(token, now + 60_000, subscription.id, subscription.revision, now, now)
-    .run();
-  if (lease.meta.changes !== 1) return 0;
+    .bind(
+      token,
+      leasedAt + LEASE_MS,
+      candidate.id,
+      candidate.revision,
+      leasedAt,
+      leasedAt,
+      leasedAt,
+    )
+    .first<Subscription>();
+  if (!subscription) return 0;
   const guard = `id=? AND revision=? AND lease_token=?`;
   const identity = [subscription.id, subscription.revision, token];
   const stop = (reason: string) =>
@@ -236,7 +238,7 @@ async function deliverOne(
       .prepare(
         `UPDATE event_subscriptions SET lease_until=0,lease_token=NULL,next_attempt_at=? WHERE ${guard}`,
       )
-      .bind(now + 10_000, ...identity)
+      .bind(clock() + 10_000, ...identity)
       .run();
     return 0;
   }
@@ -250,16 +252,24 @@ async function deliverOne(
   let status = 0;
   try {
     // Recheck the subscription after asynchronous authorization, immediately before POST.
-    const active = await db
+    // The lease must outlast the POST, or another run could lease and send it again.
+    // Compare after the query returns, so its own latency does not eat into the POST.
+    const leaseUntil = await db
       .prepare(
-        `SELECT id FROM event_subscriptions WHERE ${guard} AND state='active' AND expires_at>?`,
+        `SELECT lease_until FROM event_subscriptions WHERE ${guard} AND state='active' AND expires_at>?`,
       )
-      .bind(...identity, runtime.now?.() ?? Date.now())
-      .first();
-    if (!active) return 0;
+      .bind(...identity, clock())
+      .first<number>("lease_until");
+    if (leaseUntil === null || leaseUntil <= clock() + POST_TIMEOUT_MS) {
+      await db
+        .prepare(`UPDATE event_subscriptions SET lease_until=0,lease_token=NULL WHERE ${guard}`)
+        .bind(...identity)
+        .run();
+      return 0;
+    }
     if (new TextEncoder().encode(body).length > 262_144) status = 413;
     else {
-      const signedAt = runtime.now?.() ?? Date.now();
+      const signedAt = clock();
       const headers = await signedHeaders(
         subscription.signing_secret,
         event.event_id,
@@ -287,12 +297,13 @@ async function deliverOne(
   } catch {
     /* Retry using only fixed status codes; never log callback URLs or secrets. */
   }
+  const finishedAt = clock();
   if (status >= 200 && status < 300) {
     await db
       .prepare(
         `UPDATE event_subscriptions SET cursor=?,attempts=0,next_attempt_at=?,lease_until=0,lease_token=NULL WHERE ${guard} AND state='active'`,
       )
-      .bind(event.sequence, now, ...identity)
+      .bind(event.sequence, finishedAt, ...identity)
       .run();
   } else if (status === 410 || status === 413 || subscription.attempts >= 7) {
     await stop(status === 410 ? "gone" : status === 413 ? "payload_too_large" : "retry_exhausted");
@@ -301,7 +312,7 @@ async function deliverOne(
       .prepare(
         `UPDATE event_subscriptions SET attempts=attempts+1,next_attempt_at=?,lease_until=0,lease_token=NULL WHERE ${guard}`,
       )
-      .bind(now + Math.min(3_600_000, 1000 * 2 ** subscription.attempts), ...identity)
+      .bind(finishedAt + Math.min(3_600_000, 1000 * 2 ** subscription.attempts), ...identity)
       .run();
   }
   return 1;

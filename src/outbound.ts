@@ -1,6 +1,7 @@
 import type { MailPrincipal } from "./principal.ts";
 import { eventStatement } from "./event-store.ts";
 import { parseReceipt } from "./receipt-schema.ts";
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 import {
   ComposeError,
   composeForward,
@@ -237,11 +238,61 @@ function lifecycle(
   );
 }
 
+/** Message IDs in a stored, untrusted header value; no whitespace or other controls. */
+function messageIds(value: unknown): string[] {
+  return typeof value === "string" ? (value.match(/<[^\s<>\p{Cc}]+@[^\s<>\p{Cc}]+>/gu) ?? []) : [];
+}
+
+/**
+ * In-Reply-To and References for a reply, as RFC 5322 section 3.6.4 builds them:
+ * the parent's References (or its In-Reply-To when that names a single message)
+ * followed by its Message-ID. A chain over 21 IDs or 2048 bytes keeps the thread
+ * root and the newest IDs that fit, as RFC 5537 section 3.4.4 does for News.
+ */
+function replyHeaders(metadata: Record<string, unknown>) {
+  const messageId = metadata["messageId"];
+  if (
+    typeof messageId !== "string" ||
+    encoder.encode(messageId).byteLength > 998 ||
+    messageIds(messageId)[0] !== messageId
+  )
+    fail("reply_headers_unavailable");
+  const references = messageIds(metadata["references"]);
+  const inReplyTo = messageIds(metadata["inReplyTo"]);
+  let chain = [...(references.length ? references : inReplyTo.length === 1 ? inReplyTo : [])];
+  if (chain.length > 20) chain = [...chain.slice(0, 1), ...chain.slice(-19)];
+  const size = () => encoder.encode([...chain, messageId].join(" ")).byteLength;
+  // Drop the oldest ID after the root, and the root last; the Message-ID always fits.
+  while (chain.length && size() > 2048) chain.splice(chain.length > 1 ? 1 : 0, 1);
+  return { "In-Reply-To": messageId, References: [...chain, messageId].join(" ") };
+}
+
+/**
+ * Reply headers as releases before 2026-11-20 built them (the parent's newest 20
+ * References and its Message-ID), when they differ from the current ones. They are
+ * only hashed, so a same-key retry of a reply submitted then still matches.
+ */
+const earlierReplyHeaders = new WeakMap<NormalizedMail, Record<string, string>>();
+
+function earlierHeaders(
+  metadata: Record<string, unknown>,
+  current: ReturnType<typeof replyHeaders>,
+): Record<string, string> | undefined {
+  const previous =
+    typeof metadata["references"] === "string"
+      ? (metadata["references"].match(/<[^\s<>]+@[^\s<>]+>/g) ?? [])
+      : [];
+  const references = [...previous.slice(-20), current["In-Reply-To"]].join(" ");
+  return references === current.References || encoder.encode(references).byteLength > 2048
+    ? undefined
+    : { "In-Reply-To": current["In-Reply-To"], References: references };
+}
+
 async function normalize(
   ctx: OutboundContext,
   principal: MailPrincipal,
   input: unknown,
-  options: { forward?: boolean } = {},
+  options: { forward?: boolean; currentParent?: boolean } = {},
 ): Promise<NormalizedMail> {
   const item = record(input);
   exact(item, [
@@ -274,10 +325,12 @@ async function normalize(
     if (item["reply_message_id"] === undefined) fail("from_address_required");
     scope(principal, "mail:read");
     const replyKey = text(item["reply_message_id"], 512, true);
+    // The default sender is part of the request hash like the reply headers below, so sends
+    // accept any completed extraction here too; compose() requires a current one.
     const source = await db(ctx)
       .prepare(`SELECT s.receipt_snapshot FROM archive_sources s
-      JOIN mail_extractions e ON e.raw_key = s.raw_key AND e.raw_sha256 = s.raw_sha256
-      WHERE s.raw_key = ? AND s.raw_state = 'present' AND s.receipt_state = 'valid' AND e.status = 'complete'`)
+      JOIN mail_extractions e ON e.raw_key = s.raw_key
+      WHERE s.raw_key = ? AND s.receipt_state = 'valid' AND ${options.currentParent ? CURRENT_EXTRACTION_SQL : "e.status = 'complete'"}`)
       .bind(replyKey)
       .first<{ receipt_snapshot: string | null }>();
     const receipt = source?.receipt_snapshot
@@ -353,28 +406,28 @@ async function normalize(
     fail("attachment_limit");
   const headers: Record<string, string> = {};
   let reply: string | undefined;
+  let earlier: Record<string, string> | undefined;
   if (item["reply_message_id"] !== undefined) {
     scope(principal, "mail:read");
     reply = text(item["reply_message_id"], 512, true);
+    // Sends read the parent's headers from any completed extraction, as they always have:
+    // they are part of the request hash, which a same-key retry must reproduce after the
+    // parent stops being current. compose() requires a current extraction for new work.
     const parent = await db(ctx)
       .prepare(
-        "SELECT metadata_json FROM mail_extractions WHERE raw_key = ? AND status = 'complete'",
+        `SELECT e.metadata_json FROM mail_extractions e
+        ${options.currentParent ? "JOIN archive_sources s ON s.raw_key = e.raw_key" : ""}
+        WHERE e.raw_key = ? AND ${options.currentParent ? CURRENT_EXTRACTION_SQL : "e.status = 'complete'"}`,
       )
       .bind(reply)
       .first<{ metadata_json: string }>();
     if (!parent) fail("reply_not_found");
     const metadata = record(JSON.parse(parent.metadata_json));
-    const messageId = text(metadata["messageId"], 998, true);
-    if (!/^<[^\s<>]+@[^\s<>]+>$/.test(messageId)) fail("reply_headers_unavailable");
-    const previous =
-      typeof metadata["references"] === "string"
-        ? (metadata["references"].match(/<[^\s<>]+@[^\s<>]+>/g) ?? [])
-        : [];
-    headers["In-Reply-To"] = messageId;
-    headers["References"] = [...previous.slice(-20), messageId].join(" ");
-    if (encoder.encode(headers["References"]).byteLength > 2048) fail("reply_headers_unavailable");
+    const current = replyHeaders(metadata);
+    Object.assign(headers, current);
+    earlier = earlierHeaders(metadata, current);
   }
-  return {
+  const normalized: NormalizedMail = {
     to,
     cc,
     bcc,
@@ -391,6 +444,8 @@ async function normalize(
     ...(item["reply_to"] === undefined ? {} : { reply_to: address(item["reply_to"]) }),
     headers,
   };
+  if (earlier) earlierReplyHeaders.set(normalized, earlier);
+  return normalized;
 }
 
 /** MIME base64 with a CRLF after every 76 characters. */
@@ -487,7 +542,7 @@ async function compose(
 ): Promise<NormalizedMail> {
   const parentKey = forward ?? input.reply_message_id;
   if (parentKey === undefined) return withinMessageSize(input);
-  let parent: ParentMail;
+  let parent: ParentMail | null;
   try {
     parent = await loadParent(
       db(ctx),
@@ -499,6 +554,8 @@ async function compose(
     if (error instanceof ComposeError) fail(error.code);
     throw error;
   }
+  // The codes these paths give a parent without a completed extraction.
+  if (!parent) fail(forward === undefined ? "reply_not_found" : "message_not_found");
   const author = {
     ...(input.payload.text === undefined ? {} : { text: input.payload.text }),
     ...(input.payload.html === undefined ? {} : { html: input.payload.html }),
@@ -544,7 +601,9 @@ async function previewMailImpl(ctx: OutboundContext, principal: MailPrincipal, i
   if (!principal.scopes.includes("mail:draft") && !principal.scopes.includes("mail:send"))
     fail("forbidden");
   return {
-    input: publicMail(await compose(ctx, await normalize(ctx, principal, input))),
+    input: publicMail(
+      await compose(ctx, await normalize(ctx, principal, input, { currentParent: true })),
+    ),
     policy: { allowed: true },
     submitted: false,
   };
@@ -636,7 +695,8 @@ async function bindArchivedAttachmentImpl(
     fail("invalid_attachment");
   const source = await db(ctx)
     .prepare(
-      "SELECT attachments_json FROM mail_extractions WHERE raw_key = ? AND status = 'complete'",
+      `SELECT e.attachments_json FROM mail_extractions e JOIN archive_sources s ON s.raw_key = e.raw_key
+      WHERE e.raw_key = ? AND ${CURRENT_EXTRACTION_SQL}`,
     )
     .bind(rawKey)
     .first<{ attachments_json: string }>();
@@ -688,7 +748,7 @@ function draftInput(input: NormalizedMail): MailInput {
 
 async function createDraftImpl(ctx: OutboundContext, principal: MailPrincipal, input: unknown) {
   scope(principal, "mail:draft");
-  const normalized = await normalize(ctx, principal, input);
+  const normalized = await normalize(ctx, principal, input, { currentParent: true });
   const draftId = `draft_${crypto.randomUUID()}`;
   const now = Date.now();
   await db(ctx)
@@ -741,7 +801,7 @@ async function updateDraftImpl(
 ) {
   scope(principal, "mail:draft");
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail("invalid_revision");
-  const normalized = await normalize(ctx, principal, input);
+  const normalized = await normalize(ctx, principal, input, { currentParent: true });
   const original = await loadDraft(ctx, principal, draftId);
   const now = Date.now();
   const result = await db(ctx)
@@ -847,13 +907,21 @@ async function getSendStatusImpl(
   operationId: string,
 ) {
   scope(principal, "mail:send");
-  const operation = await operationFor(ctx, principal, operationId);
-  const recipients = await db(ctx)
-    .prepare(
-      "SELECT address, kind, state, event_timestamp FROM outbound_recipients WHERE operation_id = ? ORDER BY kind, address",
-    )
-    .bind(operationId)
-    .all<{ address: string; kind: string; state: string; event_timestamp: number }>();
+  const session = db(ctx);
+  // One batch is one snapshot: an event projected between two separate reads
+  // could pair an unknown submission with a delivered recipient.
+  const [operations, recipients] = await session.batch([
+    session
+      .prepare("SELECT * FROM outbound_operations WHERE operation_id = ? AND principal_id = ?")
+      .bind(operationId, principal.id),
+    session
+      .prepare(
+        "SELECT address, kind, state, event_timestamp FROM outbound_recipients WHERE operation_id = ? ORDER BY kind, address",
+      )
+      .bind(operationId),
+  ]);
+  const operation = operations?.results[0] as Operation | undefined;
+  if (!operation || !recipients) fail("send_not_found");
   // A process can disappear at any point after claim. A surviving claim is
   // uncertainty, never permission for a second provider call.
   return {
@@ -861,7 +929,12 @@ async function getSendStatusImpl(
     state: operation.state === "submitting" ? "unknown" : operation.state,
     provider_message_id: operation.provider_message_id,
     failure_code: operation.failure_code,
-    recipients: recipients.results,
+    recipients: recipients.results as {
+      address: string;
+      kind: string;
+      state: string;
+      event_timestamp: number;
+    }[],
     created_at: operation.created_at,
     updated_at: operation.updated_at,
   };
@@ -955,6 +1028,7 @@ async function forwardMailImpl(
 ) {
   scope(principal, "mail:read");
   scope(principal, "mail:send");
+  // Like reply headers: compose() requires a current extraction, after the same-key lookup.
   const parent = await db(ctx)
     .prepare("SELECT raw_key FROM mail_extractions WHERE raw_key = ? AND status = 'complete'")
     .bind(parentRawKey)
@@ -1021,28 +1095,31 @@ async function submit(
   // The caller's request identifies the operation; the composed message is what is
   // archived and sent. Composition reads the parent and can change between
   // releases, so a same-key retry is matched on the request before composing.
-  const requestHash = await digest(
-    JSON.stringify({
-      version: "outbound-request-v1",
-      input: authored,
-      draft: draft ?? null,
-      forward_message_id: forward ?? null,
-    }),
-  );
-  // Rows from before request_hash stored only the digest of the uncomposed envelope.
-  const legacyHash = async () =>
-    digest(
-      JSON.stringify({
-        version: "outbound-v1",
-        input: authored,
-        draft: draft ?? null,
-        forward_message_id: forward ?? null,
-      }),
+  // A reply submitted under the earlier References rule also matches its request.
+  const earlier = earlierReplyHeaders.get(authored);
+  const requests = earlier ? [authored, { ...authored, headers: earlier }] : [authored];
+  const hashes = async (version: string) =>
+    Promise.all(
+      requests.map(async (request) =>
+        digest(
+          JSON.stringify({
+            version,
+            input: request,
+            draft: draft ?? null,
+            forward_message_id: forward ?? null,
+          }),
+        ),
+      ),
     );
+  const requestHashes = await hashes("outbound-request-v1");
+  const requestHash = requestHashes[0] ?? "";
+  // Rows from before request_hash stored only the digest of the uncomposed envelope.
   const sameRequest = async (row: Operation, composedHash?: string) =>
     row.request_hash
-      ? row.request_hash === requestHash
-      : row.input_hash === (composedHash ?? (await legacyHash()));
+      ? requestHashes.includes(row.request_hash)
+      : composedHash
+        ? row.input_hash === composedHash
+        : (await hashes("outbound-v1")).includes(row.input_hash);
   let operation = await session
     .prepare("SELECT * FROM outbound_operations WHERE principal_id = ? AND idempotency_key = ?")
     .bind(principal.id, key)

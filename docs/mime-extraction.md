@@ -55,25 +55,35 @@ smaller bounded subset until larger messages are measured in the actual runtime.
 
 The parser's header budget charges a minimum per line, so it may reject many small
 headers before their literal byte count reaches 64 KiB. Input, structure and
-decoded-output limits are complementary. Headerless input is blocked; other
-malformed mail may be parsed tolerantly by the library. Successful decoding is not
-proof of RFC conformance, safe HTML, a safe attachment, or complete search coverage.
+decoded-output limits are complementary. Input whose first line is not a header is
+blocked as `invalid_mime` at any size. Input that starts with a header but has no
+blank line ending the header section within the 64 KiB header budget is
+`parser_limit` when the input is longer than the budget, and `invalid_mime` when the
+input ends first. Other malformed mail may be parsed tolerantly by the library.
+Successful decoding is not proof of RFC conformance, safe HTML, a safe attachment, or
+complete search coverage.
 
 Permanent coverage failures are recorded as `blocked` with fixed codes, including
 missing/changed originals, invalid metadata, input/structure/output limits or a
 conflicting derivative. A blocked extraction does not mark the processing job
-complete. Storage/service outages throw fixed diagnostics for Workflow retries.
+complete. A blocked row keeps the earlier derived keys, but no reader serves them; see
+[agent mail](agent-mail.md#tools-and-bounded-results).
+Storage/service outages throw fixed diagnostics for Workflow retries.
 No exception text, body, address, filename or subject enters Workflow results/logs.
 
 ## Persistence and retries
 
-Derived writes are conditional and content-addressed. Retries validate an already
-stored object's size and SHA-256 rather than overwrite it. The manifest is written
-last; D1 completion follows all R2 writes and a final original-version check.
-Every D1 mutation requires the matching running `mime-v1` instance. A stale attempt
-may leave harmless derivative objects but cannot publish a completion record.
-Partial writes remain unreferenced until a successful retry; automatic orphan
-deletion is not implemented.
+Derived writes are conditional and content-addressed. Retries validate an already stored
+object's size and SHA-256 rather than overwrite it. Every input, structure,
+decoded-output and metadata bound, including the stored attachment records with their
+keys and digests, is checked before the first derivative write. A permanent coverage
+block therefore writes no derivative; only a conflicting derivative or a source change
+found after the writes can block a partly written attempt. The manifest is written last;
+D1 completion follows all R2 writes and a final original-version check. Every D1
+mutation requires the matching running `mime-v1` instance. A stale attempt may leave
+harmless derivative objects but cannot publish a completion record. Partial writes
+remain unreferenced until a successful retry; automatic orphan deletion is not
+implemented.
 
 An existing extraction digest cannot silently be replaced with another original.
 As with the archive, originals must remain immutable: R2 and D1 cannot atomically

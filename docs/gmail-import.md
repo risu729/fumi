@@ -55,8 +55,11 @@ A trusted embedding can inject a refreshing token provider into
 `createReadonlyGmailTransport` instead. Scope declarations do not inspect or prove the
 scopes of an externally provisioned token.
 
-The transport has only fixed-host GET profile, list and `format=raw` operations with
-redirects rejected. No Gmail label, read-state, draft, send, delete, insert or import
+The transport has only fixed-host GET profile, list and `format=raw` operations, and
+never follows a redirect. It requests with `redirect: "manual"`, because the Workers
+runtime refuses `redirect: "error"` on every request, and a 3xx response stops at once
+as `gmail_invalid_response` without a retry, so the bearer token is never sent to
+another host. No Gmail label, read-state, draft, send, delete, insert or import
 method exists. The word import here means copying out of Gmail into Fumi.
 
 ## Durability, identity and coverage
@@ -102,7 +105,10 @@ Retries verify existing R2 checksums and provenance rather than replacing eviden
 The runner persists the current list of IDs and next token before retrieving mail. It
 retrieves and archives one original at a time; the client spaces Gmail requests by at
 least 250 ms and retries transient network failures, HTTP 429 and server failures up to
-four attempts. Numeric Retry-After values up to thirty seconds are honored; longer or
+four attempts. A response body that fails mid-stream, including one cut off by the
+request deadline, is a transient network failure: it shares those attempts and ends as
+`gmail_unavailable`, while malformed content stops at once as `gmail_invalid_response`.
+Numeric Retry-After values up to thirty seconds are honored; longer or
 unsupported retry dates stop cleanly for later operator retry. HTTP 401/403/404 stop
 without discarding IDs or advancing the page. In particular, a message deleted from
 Gmail after listing remains an unresolved coverage gap unless already archived.
@@ -118,6 +124,15 @@ Expired or superseded runners cannot advance checkpoints. R2 conditional writes 
 their late attempts from overwriting originals. A failed final checkpoint leaves the
 same pending page replayable.
 
+The final checkpoint also releases the lease, and the `imported` value in a page
+response comes from that same fenced statement: it counts only the items that page
+added, even when another runner claims and finishes the next page immediately after.
+A runner that stops without checkpointing releases its lease explicitly. If that
+release fails in D1, the response keeps the page outcome (its fixed error code, or a
+checkpoint that already committed), the Worker logs only
+`{"event":"gmail_import_lease_release","status":"failed"}`, and the lease fences the
+import as `busy` until it expires on its own, after which the page replays.
+
 Gmail list traversal is not treated as a transactional mailbox snapshot. `complete`
 means this bounded traversal ended, not proof that a changing mailbox has no gaps.
 For final migration acceptance, compare scoped Gmail and import counts, inspect all
@@ -129,7 +144,10 @@ new run; the runner never silently resets the traversal.
 
 Raw MIME is bounded at 25 MiB, matching live capture. The transport incrementally
 decodes the base64 raw field into a bounded buffer, retains at most 32 KiB of JSON
-metadata, and applies a fifteen-second request deadline. Up to one hundred label
+metadata, and applies a fifteen-second deadline to each attempt. With up to four
+attempts and 1, 2 and 4 second backoff between them, one request that keeps timing
+out takes about 68 seconds before `gmail_unavailable`; honored Retry-After waits of up
+to thirty seconds can extend that. Up to one hundred label
 IDs of at most 128 characters are accepted without truncation. Unsupported or
 oversized messages retain their pending page and an explicit fixed error code;
 there is no silent exclusion. The independent MIME stage currently blocks originals

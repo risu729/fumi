@@ -42,7 +42,10 @@ This is a single-owner inbound archive: `mail:read` permits all inbound records.
 Drafts, staged attachments, outgoing records and outbound notifications remain
 principal-owned. Scope checks run on the server even if a caller bypasses tool
 discovery. Missing or malformed grants fail closed. Requests and downloads are
-uncacheable; HTML is downloaded as opaque content and never rendered.
+uncacheable; HTML is downloaded as opaque content and never rendered. A
+`/api/mail/*` download the caller cannot read, such as a missing message, a
+`sent_` record of another principal or any message without `mail:read`, answers
+HTTP 404 with `{"error":{"code":"mail_unavailable"}}`.
 
 For replies, omitting `from_address` selects the original SMTP envelope
 recipient recorded by Fumi. Header `To` cannot choose this default. Explicit
@@ -74,18 +77,29 @@ Mail, headers, attachment filenames and HTML are untrusted data. Tool annotation
 are client hints, not authorization.
 
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
-`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and
-`has:attachment`. Quote values containing spaces. It searches extracted metadata,
-not full bodies or attachments. Without a source filter it includes live and
-imported archive sources. `archive_source` can be `all`, `gmail` or `email_routing`.
-Up to ten `label_ids` are ANDead: imported messages retain provider label IDs;
-live ingress has `INBOX`. Gmail SENT messages therefore require
-`archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For compatibility,
-`SENT` without `archive_source` still lists the caller's outgoing operation records
-and accepts only an empty query. Continuation tokens bind query, source and labels;
-changing filters requires a new search. Other Gmail query syntax is rejected.
-Pending/blocked extraction remains visible. Gmail threads use retained account and
-thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
+`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and `has:attachment`.
+Quote values containing spaces. `from:`, `to:` and `subject:` match substrings and
+ignore ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match
+stored text as written in the filter or in lowercase: `subject:Änderung` matches
+`Änderung` and `änderung`, but `subject:änderung` does not match `Änderung`. A query has
+at most 1,000 characters and 33 operators, counting repeated ones; a longer query or
+more operators fail with `query_too_long`, and `get_profile` reports the operator cap as
+`limits.search_filters`. The cap keeps every search, including the `filters` of
+`search_mail_content` and `search_mail_semantic`, within D1's 100 bound parameters per
+statement: a `from:`, `to:` or `subject:` value with uppercase non-ASCII binds two
+values, and `search_mail_semantic` binds up to 33 of its own (item key, policy, ten
+approved sources, archive source and two per label). Operators join as a balanced `AND`
+tree, so 33 of them nest six levels deep instead of 33 and stay within D1's expression
+depth limit of 100. It searches extracted metadata, not full bodies or attachments.
+Without a source filter it includes live and imported archive sources. `archive_source`
+can be `all`, `gmail` or `email_routing`. Up to ten `label_ids` are ANDead: imported
+messages retain provider label IDs; live ingress has `INBOX`. Gmail SENT messages
+therefore require `archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For
+compatibility, `SENT` without `archive_source` still lists the caller's outgoing
+operation records and accepts only an empty query. Continuation tokens bind query,
+source and labels; changing filters requires a new search. Other Gmail query syntax is
+rejected. Pending/blocked extraction remains visible. Gmail threads use retained account
+and thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
 direct untrusted header hints. Neither claims a complete conversation model.
 
 `search_mail_content` is a separate lexical baseline over bounded plain-text
@@ -93,10 +107,28 @@ bodies and supported UTF-8 text attachments. It returns citations and explicit
 indexing/representation coverage. See [content search](content-search.md) for
 limits, phrase syntax and activation. Metadata search semantics are unchanged.
 
-Search pages contain at most 50 records; batches contain at most ten messages;
-thread reads contain at most 20. Bodies inline at most 16,000 characters per
-representation, with authenticated full-content links when truncated. Attachments
-use descriptors rather than embedding arbitrary bytes in model context.
+Search pages contain at most 50 records; batches contain at most ten messages; thread
+reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
+UTF-16 code units per representation, one fewer when the cut would split a surrogate
+pair, with authenticated full-content links when truncated. Attachments use descriptors
+rather than embedding arbitrary bytes in model context.
+
+Inline bodies, `read_attachment_supported`, `read_attachment` and the body, text,
+attachment and conversion downloads use only a current extraction: status `complete`,
+original `present` in the catalog, and the extraction's original SHA-256 equal to the
+catalog's, the definition `get_mail_health` counts as current. When a completed
+extraction is later blocked (such as `source_changed` on a retry), or its original goes
+missing or changes, inline content is `null`, `read_attachment_supported` is `false`,
+`read_attachment` fails with `extraction_incomplete`, and the downloads fail with
+`content_unavailable` (HTTP 404 `mail_unavailable`), even though the old derived objects
+remain in R2. `/raw` still serves the archived original while R2 holds it.
+`search_mail_content` returns no match from such a message
+([content search](content-search.md)), and `search_mail_semantic` cites none of its
+parts ([managed retrieval](managed-mail-search.md)). `copy_attachment` fails with
+`attachment_not_found`, and replies and forwards follow
+[reply quoting and forwarding](#reply-quoting-and-forwarding). A message ID whose
+external ID matches more than one catalog source fails with `message_conflict` instead
+of choosing one.
 
 ## Attachment limits
 
@@ -189,6 +221,11 @@ On Tue, Nov 17, 2026 at 11:13 PM Parent Sender <parent@example.invalid> wrote:
 - Like Gmail's prefilled subject, an empty subject or the parent's own subject
   becomes `Re:` and a space plus the parent's subject (unchanged when it already
   starts with `Re:`). A subject the caller changed is sent as written.
+- `In-Reply-To` is the parent's `Message-ID`. `References` follows RFC 5322
+  section 3.6.4: the parent's `References`, or its `In-Reply-To` when that holds
+  exactly one message ID, then the parent's `Message-ID`. A chain over 21 IDs or
+  2048 bytes keeps the first (thread root) ID and the newest IDs that fit. A
+  parent without a valid `Message-ID` fails with `reply_headers_unavailable`.
 - Replies carry the parent's attachments only with `include_attachments: true`
   (Gmail does not attach them to replies). The limits and SHA-256 verification
   described for forwards below apply.
@@ -233,12 +270,18 @@ First line
 - `preview_email` has no forward mode and there are no forward drafts, so a
   forward's composed block is visible only in its sent record.
 
-Drafts store the author's own input, including `quote`. `preview_email`, sends
-and the sent archive (`input.json`, `read_email` on `sent_` IDs) contain the
-composed message, so the archive matches what was submitted. A parent whose
-extracted body is missing or fails its digest check fails with
-`original_unavailable` rather than sending without the quote. Reply drafts saved
-before this change have no `quote` field and are quoted when sent.
+Drafts store the author's own input, including `quote`. `preview_email`, sends and the
+sent archive (`input.json`, `read_email` on `sent_` IDs) contain the composed message,
+so the archive matches what was submitted. A parent whose extracted body is missing or
+fails its digest check fails with `original_unavailable` rather than sending without the
+quote. Composition, drafts and previews use only a current parent extraction (see
+[tools and bounded results](#tools-and-bounded-results)): when the parent's extraction
+is blocked, or its original has gone missing or changed, a reply, draft or preview fails
+with `reply_not_found` and a forward with `message_not_found`, as for a parent that was
+never extracted. A draft or preview that omits `from_address` fails earlier with
+`reply_sender_unavailable`, because its default sender also needs a current extraction.
+Reply drafts saved before this change have no `quote` field and are
+quoted when sent.
 
 Idempotency compares `request_hash`, a digest of the caller's own input, draft
 revision and forwarded parent, before anything is composed. A same-key retry of a
@@ -247,7 +290,19 @@ unreadable or a later fumi release composes differently. `input_hash` remains th
 digest of the archived `input.json`. Operations created before `request_hash`
 existed (migration `0015`) compare `input_hash` with the digest of the uncomposed
 input, which is how they were hashed. A `prepared` operation resumes from its
-archived `input.json` and is never composed again.
+archived `input.json` and is never composed again. The current-extraction check runs
+when composing, after this lookup, so a parent that stops being current does not
+change a request's digest or stop a same-key retry. The send paths still read reply
+headers, and the default sender when `from_address` is omitted, from any completed
+extraction for that reason; a new send then fails at composition.
+
+The digest includes the reply's `In-Reply-To` and `References`, which are derived
+from the parent's stored headers. The `References` rule above changed on
+2026-11-20 for parents whose own `References` is missing or holds more than 20
+IDs. Before then, `References` was the parent's newest 20 `References` IDs and
+its `Message-ID`. A same-key retry of a reply submitted under that rule is also
+compared with a digest that uses those headers, so it still matches its
+operation.
 
 ## Sending and recovery
 
@@ -272,8 +327,14 @@ there is no public HTTP receipt endpoint. Events are retained before projection,
 deduplicated by provider event ID and reconciled when the provider message ID
 becomes known. Deferred events cannot overwrite terminal recipient outcomes;
 mixed recipient outcomes remain separate. Failed processing retries through the
-Queue and eventually uses `fumi-delivery-events-dlq`. Scheduled reconciliation
-updates evidence and never sends mail.
+Queue after a delay of 30 seconds doubled per attempt, at most 15 minutes, so the
+five retries span about 15 minutes before the message moves to
+`fumi-delivery-events-dlq`, which has no consumer. Scheduled reconciliation
+updates evidence and never sends mail. It runs as its own scheduled stage: its
+failure marks the run failed but does not skip MCP Events delivery in that run.
+`get_send_status` reads the submission and its recipients in one D1 batch, so
+a recipient outcome never appears beside a submission state from before it was
+projected.
 
 ## MCP Events
 
@@ -293,7 +354,9 @@ not create duplicate event IDs.
 Subscriptions require `mail:events` plus the event's read/send scope. Callback
 verification and delivery use Standard Webhooks signatures; subscriptions default
 to 24 hours and are owner-bound. Requested `ttlMs` is bounded to one minute through
-24 hours; `null` still receives a finite 24-hour grant. Rotation signs with both
+24 hours; `null` still receives a finite 24-hour grant. A principal holds at most
+100 live subscriptions. Expired and stopped ones keep their identity and cursor for
+refresh but free their slot; reviving one needs a free slot. Rotation signs with both
 keys for five minutes. Unsubscribe accepts the original event name, arguments
 and webhook URL. Refresh supports replay from an acknowledged
 subscription cursor, never skipping pending events. Delivery is at least once:
@@ -302,10 +365,28 @@ the cursor. HTTP 410, excessive retries, expiry or lost authorization stops deli
 
 The five-minute scheduled handler processes a bounded set of subscriptions, one
 pending event per selected subscription. This is not an immediate notification
-latency guarantee. No arbitrary callback hosts are accepted: configure only
+latency guarantee. A run leases each subscription for one minute from the time
+it reaches it and works from the leased row, so an overlapping run neither
+leases it again nor resends an event another run has acknowledged or set a
+retry backoff for. The POST starts only while at least its 10-second timeout
+remains on the lease, and a failed POST's backoff counts from when it ended. A
+run stops leasing subscriptions four minutes after it starts; the rest stay due
+for the next run. No arbitrary callback hosts are accepted: configure only
 administrator-trusted origins in `WEBHOOK_ORIGINS`. Workers fetch cannot pin DNS
 answers while retaining TLS SNI, so this adapter explicitly trusts those origins'
-DNS administration. Redirects are refused on verification and delivery.
+DNS administration. Redirects are never followed. Verification and delivery POST
+with `redirect: "manual"`, because workerd rejects `redirect: "error"` before it
+connects. A 3xx response is then refused: its body is cancelled unread and its
+`Location` is never contacted. It fails callback verification, and a delivery
+retries it like any other non-2xx response.
+
+`WEBHOOK_ORIGINS` unset or `[]` trusts no origin. Any other value that is not a
+JSON array of at most ten exact HTTPS origins, such as
+`["https://receiver.example.com/path"]`, trusts none of its entries. Callback
+verification then fails, the scheduled run leases no subscription (so none spends
+a retry) and fails, and each `/mcp` request and scheduled run logs
+`{"event":"webhook_origins","status":"invalid"}` without the configured value.
+Other `/mcp` requests are served as usual.
 
 Decision (owner, 2026-11-13 05:53 UTC): no production MCP Events consumer exists.
 Grok Bot notifications use the ordinary routing webhook, not MCP Events, and the
@@ -325,6 +406,11 @@ removed. With `WEBHOOK_ORIGINS` empty, callback verification fails and nothing i
 delivered. The temporary receiver from
 [#64](https://github.com/risu729/fumi/pull/64) was removed without being used.
 Grok Bot is the primary notification target through the routing webhook.
+
+Decision (owner, 2026-11-20 17:13 UTC): when MCP Events resumes, subscriptions carry
+a post-routing event instead of `email.received` and `email.ready`, designed at that
+time, and no permanent subscribe tools are added until a subscriber exists.
+See [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
 ## Activation checklist
 

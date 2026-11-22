@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { standardWebhookHeaders, validSigningSecret } from "./webhook-signature.ts";
 
 const id = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,63}$/));
 const url = v.pipe(
@@ -80,6 +81,8 @@ export interface PluginOfferRequest {
   schemaVersion: 1;
   kind: "owner" | "notification";
   operationId: string;
+  /** Notification requests only: the `read_email` ID of the message. */
+  messageId?: string;
   source: { eventId: string; rawSha256: string; receivedAt: string | null };
   pluginId?: string;
   manifestVersion?: string;
@@ -170,18 +173,18 @@ export async function dispatchDigest(value: string): Promise<string> {
   ).join("");
 }
 
-/** Generic providers acknowledge only HTTP acceptance. Unknown results are never
- * retried automatically: this adapter makes no remote idempotency/status promise. */
+/** Generic webhooks are signed with Standard Webhooks and acknowledge only HTTP
+ * acceptance. `webhook-id` is the stable operation ID and the body is the frozen
+ * payload, so a resend is byte-identical and receivers deduplicate on the ID
+ * (ADR 0003). Anything but a 2xx, including a timeout, is a retry. */
 export async function exchangeWebhook(
   adapter: WebhookAdapter,
   transport: OfferTransport,
   operationId: string,
-  requestSha256: string,
   payload: string,
-): Promise<"accepted" | "uncertain"> {
+): Promise<"accepted" | "retry"> {
   const secret = transport.auth[adapter.authRef];
-  if (!secret || secret.length < 24 || secret.length > 4096 || /[\r\n]/.test(secret))
-    return "uncertain";
+  if (!validSigningSecret(secret)) return "retry";
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -191,25 +194,21 @@ export async function exchangeWebhook(
     }, adapter.timeoutMs);
   });
   try {
+    const headers = await standardWebhookHeaders(secret, operationId, payload, Date.now());
     const response = await Promise.race([
       (transport.fetch ?? fetch)(adapter.url, {
         method: "POST",
         redirect: "manual",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${secret}`,
-          "Idempotency-Key": operationId,
-          "X-Fumi-Request-Sha256": requestSha256,
-        },
+        headers,
         body: payload,
       }),
       deadline,
     ]);
     await Promise.race([response.body?.cancel().catch(() => undefined), Promise.resolve()]);
-    return response.status >= 200 && response.status < 300 ? "accepted" : "uncertain";
+    return response.status >= 200 && response.status < 300 ? "accepted" : "retry";
   } catch {
-    return "uncertain";
+    return "retry";
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

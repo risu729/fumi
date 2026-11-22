@@ -93,6 +93,22 @@ ledgers, provenance and retention; this corpus copies only its verified local te
 into the dedicated retrieval instance. If migration0011 is absent, body retrieval
 continues with explicit disabled attachment coverage.
 
+Discovery, the projection write, the cleanup fence, upload and poll claims, retrieval
+and coverage counts use only a current extraction, the definition in
+[agent mail](agent-mail.md#tools-and-bounded-results) and `get_mail_health`: status
+`complete`, original `present` in the catalog, and the extraction's original SHA-256
+equal to the catalog's. When a completed extraction is later blocked, a migration0013
+trigger deletes its local rows with that status change; when its original goes missing
+or changes, the next repair deletes them. Discovery does not select it again, so nothing
+is uploaded or polled for it. `search_mail_semantic` treats
+its remote items as unmapped candidates (counted in `omitted_candidates`), and coverage
+`documents` no longer counts them. The projection write applies the cleanup fence to the
+new row itself, so a source that goes stale between discovery and that write is not
+projected, and cleanup and discovery cannot delete and recreate the same row. The upload
+call ledger keeps each attempt identity: if the same original becomes current again,
+rediscovery polls the recorded item ID or keeps the unknown outcome instead of uploading
+again.
+
 ## Durability and budgets
 
 The per-part ledger pins original MIME SHA, current extraction manifest, source text
@@ -101,19 +117,21 @@ configuration policy hash, generated remote item key and provider item ID. Remot
 are derived from immutable source/part/text/policy identities; filenames or message
 content cannot choose URLs, remote destinations or object paths.
 
-Each conditional source lease precedes asynchronous work. An atomic D1 batch
-reserves one upload and marks `uploading` before the remote call. A crash or timeout
-after that point becomes `unknown`, which never resubmits automatically. A unique
-upload-attempt identity remains in the call ledger even if MIME invalidation
-removes its rebuildable projection. Rediscovering the same original MIME/part/text
-and policy therefore preserves uncertainty even if re-extraction changes the
-manifest or derivative keys. If the prior
-response durably recorded a provider item ID, rediscovery can poll that same item.
-Received
-item IDs are persisted as `submitted`; later runs poll that exact ID/key until
-`completed`, a fixed failure, or a 24-hour indexing deadline. Submitted polling
-never uploads again. Source invalidation removes the local projection and prevents
-late completion or search results from becoming visible.
+Each conditional source lease precedes asynchronous work. An atomic D1 batch reserves
+one upload and marks `uploading` before the remote call. A crash or timeout after that
+point becomes `unknown`, which never resubmits automatically. A unique upload-attempt
+identity remains in the call ledger even if MIME invalidation removes its rebuildable
+projection. Rediscovering the same original MIME/part/text and policy therefore
+preserves uncertainty even if re-extraction changes the manifest or derivative keys. If
+the prior response durably recorded a provider item ID, rediscovery can poll that same
+item. Received item IDs are persisted as `submitted`; later runs poll that exact ID/key
+until `completed`, a fixed failure, or a 24-hour indexing deadline. Each run polls
+before it applies the deadline, so an item that is already `completed` becomes ready
+even when rediscovery happens more than 24 hours after its upload. Past the deadline, a
+`queued` or `running` status or a failed poll blocks the part with
+`managed_search_indexing_timeout`. Submitted polling never uploads again. Source
+invalidation removes the local projection and prevents late completion or search results
+from becoming visible.
 
 If a projection is rebuilt while an older upload remains in flight, it can remain
 quarantined even if the old response later records an item ID. This conservative
@@ -132,7 +150,8 @@ accepted provider request.
 ## Evidence returned through MCP
 
 `search_mail_semantic` requires `mail:read`. Query length is 1–1,000 characters and
-results are limited to ten. Metadata filters use the existing archive operators;
+results are limited to ten. Metadata filters use the existing archive operators, at
+most 1,000 characters and 33 operators ([agent mail](agent-mail.md));
 `archive_source` and retained label IDs are optional. The tool requests at most
 thirty ranked provider candidates and applies these filters locally. This may
 return fewer matches even when additional relevant documents exist. It reports
@@ -148,13 +167,15 @@ Every returned item key must resolve to a current, ready local ledger entry unde
 current policy. The adapter reads and hashes the local source text again and requires
 the returned passage to occur verbatim in that source. It checks the current manifest
 once more after reading. Unmapped, stale, corrupt or transformed passages are omitted.
-Returned excerpts are at most 800 characters and remain untrusted mail content. Body
+Returned excerpts are at most 800 UTF-16 code units, one fewer when the cut would split
+a surrogate pair, and remain untrusted mail content. Body
 citations contain the exact body SHA and authenticated `/text` URL. Attachment citations
 distinguish derivative SHA and `/conversions/part_N/<sha>` from original attachment SHA
 and `/attachments/part_N`. Both include original MIME SHA and `/raw` URL. Provider chunk
 IDs are descriptive metadata; they never become download paths or authorization.
 
-Local invalidation does not delete remote items or prior revision copies. Private
+Local invalidation does not delete remote items or prior revision copies, including
+items whose original later went missing or changed. Private
 remote retention and eventual cleanup require a separate reviewed decision. Local
 source fences keep those old copies out of tool results, and original archive
 bytes remain preserved independently.

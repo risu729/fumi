@@ -8,7 +8,7 @@ import {
   indexContentSearchSource,
 } from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
-import { readMailResource } from "../src/mail-read.ts";
+import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
@@ -39,9 +39,9 @@ async function insert(
     attachments_json: JSON.stringify(part ? [part] : []),
   };
   await env.MAIL_CATALOG.prepare(
-    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-11T00:00:00.000Z','present','missing',0,0)`,
+    `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,'2026-11-11T00:00:00.000Z','present','missing',?,0,0)`,
   )
-    .bind(id, row.raw_key, `${row.raw_key}.receipt`)
+    .bind(id, row.raw_key, `${row.raw_key}.receipt`, "a".repeat(64))
     .run();
   await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,attachment_count,body_json_key,body_text_key,body_html_key,manifest_key,updated_at)
     VALUES(?,'mime-v1',?,1,?,'complete',?,?,?,?,?,?,?,0)`)
@@ -238,6 +238,50 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "matching" }, base)).matches,
     ).toHaveLength(1);
   });
+  it("counts a projection fenced by a conversion change during repair as deferred", async () => {
+    const source = await insert("raced", "raced body needle", {
+      text: "synthetic original scanned PDF",
+      mimeType: "application/pdf",
+    });
+    const part = JSON.parse(source.attachments_json)[0]!;
+    const open = env.MAIL_CATALOG.withSession.bind(env.MAIL_CATALOG);
+    const conversion = env.MAIL_CATALOG.prepare(
+      `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,updated_at)
+         VALUES(?,0,?,?,?,?,?,?,?,'pending',0)`,
+    ).bind(
+      source.raw_key,
+      source.manifest_key,
+      "a".repeat(64),
+      part.key,
+      part.sha256,
+      part.size,
+      part.mimeType,
+      "b".repeat(64),
+    );
+    // A conversion starts after repair read the conversion snapshot but before it publishes.
+    const spy = vi.spyOn(env.MAIL_CATALOG, "withSession").mockImplementationOnce((constraint) => {
+      const session = open(constraint);
+      const batch = session.batch.bind(session);
+      session.batch = async (statements) => {
+        await conversion.run();
+        return batch(statements);
+      };
+      return session;
+    });
+    try {
+      expect(await repairContentSearch(env, 100)).toEqual({ indexed: 0, deferred: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) n FROM mail_search_documents").first("n"),
+    ).toBe(0);
+    // Nothing was published, so the next pass picks the source up without a retry delay.
+    expect(await repairContentSearch(env, 101)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      (await searchMailContent(env, reader, { query: "raced body" }, base)).matches,
+    ).toHaveLength(1);
+  });
   it("reindexes a live conversion before historical backlog and backfills the remaining slots", async () => {
     const historical = [];
     for (let index = 0; index < 4; index++) {
@@ -325,6 +369,44 @@ describe("bounded content retrieval", () => {
       (await searchMailContent(env, reader, { query: "retry needle" }, base)).matches,
     ).toMatchObject([{ message_id: "mail_z-live-retry" }]);
   });
+  it("searches and indexes only an extraction of the original the catalog holds now", async () => {
+    const missing = await insert("stale-missing", "stale needle one");
+    const changed = await insert("stale-changed", "stale needle two");
+    const blocked = await insert("stale-blocked", "stale needle three");
+    const current = await insert("stale-current", "stale needle four");
+    for (const row of [missing, changed, blocked, current])
+      // oxlint-disable-next-line no-await-in-loop -- Four synthetic messages, indexed in order.
+      expect(await indexMailContent(env, row)).toBe(true);
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?")
+      .bind(missing.raw_key)
+      .run();
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+      .bind("b".repeat(64), changed.raw_key)
+      .run();
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET status='blocked',failure_code='source_changed' WHERE raw_key=?",
+    )
+      .bind(blocked.raw_key)
+      .run();
+    const result = await searchMailContent(env, reader, { query: "stale needle" }, base);
+    expect(result.matches.map((match) => match.message_id)).toEqual(["mail_stale-current"]);
+    expect(result.coverage).toMatchObject({ extracted_messages: 1, indexed_messages: 1 });
+    // Indexing never publishes a projection of a stale extraction.
+    await env.MAIL_CATALOG.exec(
+      "DELETE FROM mail_search_chunks; DELETE FROM mail_search_documents;",
+    );
+    expect(await indexMailContent(env, missing)).toBe(false);
+    expect(await indexMailContent(env, changed)).toBe(false);
+    await completedJob(changed.raw_key, "synthetic-changed-instance");
+    expect(
+      await indexContentSearchSource(env, changed.raw_key, "synthetic-changed-instance"),
+    ).toEqual({ status: "skipped" });
+    expect(await repairContentSearch(env)).toEqual({ indexed: 1, deferred: 0 });
+    expect(await repairContentSearch(env)).toEqual({ indexed: 0, deferred: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM mail_search_documents").all(),
+    ).toMatchObject({ results: [{ raw_key: current.raw_key }] });
+  });
   it("removes obsolete indexed text on extraction invalidation and fences stale publication", async () => {
     const row = await insert("changed", "obsolete needle");
     await repairContentSearch(env);
@@ -384,6 +466,47 @@ describe("bounded content retrieval", () => {
       code: "invalid_content_query",
     });
   });
+  it("binds the most metadata filters D1 allows next to the phrase and cursor", async () => {
+    await insert("first", "bounded filter needle");
+    await insert("second", "bounded filter needle");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
+    ).run();
+    await repairContentSearch(env);
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) =>
+      Array.from({ length: count }, () => "subject:\u00c4").join(" ");
+    const first = await searchMailContent(
+      env,
+      reader,
+      { query: "needle", filters: filters(MAX_SEARCH_FILTERS), max_results: 1 },
+      base,
+    );
+    expect(first.matches).toHaveLength(1);
+    const second = await searchMailContent(
+      env,
+      reader,
+      {
+        query: "needle",
+        filters: filters(MAX_SEARCH_FILTERS),
+        max_results: 1,
+        next_page_token: first.next_page_token!,
+      },
+      base,
+    );
+    expect([...first.matches, ...second.matches].map((m) => m.message_id).sort()).toEqual([
+      "mail_first",
+      "mail_second",
+    ]);
+    await expect(
+      searchMailContent(
+        env,
+        reader,
+        { query: "needle", filters: filters(MAX_SEARCH_FILTERS + 1) },
+        base,
+      ),
+    ).rejects.toMatchObject({ code: "query_too_long" });
+  });
   it("returns the entire matching phrase when it exceeds the FTS snippet token limit", async () => {
     const query = "a".repeat(100);
     await insert("long-phrase", `prefix ${query} suffix`);
@@ -396,6 +519,154 @@ describe("bounded content retrieval", () => {
     expect(
       (await searchMailContent(env, reader, { query: "needle" }, base)).matches[0]!.excerpt,
     ).toContain("needle");
+  });
+  it("never splits a surrogate pair at chunk, truncation or excerpt boundaries", async () => {
+    const emoji = "\u{1f600}";
+    const stored = async (rawKey: string) =>
+      (
+        await env.MAIL_CATALOG.prepare(
+          "SELECT part,ordinal,text FROM mail_search_chunks WHERE raw_key=? ORDER BY part,ordinal",
+        )
+          .bind(rawKey)
+          .all<{ part: string; ordinal: number; text: string }>()
+      ).results;
+    // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
+    const wellFormed = (text: string) => text.isWellFormed() && !text.includes("�");
+    // Emoji across the second chunk's start (3300), the first chunk's end (3500) and the body cut (100,000).
+    const head = `${"x".repeat(3299)}${emoji}${"y".repeat(198)}${emoji}`;
+    const body = await insert(
+      "surrogate-body",
+      `${head}${"z".repeat(99_999 - head.length)}${emoji}tail`,
+      { text: `${"a".repeat(15_999)}${emoji}after`, mimeType: "text/plain" },
+    );
+    await indexMailContent(env, body);
+    const chunks = await stored(body.raw_key);
+    expect(chunks.every((chunk) => wellFormed(chunk.text))).toBe(true);
+    const bodyChunks = chunks.filter((chunk) => chunk.part === "body");
+    expect(bodyChunks[0]!.text === `${"x".repeat(3299)}${emoji}${"y".repeat(198)}`).toBe(true);
+    expect(bodyChunks[1]!.text.startsWith(`${emoji}${"y".repeat(198)}${emoji}z`)).toBe(true);
+    expect(bodyChunks.at(-1)!.text.endsWith("zzz")).toBe(true);
+    expect(
+      chunks
+        .filter((chunk) => chunk.part === "part_0")
+        .at(-1)!
+        .text.endsWith("aaa"),
+    ).toBe(true);
+    const coverage = await env.MAIL_CATALOG.prepare(
+      "SELECT coverage_json FROM mail_search_documents WHERE raw_key=?",
+    )
+      .bind(body.raw_key)
+      .first<{ coverage_json: string }>();
+    expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
+      omitted: ["body_truncated", "part_0:truncated"],
+    });
+    // A phrase across the first chunk boundary still cites the chunk that holds it whole.
+    const straddle = await searchMailContent(env, reader, { query: `y${emoji}z` }, base);
+    expect(straddle.matches.map((match) => match.citation.chunk)).toEqual([1]);
+    expect(wellFormed(straddle.matches[0]!.excerpt)).toBe(true);
+
+    // The searchable derivative budget (64,000 units) ends inside a pair.
+    const derived = await insert("surrogate-derived", "derived body", {
+      text: "synthetic scanned original",
+      mimeType: "application/pdf",
+    });
+    const original = JSON.parse(derived.attachments_json)[0]!;
+    const converted = await object(`${"d".repeat(63_999)}${emoji}after`);
+    await env.MAIL_CATALOG.prepare(
+      `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,representation,result_key,result_sha256,result_size,provenance_json,updated_at)
+       VALUES(?,0,?,?,?,?,?,?,?,'complete','managed_ocr_indexed_text',?,?,?,'{}',0)`,
+    )
+      .bind(
+        derived.raw_key,
+        derived.manifest_key,
+        "a".repeat(64),
+        original.key,
+        original.sha256,
+        original.size,
+        original.mimeType,
+        "b".repeat(64),
+        converted.key,
+        converted.sha256,
+        converted.size,
+      )
+      .run();
+    await indexMailContent(env, derived);
+    const derivedChunks = (await stored(derived.raw_key)).filter(
+      (chunk) => chunk.part === "converted_0",
+    );
+    expect(derivedChunks.every((chunk) => wellFormed(chunk.text))).toBe(true);
+    expect(derivedChunks.at(-1)!.text.endsWith("ddd")).toBe(true);
+
+    // The excerpt window (150 units around the match) starts and ends inside a pair.
+    await insert(
+      "surrogate-excerpt",
+      `${"p".repeat(10)}${emoji}${"q".repeat(149)}needle${"r".repeat(149)}${emoji}tail`,
+    );
+    await repairContentSearch(env);
+    const excerpt = (await searchMailContent(env, reader, { query: "needle" }, base)).matches[0]!
+      .excerpt;
+    expect(excerpt === `…${emoji}${"q".repeat(149)}needle${"r".repeat(149)}…`).toBe(true);
+  });
+  it("spends the derivative budget when a surrogate pair shortens the derivative cut", async () => {
+    const source = await insert("surrogate-budget", "budget body", {
+      text: "synthetic scanned original",
+      mimeType: "application/pdf",
+    });
+    const first = JSON.parse(source.attachments_json)[0]!;
+    const second = { ...first, index: 1, ...(await object("synthetic second original")) };
+    source.attachments_json = JSON.stringify([first, second]);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET attachments_json=?,attachment_count=2 WHERE raw_key=?",
+    )
+      .bind(source.attachments_json, source.raw_key)
+      .run();
+    for (const [part, text] of [
+      [first, `${"d".repeat(63_999)}\u{1f600}after`],
+      [second, "second derivative needle"],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- Two synthetic derivatives in index order.
+      const converted = await object(text);
+      // oxlint-disable-next-line no-await-in-loop -- Two synthetic derivatives in index order.
+      await env.MAIL_CATALOG.prepare(
+        `INSERT INTO attachment_conversions(raw_key,part_index,manifest_key,mime_sha256,source_key,source_sha256,source_size,source_mime,policy_hash,state,representation,result_key,result_sha256,result_size,provenance_json,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'complete','managed_ocr_indexed_text',?,?,?,'{}',0)`,
+      )
+        .bind(
+          source.raw_key,
+          part.index,
+          source.manifest_key,
+          "a".repeat(64),
+          part.key,
+          part.sha256,
+          part.size,
+          part.mimeType,
+          "b".repeat(64),
+          converted.key,
+          converted.sha256,
+          converted.size,
+        )
+        .run();
+    }
+    expect(await indexMailContent(env, source)).toBe(true);
+    // The first cut stops at 63,999 units only to keep the pair whole; the budget is still spent.
+    const coverage = await env.MAIL_CATALOG.prepare(
+      "SELECT coverage_json FROM mail_search_documents WHERE raw_key=?",
+    )
+      .bind(source.raw_key)
+      .first<{ coverage_json: string }>();
+    expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
+      omitted: [
+        "part_0:derivative_search_truncated",
+        "part_1:derivative_search_count_or_character_limit",
+      ],
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) n FROM mail_search_chunks WHERE raw_key=? AND part='converted_1'",
+      )
+        .bind(source.raw_key)
+        .first("n"),
+    ).toBe(0);
   });
   it("enforces mail read grants at the MCP boundary and exposes source citations", async () => {
     await insert("mcp", "find this synthetic needle");

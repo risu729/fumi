@@ -75,11 +75,16 @@ Its strict v1 fields are:
 - `owners: [{handlerRef, adapter, offerFields}]`: administrator-provisioned adapters
   for enabled owner adoptions. There are at most sixteen.
 
-Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires
-a larger revision. A destination change requires a larger generation as well.
-Lower/stale revisions, generation rollback and same-generation destination changes
-are rejected. Missing, disabled, invalid or uncredentialed configuration cannot send.
-Keep private rule sets, real endpoint details and credentials outside Git.
+Configuration is bounded to 256 KiB. A revision is immutable: changing bytes requires a
+larger revision. A destination change requires a larger generation as well. Lower/stale
+revisions, generation rollback and same-generation destination changes are rejected. The
+D1 statements that close acceptance before activation and then activate a revision
+repeat the revision, generation and destination check against the stored control row.
+Two Workers holding different artifacts cannot both activate one generation with
+different destinations, and a Worker that finds the row already at its revision or
+replaced by a competing activation leaves that row's acceptance open. Missing, disabled,
+invalid or uncredentialed configuration cannot send. Keep private rule sets, real
+endpoint details and credentials outside Git.
 
 With `destination: null`, adopted owners still receive only their granted inputs.
 An owner claim remains exclusive; declined or unmatched mail is durably held with
@@ -139,16 +144,34 @@ endpoint/owner identity requires the same deliberate generation handoff.
 
 The ordinary destination additionally accepts `{kind: "webhook", url, authRef,
 timeoutMs}` for a provider that consumes the bounded notification JSON without the
-owner receipt protocol. It makes one bounded authenticated POST without following
-redirects. HTTP 2xx records the distinct terminal outbox state `accepted`, meaning
-HTTP acceptance only; it does not establish delivery, reading or durable downstream
-processing. Any non-2xx, timeout or transport loss is uncertain and is never
-automatically resubmitted. No status endpoint is invented: verified operator evidence
-is required to reconcile uncertainty, which blocks destination handoff meanwhile.
-Manual `not_found` or `retryable_error` cannot reset a generic webhook. Actual
-endpoint, authentication and input semantics require separate verification before
-activation. No real receiver endpoint is configured here. Fumi owns this configurable
-outbound handler only.
+owner receipt protocol ([ADR 0003](adr/0003-signed-notification-webhooks.md)):
+
+- **Signing.** `authRef` resolves to a `whsec_` secret (24 to 64 random bytes). Each
+  POST carries Standard Webhooks headers: `webhook-id` (the stable `operationId`),
+  `webhook-timestamp` and `webhook-signature` over the exact frozen body. There is no
+  bearer header. A reference whose value is not a valid `whsec_` secret holds the
+  notification.
+- **Body.** It carries `messageId` (`mail_<ingestId>`, the `read_email` ID), the
+  source identity and the classification, with `input: {}`. Configuration with a
+  non-empty `offerFields` for a webhook destination is invalid. The receiver reads
+  mail through fumi's MCP tools.
+- **Acceptance.** HTTP 2xx records the terminal state `accepted`, meaning HTTP
+  acceptance only; it does not establish delivery, reading or durable downstream
+  processing.
+- **Retry.** A non-2xx response, a timeout, a transport failure or an interrupted
+  attempt resends the same body with the same `webhook-id`. The attempt budget is the
+  same five attempts as other lanes, 1, 4, 16 and then 60 minutes apart (repair runs
+  every five minutes). An exhausted row ends `dead` with `retry_exhausted`.
+  Receivers must deduplicate by `webhook-id` for at least 24 hours.
+- **Handoff.** A webhook row that was attempted stays bound to the destination
+  generation that received it. A revision without a new generation keeps retrying it
+  to the same destination. It is never revoked and rebuilt for another destination.
+  Once a newer generation is active, it ends `dead` with `destination_changed`
+  instead of re-targeting it to a receiver without the old deduplication state.
+  Only webhook bodies carry `messageId`; strict adapters keep their protocol body.
+
+Rows written before this change keep their frozen body; a legacy `uncertain` webhook
+row still needs a verified manual `handled` or `rejected` receipt.
 
 Decision (owner, 2026-11-12 22:50 UTC): the receiver for Grok Bot notifications is a
 webhook proxy that the Grok Bot side builds and operates. The proxy, not fumi, chooses
@@ -159,6 +182,10 @@ the earlier note that Techo owns the account choice: Techo is a notes repository
 without a runtime. A proxy URL or credential change still uses the revision,
 generation and drain handoff above; an A/B switch inside the proxy does not touch
 fumi configuration.
+
+Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this project's
+agents, because the Grok Bot side has no runtime. The signed, retrying `webhook`
+adapter above implements [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
 ## Input disclosure and source integrity
 
@@ -188,8 +215,17 @@ An accepted operation therefore cannot replay when a plugin or endpoint is upgra
 The first bounded payload and its request hash are frozen before any network call.
 Retries reuse them. A changed source revision, grant or symbolic decision is held
 when it conflicts with an attempted payload; it cannot silently send stale content
-or mutate the meaning of an idempotency key. Current source revisions are retained
-in the source job even when such a conflict is held.
+or mutate the meaning of an idempotency key. A frozen payload that no attempt has
+claimed has never left fumi; it is rebuilt from the current revision, source, grant
+and decision instead of being held. The sending claim compares the stored request
+hash, source identity and grant with the row the worker read, so a row another
+worker rebuilt meanwhile is held, not sent under a hash or source D1 does not
+keep, and the next pass rebuilds or sends it. Likewise, a worker holds instead of
+sending a row it did not check: one another worker inserted first with a different
+request hash, or one that reappeared after this worker deleted it for a rebuild. The
+next pass sends that row if the decision is unchanged and rebuilds it if the decision
+changed and no attempt has claimed it. Current source revisions are
+retained in the source job even when such a conflict is held.
 
 An immutable owner request contains `schemaVersion: 1`, `kind: "owner"`,
 `operationId`, `source: {eventId, rawSha256, receivedAt}`, `pluginId`, manifest version
@@ -238,12 +274,13 @@ claim gate to avoid competing consumption.
 ## Handoff, revocation and recovery
 
 Observing a new desired revision first closes new claims. Ready/retry operations from
-the old revision are revoked without action. A new active generation cannot activate
-while any previous operation is sending or uncertain. Both activation and claim
-conditions are enforced in D1 statements. The source, extraction revision, manifest,
-live provenance, active config and exact source lease are checked again after
-asynchronous policy work. New configuration is reloaded just before the final claim. The
-destination never comes from a payload or classifier result.
+the old revision are revoked without action, except attempted generic webhook rows,
+which stay bound to their generation as described above. A new active generation
+cannot activate while any previous operation is sending or uncertain. Both activation
+and claim conditions are enforced in D1 statements. The source, extraction revision,
+manifest, live provenance, active config and exact source lease are checked again
+after asynchronous policy work. New configuration is reloaded just before the final
+claim. The destination never comes from a payload or classifier result.
 
 Already transmitted actions cannot be recalled. Revocation stops new offers, while
 minimal identity/hash status queries may reconcile a previous uncertain action
@@ -256,7 +293,10 @@ Unknown outcomes receive at most five automatic status queries, then remain
 quarantined with `reconciliation_exhausted`; they still block handoff. Permanent or
 retry-exhausted operations remain visible as dead letters. Source jobs preserve
 fixed failure codes without logging mail, endpoint details, credentials or raw
-adapter error text. Invalid-source jobs yield to later sources.
+adapter error text. Invalid-source jobs yield to later sources. Such a job records
+the source SHA, extraction time and configuration revision it was checked against,
+so a re-extracted source that is still invalid waits for the held retry time
+instead of being selected as changed on every pass.
 
 Administrative functions are intended only for root wiring behind `mail:routing`:
 `activateRoutingDispatch`, `drainRoutingDispatch`, `routingDispatchStatus`,

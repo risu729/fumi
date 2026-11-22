@@ -30,14 +30,14 @@ jobs:
       - name: Install tools
         uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         with:
-          version: 2026.11.10
+          version: 2026.11.12
           install_args: --locked
       - name: Check repository
         run: mise run ci
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Validate the checked Worker with the shared deploy action
-        uses: risu729/wrangler-deploy-action@34db835bd1adce655ab75e7b9ce9b2a73b19bfc9 # v3.2.0
+        uses: risu729/wrangler-deploy-action@52b0bb0f6c0969897cb84b47f4d5ebc3650f2d0c # v4.0.1
         with:
           mode: dry-run
           worker: fumi
@@ -86,7 +86,7 @@ jobs:
       - name: Install locked tools
         uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         with:
-          version: 2026.11.10
+          version: 2026.11.12
           install_args: --locked
           cache: "false"
       # Install the locked dependencies before any step that holds the token.
@@ -179,7 +179,7 @@ jobs:
           "${cf[@]}" d1 migrations list "${FUMI_CATALOG_DATABASE_ID}" | jq -e 'length == 0' > /dev/null
       - name: Deploy the checked Worker
         if: ${{ steps.current.outputs.release == 'true' }}
-        uses: risu729/wrangler-deploy-action@34db835bd1adce655ab75e7b9ce9b2a73b19bfc9 # v3.2.0
+        uses: risu729/wrangler-deploy-action@52b0bb0f6c0969897cb84b47f4d5ebc3650f2d0c # v4.0.1
         with:
           mode: production
           worker: fumi

@@ -1,5 +1,6 @@
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { readVerified } from "./attachment-conversion-io.ts";
+import { truncateCodeUnits } from "./utf16.ts";
 
 export interface MailReadEnvironment {
   MAIL_CATALOG: D1Database;
@@ -33,6 +34,7 @@ interface MailRow {
   attachments_json: string | null;
   body_json_key: string | null;
   body_text_key: string | null;
+  extraction_current: 0 | 1;
 }
 interface Attachment {
   index: number;
@@ -42,19 +44,27 @@ interface Attachment {
   size: number;
   sha256: string;
 }
+/**
+ * A mail_extractions row `e` is current for its archive_sources row `s` only while it is
+ * complete and was extracted from the original the catalog holds now. Every reader of
+ * derived content uses this, and it matches current_complete in mail-health.ts.
+ */
+export const CURRENT_EXTRACTION_SQL =
+  "e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256";
 const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_kind,s.source_namespace,
  g.message_id AS gmail_message_id,g.thread_id AS gmail_thread_id,g.internal_date AS gmail_internal_date,
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
- e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key
+ e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
+ CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current
  FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 const LIMIT = 16_000;
 function bodyPreview(value: string | null): string | null {
   if (value === null) return null;
   // Detach the small prefix: V8 slices can retain the entire multi-megabyte source string.
-  return JSON.parse(JSON.stringify(value.slice(0, LIMIT))) as string;
+  return JSON.parse(JSON.stringify(truncateCodeUnits(value, LIMIT))) as string;
 }
 export const inboundMessageId = (id: string) => `mail_${id}`;
 
@@ -65,27 +75,30 @@ function externalId(id: string) {
   if (!/^mail_[a-zA-Z0-9-]{1,128}$/.test(id)) throw new MailReadError("invalid_message_id");
   return id.slice(5);
 }
+// The catalog key is (source_kind, source_namespace, external_id). Message IDs carry only
+// the external ID, so never pick an arbitrary source when corrupt data shares one.
+async function sourceRow<T>(env: MailReadEnvironment, sql: string, id: string) {
+  const rows = (
+    await env.MAIL_CATALOG.prepare(`${sql} WHERE s.external_id=? LIMIT 2`)
+      .bind(externalId(id))
+      .all<T>()
+  ).results;
+  if (!rows.length) throw new MailReadError("message_not_found");
+  if (rows.length > 1) throw new MailReadError("message_conflict");
+  return rows[0]!;
+}
 export async function resolveMailRawKey(
   env: MailReadEnvironment,
   principal: MailPrincipal,
   id: string,
 ) {
   requireRead(principal);
-  const row = await env.MAIL_CATALOG.prepare(
-    "SELECT raw_key FROM archive_sources WHERE external_id=?",
-  )
-    .bind(externalId(id))
-    .first<{ raw_key: string }>();
-  if (!row) throw new MailReadError("message_not_found");
-  return row.raw_key;
+  return (await sourceRow<{ raw_key: string }>(env, "SELECT raw_key FROM archive_sources s", id))
+    .raw_key;
 }
-async function mailRow(env: MailReadEnvironment, id: string) {
-  const row = await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.external_id=?`)
-    .bind(externalId(id))
-    .first<MailRow>();
-  if (!row) throw new MailReadError("message_not_found");
-  return row;
-}
+const mailRow = (env: MailReadEnvironment, id: string) => sourceRow<MailRow>(env, SELECT_MAIL, id);
+/** Derived content is available only while it was extracted from the present original. */
+const extractionCurrent = (row: MailRow) => row.extraction_current === 1;
 function resourceUri(base: string, id: string, kind: string) {
   return new URL(`/api/mail/${encodeURIComponent(id)}/${kind}`, base).href;
 }
@@ -142,16 +155,18 @@ export async function readMail(
     mime_type: a.mimeType,
     size: a.size,
     sha256: a.sha256,
-    read_attachment_supported: true,
+    read_attachment_supported: extractionCurrent(row),
   }));
-  const conversionRows = await attachmentConversionCoverage(env, row.raw_key, id, base);
+  const conversionRows = extractionCurrent(row)
+    ? await attachmentConversionCoverage(env, row.raw_key, id, base)
+    : [];
   const attachmentsWithCoverage = attachments.map((a) => ({
     ...a,
     conversion: conversionRows.find((c) => c.attachment_id === a.attachment_id) ?? {
       state: "not_enabled_or_pending",
     },
   }));
-  if (row.status !== "complete" || !row.body_json_key)
+  if (!extractionCurrent(row) || !row.body_json_key)
     return {
       ...data,
       attachments: attachmentsWithCoverage,
@@ -186,7 +201,7 @@ export async function readMailAttachment(
 ) {
   requireRead(principal);
   const row = await mailRow(env, args.message_id);
-  if (row.status !== "complete") throw new MailReadError("extraction_incomplete");
+  if (!extractionCurrent(row)) throw new MailReadError("extraction_incomplete");
   const entries = JSON.parse(row.attachments_json ?? "[]") as Attachment[];
   if (!args.attachment_id && !args.filename)
     throw new MailReadError("attachment_selector_required");
@@ -289,6 +304,7 @@ export async function readAttachmentConversion(
   if (!/^part_(?:[0-9]|[12][0-9]|3[01])$/.test(part) || !/^[a-f0-9]{64}$/.test(sha))
     throw new MailReadError("content_unavailable");
   const source = await mailRow(env, id);
+  if (!extractionCurrent(source)) throw new MailReadError("content_unavailable");
   const row = await env.MAIL_CATALOG.prepare(
     `SELECT a.result_key,a.result_size,a.source_sha256,a.provenance_json FROM attachment_conversions a JOIN mail_extractions e ON e.raw_key=a.raw_key AND e.manifest_key=a.manifest_key AND e.status='complete' WHERE a.raw_key=? AND a.part_index=? AND a.state='complete' AND a.result_sha256=?`,
   )
@@ -348,6 +364,8 @@ export async function readMailResource(
   if (request.method !== "GET" && request.method !== "HEAD")
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   const row = await mailRow(env, messageId);
+  // The original stays downloadable; derived files only while the extraction is current.
+  if (kind !== "raw" && !extractionCurrent(row)) throw new MailReadError("content_unavailable");
   let key: string | null =
     kind === "raw"
       ? row.raw_key
@@ -361,9 +379,11 @@ export async function readMailResource(
     key = entries.find((a) => `part_${a.index}` === attachmentId)?.key ?? null;
   }
   if (!key) throw new MailReadError("content_unavailable");
-  const object = await env.MAIL_ARCHIVE.get(key);
+  // HEAD needs only the size, so it never opens the object body.
+  const body = request.method === "HEAD" ? null : await env.MAIL_ARCHIVE.get(key);
+  const object = body ?? (request.method === "HEAD" ? await env.MAIL_ARCHIVE.head(key) : null);
   if (!object) throw new MailReadError("content_unavailable");
-  return new Response(request.method === "HEAD" ? null : object.body, {
+  return new Response(body?.body ?? null, {
     headers: {
       "Content-Type": kind === "body" ? "application/json" : "application/octet-stream",
       "Content-Disposition": "attachment",
@@ -411,6 +431,26 @@ function decodeCursor(value: string): Cursor {
     throw new MailReadError("invalid_page_token");
   }
 }
+/** D1 binds at most 100 parameters per statement. */
+const D1_BOUND_PARAMETERS = 100;
+/**
+ * The most parameters a caller binds besides the parsed filters. search_mail_semantic binds
+ * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
+ * and two per label for up to ten labels (33). search_emails binds at most 26 (snapshot,
+ * archive source, 20 for labels, three for the cursor, limit) and search_mail_content 3.
+ */
+const CALLER_BOUND_PARAMETERS = 33;
+/** Each filter binds at most two values: a from:, to: or subject: value with uppercase non-ASCII. */
+export const MAX_SEARCH_FILTERS = Math.floor((D1_BOUND_PARAMETERS - CALLER_BOUND_PARAMETERS) / 2);
+/**
+ * Joins filters as a balanced AND tree. A flat `a AND b AND c` chain nests one level per
+ * filter, and D1 rejects expression trees deeper than 100 next to the callers' own clauses.
+ */
+function balancedAnd(clauses: string[]): string {
+  if (clauses.length === 1) return clauses[0]!;
+  const middle = Math.ceil(clauses.length / 2);
+  return `(${balancedAnd(clauses.slice(0, middle))} AND ${balancedAnd(clauses.slice(middle))})`;
+}
 export function parseMailSearch(query: string) {
   if (query.length > 1000) throw new MailReadError("query_too_long");
   const clauses: string[] = [];
@@ -418,6 +458,7 @@ export function parseMailSearch(query: string) {
   const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
   if (tokens.join(" ").replaceAll(" ", "") !== query.replace(/\s/g, ""))
     throw new MailReadError("unsupported_query");
+  if (tokens.length > MAX_SEARCH_FILTERS) throw new MailReadError("query_too_long");
   for (const token of tokens) {
     const match = /^(from|to|subject|after|before|has):(.+)$/.exec(token);
     if (!match) throw new MailReadError("unsupported_query");
@@ -437,13 +478,20 @@ export function parseMailSearch(query: string) {
       values.push(`${value}T00:00:00.000Z`);
     } else {
       const path = operator === "from" ? "$.from" : operator === "to" ? "$.to" : "$.subject";
-      clauses.push(
-        `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),'')) LIKE ? ESCAPE '\\'`,
-      );
-      values.push(`%${value.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`);
+      // SQLite LOWER() folds ASCII only, so match non-ASCII as written and, when that
+      // differs, also in lowercase (the form earlier versions matched).
+      const patterns = [
+        ...new Set([
+          value.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+          value.toLowerCase(),
+        ]),
+      ].map((pattern) => `%${pattern.replace(/[\\%_]/g, "\\$&")}%`);
+      const column = `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),''))`;
+      clauses.push(`(${patterns.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+      values.push(...patterns);
     }
   }
-  return { clauses, values };
+  return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };
 }
 export async function searchMail(
   env: MailReadEnvironment,

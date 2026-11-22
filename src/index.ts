@@ -154,7 +154,10 @@ export default {
         await applyProviderEvent(env, message.body);
         message.ack();
       } catch {
-        message.retry();
+        // Back off so a short D1 or R2 outage cannot spend every Queue retry
+        // before the event is stored: 30 s doubling per attempt, at most 15 min.
+        const attempt = Number.isSafeInteger(message.attempts) ? Math.max(message.attempts, 1) : 1;
+        message.retry({ delaySeconds: Math.min(30 * 2 ** Math.min(attempt - 1, 5), 900) });
         console.error(JSON.stringify({ event: "delivery_event", status: "deferred" }));
       }
     }
@@ -225,8 +228,15 @@ export default {
       failed = true;
     }
     try {
-      await reconcileProviderEvents(env);
-      await deliverEvents(env.MAIL_CATALOG, eventRuntime(env));
+      const outbound = await reconcileProviderEvents(env);
+      console.log(JSON.stringify({ event: "outbound_reconcile", ...outbound }));
+    } catch {
+      console.error(JSON.stringify({ event: "outbound_reconcile", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const delivery = await deliverEvents(env.MAIL_CATALOG, eventRuntime(env));
+      console.log(JSON.stringify({ event: "event_delivery", ...delivery }));
     } catch {
       console.error(JSON.stringify({ event: "event_delivery", status: "deferred" }));
       failed = true;

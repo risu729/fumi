@@ -9,7 +9,7 @@ import {
   managedMailRuntime,
   type ManagedMailEnvironment,
 } from "../src/managed-search-runtime.ts";
-import { readMailResource } from "../src/mail-read.ts";
+import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
@@ -133,6 +133,41 @@ async function convertedFixture(original: Awaited<ReturnType<typeof source>>) {
   );
   return parts;
 }
+async function convertedPart(original: Awaited<ReturnType<typeof source>>, text: string) {
+  const attachment = await object(
+      `Synthetic original attachment ${original.raw.key}`,
+      "stale-original",
+    ),
+    derivative = await object(text, "stale-ocr-text"),
+    attachments = [{ index: 0, ...attachment, mimeType: "application/pdf" }];
+  const manifest = await object(
+    JSON.stringify({ rawSha256: original.raw.sha256, body: { text: original.body }, attachments }),
+    "stale-manifest",
+  );
+  await env.MAIL_CATALOG.batch([
+    env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET manifest_key=?,attachments_json=?,attachment_count=1 WHERE raw_key=?",
+    ).bind(manifest.key, JSON.stringify(attachments), original.raw.key),
+    env.MAIL_CATALOG.prepare(`INSERT INTO attachment_conversions(raw_key,mime_sha256,part_index,manifest_key,source_key,source_sha256,source_size,
+    source_mime,policy_hash,state,result_key,result_sha256,result_size,representation,provenance_json,updated_at) VALUES(?,?,0,?,?,?,?,'application/pdf','conversion-v1','complete',?,?,?,'managed_ocr_indexed_text','{}',0)`).bind(
+      original.raw.key,
+      original.raw.sha256,
+      manifest.key,
+      attachment.key,
+      attachment.sha256,
+      attachment.size,
+      derivative.key,
+      derivative.sha256,
+      derivative.size,
+    ),
+  ]);
+}
+const staleUpdates = {
+  missing: "UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?",
+  changed: `UPDATE archive_sources SET raw_sha256='${"b".repeat(64)}' WHERE raw_key=?`,
+  blocked:
+    "UPDATE mail_extractions SET status='blocked',failure_code='source_changed' WHERE raw_key=?",
+} as const;
 function provider() {
   const items = new Map<string, { key: string; bytes: Uint8Array }>();
   const upload = vi.fn(async (key: string, blob: Blob) => {
@@ -270,6 +305,16 @@ describe("optional managed body corpus and semantic retrieval", () => {
       await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_events").first(),
     ).toEqual({ count: 0 });
   });
+  it("never splits a surrogate pair at the 800-unit excerpt limit", async () => {
+    const original = await source("emoji", `${"x".repeat(799)}\u{1f600}tail`);
+    const remote = provider(),
+      context = runtime(remote.binding);
+    await ready(context);
+    const result = await searchManagedMail(context, reader, { query: "x", mode: "semantic" }, base);
+    expect(result.matches).toHaveLength(1);
+    // Compare booleans: printing a lone surrogate breaks the test runner's UTF-8 transport.
+    expect(result.matches[0]!.excerpt === original.text.slice(0, 799)).toBe(true);
+  });
   it("rejects hallucinated provider text and unmapped remote keys and does not expose stale/corrupt sources", async () => {
     const original = await source();
     const remote = provider(),
@@ -342,6 +387,50 @@ describe("optional managed body corpus and semantic retrieval", () => {
       (await searchManagedMail(context, reader, { query: "invoice", label_ids: ["SENT"] }, base))
         .matches,
     ).toEqual([]);
+  });
+  it("binds the most metadata filters D1 allows next to the source allowlist, source and labels", async () => {
+    await source("allowed", "Synthetic allowed body", canonical(1));
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json=json_set(metadata_json,'$.subject','\u00c4nderung')",
+    ).run();
+    const remote = provider(),
+      context = runtime(remote.binding, {
+        sourceRawKeys: Array.from({ length: 10 }, (_, index) => canonical(index + 1)),
+      });
+    await ready(context);
+    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    const filters = (count: number) =>
+      Array.from({ length: count }, () => "subject:\u00c4").join(" ");
+    const matched = await searchManagedMail(
+      context,
+      reader,
+      { query: "allowed", filters: filters(MAX_SEARCH_FILTERS), archive_source: "email_routing" },
+      base,
+    );
+    expect(matched.matches.map((m) => m.message_id)).toEqual(["mail_allowed"]);
+    // Ten labels complete the worst case; live ingress has only INBOX, so the candidate is omitted.
+    const worst = await searchManagedMail(
+      context,
+      reader,
+      {
+        query: "allowed",
+        filters: filters(MAX_SEARCH_FILTERS),
+        archive_source: "email_routing",
+        label_ids: Array.from({ length: 10 }, (_, index) => `LABEL_${index}`),
+      },
+      base,
+    );
+    expect(worst.matches).toEqual([]);
+    expect(worst.coverage.omitted_candidates).toBe(1);
+    await expect(
+      searchManagedMail(
+        context,
+        reader,
+        { query: "allowed", filters: filters(MAX_SEARCH_FILTERS + 1) },
+        base,
+      ),
+    ).rejects.toMatchObject({ code: "query_too_long" });
+    expect(remote.search).toHaveBeenCalledTimes(2);
   });
   it("reserves a finite upload/query budget and never resubmits an ambiguous upload", async () => {
     await source();
@@ -731,6 +820,75 @@ describe("optional managed body corpus and semantic retrieval", () => {
     ).toBe("unknown");
   });
 
+  it("marks a rediscovered item ready when its provider status is already completed after the indexing deadline", async () => {
+    const original = await source();
+    const remote = provider(),
+      first = runtime(remote.binding),
+      now = Date.now();
+    await ready(first, now);
+    await ready(runtime(remote.binding, { revision: "synthetic-v2" }), now + 600002);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    // Restoring the earlier policy rediscovers its durable item ID more than 24 hours later.
+    await repairManagedMailCorpus(first, now + 2 * 86400000);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT state,failure_code FROM managed_mail_documents WHERE raw_key=?",
+      )
+        .bind(original.raw.key)
+        .first(),
+    ).toEqual({ state: "ready", failure_code: null });
+  });
+  it("still blocks an item that is queued or unpollable after the indexing deadline", async () => {
+    const queued = await source("queued", "Queued synthetic body", canonical(1));
+    const unpollable = await source("unpollable", "Unpollable synthetic body", canonical(2));
+    const remote = provider(),
+      now = Date.now();
+    const binding = {
+      ...remote.binding,
+      items: {
+        ...remote.binding.items,
+        get: (id: string) => ({
+          info: async () => {
+            const item = remote.items.get(id)!;
+            if (new TextDecoder().decode(item.bytes).startsWith("Unpollable"))
+              throw new Error("synthetic provider outage");
+            return { id, key: item.key, status: "queued" };
+          },
+        }),
+      },
+    };
+    const context = runtime(binding);
+    await repairManagedMailCorpus(context, now);
+    await repairManagedMailCorpus(context, now + 300001);
+    const states = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT raw_key,state,failure_code FROM managed_mail_documents ORDER BY raw_key",
+      ).all();
+    expect((await states()).results).toEqual([
+      { raw_key: queued.raw.key, state: "submitted", failure_code: null },
+      {
+        raw_key: unpollable.raw.key,
+        state: "submitted",
+        failure_code: "managed_search_unavailable",
+      },
+    ]);
+    await repairManagedMailCorpus(context, now + 86400001);
+    expect(remote.upload).toHaveBeenCalledTimes(2);
+    expect((await states()).results).toEqual([
+      {
+        raw_key: queued.raw.key,
+        state: "blocked",
+        failure_code: "managed_search_indexing_timeout",
+      },
+      {
+        raw_key: unpollable.raw.key,
+        state: "blocked",
+        failure_code: "managed_search_indexing_timeout",
+      },
+    ]);
+  });
+
   it("postfilters out-of-scope current-policy rows before source reads and coverage even if the provider returns them", async () => {
     const outside = await source("outside", "Outside the approved source set", canonical(1));
     const remote = provider();
@@ -759,5 +917,142 @@ describe("optional managed body corpus and semantic retrieval", () => {
     expect(result.coverage.documents).toEqual([]);
     expect(result.coverage.omitted_candidates).toBe(1);
     expect(reads).toEqual([]);
+  });
+
+  it("uploads, serves and counts only an extraction of the original the catalog holds now", async () => {
+    const originals: Awaited<ReturnType<typeof source>>[] = [];
+    for (const id of ["missing", "changed", "blocked", "current"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Four synthetic messages with one converted part each.
+      const original = await source(
+        id,
+        `Stale needle ${id} body.`,
+        canonical(originals.length + 1),
+      );
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Stale needle ${id} attachment.`);
+      originals.push(original);
+    }
+    const remote = provider(),
+      context = runtime(remote.binding, { maxUploads: 20 }),
+      now = Date.now();
+    for (let round = 0; round < 4; round++)
+      // oxlint-disable-next-line no-await-in-loop -- The bounded two-part worker needs four upload/poll rounds for eight parts.
+      await ready(context, now + round * 600002);
+    expect(remote.upload).toHaveBeenCalledTimes(8);
+    await env.MAIL_CATALOG.batch(
+      (["missing", "changed", "blocked"] as const).map((kind, index) =>
+        env.MAIL_CATALOG.prepare(staleUpdates[kind]).bind(originals[index]!.raw.key),
+      ),
+    );
+    const result = await searchManagedMail(
+      context,
+      reader,
+      { query: "stale needle", mode: "hybrid" },
+      base,
+    );
+    expect(result.matches.map((match) => [match.message_id, match.citation.part])).toEqual([
+      ["mail_current", "body"],
+      ["mail_current", "part_0"],
+    ]);
+    expect(result.coverage).toMatchObject({
+      documents: [{ state: "ready", count: 2 }],
+      omitted_candidates: 6,
+    });
+    const calls = (
+      await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls ORDER BY call_id").all()
+    ).results;
+    const current = [
+      { raw_key: originals[3]!.raw.key, part: "body", state: "ready" },
+      { raw_key: originals[3]!.raw.key, part: "part_0", state: "ready" },
+    ];
+    // Cleanup and discovery select the same sources: stale rows go once and are never rediscovered.
+    for (let round = 4; round < 7; round++) {
+      // oxlint-disable-next-line no-await-in-loop -- Repeated repairs must reach a fixed point.
+      await ready(context, now + round * 600002);
+      expect(
+        // oxlint-disable-next-line no-await-in-loop -- Checked after each repair.
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key,part,state FROM managed_mail_documents ORDER BY raw_key,part",
+        ).all(),
+      ).toMatchObject({ results: current });
+    }
+    expect(remote.upload).toHaveBeenCalledTimes(8);
+    // Remote copies and their upload identities stay; removing them needs a reviewed decision.
+    expect(remote.items.size).toBe(8);
+    expect(
+      (await env.MAIL_CATALOG.prepare("SELECT * FROM managed_mail_calls ORDER BY call_id").all())
+        .results,
+    ).toEqual(calls);
+  });
+  it("never uploads or projects an extraction whose original went missing, changed or was blocked", async () => {
+    for (const [index, kind] of (["missing", "changed", "blocked"] as const).entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
+      const original = await source(kind, `Never ${kind} body.`, canonical(index + 1));
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Never ${kind} attachment.`);
+      // oxlint-disable-next-line no-await-in-loop -- The original goes stale before the first repair.
+      await env.MAIL_CATALOG.prepare(staleUpdates[kind]).bind(original.raw.key).run();
+    }
+    const remote = provider();
+    await ready(runtime(remote.binding));
+    expect(remote.upload).not.toHaveBeenCalled();
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS count FROM managed_mail_documents",
+      ).first(),
+    ).toEqual({ count: 0 });
+  });
+  it("projects no part when the original goes stale between discovery and the projection write", async () => {
+    const kinds = ["missing", "changed", "blocked"] as const;
+    const originals: Awaited<ReturnType<typeof source>>[] = [];
+    for (const kind of kinds) {
+      // oxlint-disable-next-line no-await-in-loop -- Three synthetic messages with one converted part each.
+      const original = await source(kind, `Race ${kind} body.`, canonical(originals.length + 1));
+      // oxlint-disable-next-line no-await-in-loop -- Fixture metadata and bytes only; no provider calls.
+      await convertedPart(original, `Race ${kind} attachment.`);
+      originals.push(original);
+    }
+    const catalog = env.MAIL_CATALOG;
+    let fired = false,
+      selected = 0;
+    // The originals go stale right after discovery selected them, before their parts are read and written.
+    const racing = new Proxy(catalog, {
+      get(target, property) {
+        if (property !== "prepare") return Reflect.get(target, property, target) as unknown;
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (
+            fired ||
+            !sql.startsWith("SELECT e.raw_key,e.manifest_key,e.raw_sha256,e.body_text_key")
+          )
+            return statement;
+          return {
+            bind: (...values: unknown[]) => ({
+              all: async () => {
+                const rows = await statement.bind(...values).all();
+                fired = true;
+                selected = rows.results.length;
+                await catalog.batch(
+                  kinds.map((kind, index) =>
+                    catalog.prepare(staleUpdates[kind]).bind(originals[index]!.raw.key),
+                  ),
+                );
+                return rows;
+              },
+            }),
+          };
+        };
+      },
+    });
+    const remote = provider();
+    await repairManagedMailCorpus({ ...runtime(remote.binding), MAIL_CATALOG: racing });
+    expect(fired).toBe(true);
+    // Discovery did select all three sources while they were still current.
+    expect(selected).toBe(3);
+    expect(remote.upload).not.toHaveBeenCalled();
+    expect(
+      (await env.MAIL_CATALOG.prepare("SELECT raw_key,part FROM managed_mail_documents").all())
+        .results,
+    ).toEqual([]);
   });
 });

@@ -1,5 +1,7 @@
 import { readVerified } from "./attachment-conversion-io.ts";
+import { CURRENT_EXTRACTION_SQL } from "./mail-read.ts";
 import { MIME_LIMITS } from "./mime-extraction.ts";
+import { truncateCodeUnits } from "./utf16.ts";
 
 /**
  * Gmail-style reply quoting and forward blocks, composed from the archived parent.
@@ -260,19 +262,25 @@ function bytes(part: ComposedPart): number {
   return encoder.encode((part.text ?? "") + (part.html ?? "")).byteLength;
 }
 
+/**
+ * The parent as its current extraction describes it, or null when no current extraction
+ * exists: a blocked one, or one whose original has gone missing or changed since.
+ */
 export async function loadParent(
   db: Pick<D1Database, "prepare">,
   bucket: R2Bucket,
   rawKey: string,
   includeBody = true,
-): Promise<ParentMail> {
+): Promise<ParentMail | null> {
   const row = await db
     .prepare(
-      "SELECT metadata_json, attachments_json, body_json_key FROM mail_extractions WHERE raw_key = ? AND extractor_version = 'mime-v1' AND status = 'complete'",
+      `SELECT e.metadata_json, e.attachments_json, e.body_json_key FROM mail_extractions e
+      JOIN archive_sources s ON s.raw_key = e.raw_key
+      WHERE e.raw_key = ? AND e.extractor_version = 'mime-v1' AND ${CURRENT_EXTRACTION_SQL}`,
     )
     .bind(rawKey)
     .first<{ metadata_json: string; attachments_json: string; body_json_key: string }>();
-  if (!row) throw new ComposeError("original_unavailable");
+  if (!row) return null;
   // Extraction derivatives are content-addressed: the key ends with the SHA-256.
   const digest = row.body_json_key.slice(row.body_json_key.lastIndexOf("/") + 1);
   if (includeBody && !digestPattern.test(digest)) throw new ComposeError("original_unavailable");
@@ -369,15 +377,11 @@ export function composeReply(
 ): ComposedPart {
   // Nothing to quote: Gmail's attribution over an empty quote adds nothing.
   if (!parent.text.trim()) return author;
-  const source = parent.text.slice(0, limit);
+  const source = truncateCodeUnits(parent.text, limit);
   const full = quotedReply(author, parent, source);
   if (source.length === parent.text.length && bytes(full) <= limit) return full;
-  const cut = (length: number) => {
-    let end = length;
-    const code = source.charCodeAt(end - 1);
-    if (end > 0 && code >= 0xd800 && code <= 0xdbff) end--;
-    return quotedReply(author, parent, `${source.slice(0, end)}\n${QUOTE_TRUNCATED}`);
-  };
+  const cut = (length: number) =>
+    quotedReply(author, parent, `${truncateCodeUnits(source, length)}\n${QUOTE_TRUNCATED}`);
   if (bytes(cut(0)) > limit) throw new ComposeError("invalid_body");
   let low = 0;
   let high = source.length;

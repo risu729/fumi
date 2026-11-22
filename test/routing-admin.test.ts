@@ -94,6 +94,7 @@ describe("authenticated routing controls", () => {
   it("connects unresolved classification to a disabled-by-default policy", async () => {
     const source = {
       rawKey: "synthetic",
+      messageId: "mail_synthetic",
       rawSha256: "a".repeat(64),
       manifestKey: "synthetic",
       extractionUpdatedAt: 1,

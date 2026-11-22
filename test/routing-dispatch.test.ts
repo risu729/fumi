@@ -222,12 +222,107 @@ async function rows() {
       target_id: string;
       generation: number;
       attempts: number;
+      revision: number;
       failure_code: string | null;
     }>()
   ).results;
 }
 async function advance() {
   clock += 100_000;
+}
+const signingSecret = `whsec_${btoa(String.fromCharCode(...new Uint8Array(32).fill(7)))}`;
+const otherSigningSecret = `whsec_${btoa(String.fromCharCode(...new Uint8Array(32).fill(9)))}`;
+function webhookAdapter(url: string, authRef = "synthetic") {
+  return { kind: "webhook" as const, url, authRef, timeoutMs: 1000 };
+}
+function webhookRuntime(
+  auth: Record<string, string>,
+  handle: (request: globalThis.Request) => Promise<Response>,
+): RoutingDispatchRuntime {
+  return {
+    ...runtime({}),
+    transport: {
+      auth,
+      fetch: async (input, init) =>
+        handle(input instanceof globalThis.Request ? input : new globalThis.Request(input, init)),
+    },
+  };
+}
+/** Independent Standard Webhooks verification of one captured request. */
+async function verifiedWebhook(request: globalThis.Request, secret: string, id: string) {
+  expect(request.headers.get("webhook-id")).toBe(id);
+  const timestamp = request.headers.get("webhook-timestamp")!;
+  const body = await request.clone().text();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    Uint8Array.from(atob(secret.slice(6)), (character) => character.charCodeAt(0)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = btoa(
+    String.fromCharCode(
+      ...new Uint8Array(
+        await crypto.subtle.sign(
+          "HMAC",
+          key,
+          new TextEncoder().encode(`${id}.${timestamp}.${body}`),
+        ),
+      ),
+    ),
+  );
+  expect(request.headers.get("webhook-signature")).toBe(`v1,${expected}`);
+  return body;
+}
+
+// Run `inject` once, just before (or with `after`, just after) the first statement
+// whose SQL starts with `prefix` runs, to model a concurrent worker's write.
+function raceOnce(prefix: string, inject: () => Promise<unknown>, after = false) {
+  let raced = false;
+  const session = (inner: D1DatabaseSession) =>
+    new Proxy(inner, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (raced || !sql.startsWith(prefix)) return statement;
+          raced = true;
+          return {
+            bind: (...values: unknown[]) => {
+              const bound = statement.bind(...values);
+              return {
+                run: async () => {
+                  if (!after) await inject();
+                  const result = await bound.run();
+                  if (after) await inject();
+                  return result;
+                },
+              };
+            },
+          };
+        };
+      },
+    });
+  const catalog = new Proxy(env.MAIL_CATALOG, {
+    get(target, property) {
+      if (property === "withSession")
+        return (constraint?: D1SessionConstraint) => session(target.withSession(constraint));
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { catalog, raced: () => raced };
+}
+async function insertRow(row: Record<string, unknown>) {
+  const columns = Object.keys(row);
+  await env.MAIL_CATALOG.prepare(
+    `INSERT INTO routing_dispatch_outbox(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`,
+  )
+    .bind(...columns.map((column) => row[column]))
+    .run();
 }
 
 beforeAll(async () => applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS));
@@ -460,6 +555,7 @@ describe("durable routing dispatch in workerd", () => {
     const request = destination.requests[0]!;
     expect(request.operationId).toBe(await routingOperationId(item.rawKey, "action"));
     expect(request.input).toEqual({ subject: "合成の確認" });
+    expect(request.messageId).toBeUndefined();
     expect(JSON.stringify(request)).not.toContain(item.rawKey);
     expect(request.classification).toMatchObject({
       outcome: "review",
@@ -569,81 +665,242 @@ describe("durable routing dispatch in workerd", () => {
     await configure(config);
     await expect(loadDispatchConfiguration(env.MAIL_ARCHIVE)).rejects.toThrow();
   });
-  it("records ordinary webhook HTTP acceptance once without claiming provider delivery", async () => {
+  it("signs one accepted webhook with identifiers and classification only", async () => {
     const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://notification.example.com/notify",
-      authRef: "synthetic",
-      timeoutMs: 1000,
-    };
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
     await configure(config);
     await source();
-    let calls = 0;
-    const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth: { synthetic: "synthetic-webhook-auth-0000000" },
-        fetch: async () => {
-          calls++;
-          return new Response(null, { status: 202 });
-        },
-      },
-    };
-    await repairRoutingDispatch(env, run);
-    await advance();
-    await repairRoutingDispatch(env, run);
-    expect(calls).toBe(1);
-    expect((await rows())[0]).toMatchObject({
-      state: "accepted",
-      failure_code: "http_acceptance_only",
+    const sent: globalThis.Request[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      sent.push(request);
+      return new Response(null, { status: 202 });
     });
-  });
-  it("holds generic webhook ambiguity without reoffer or invented status polling", async () => {
-    const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://notification.example.com/notify",
-      authRef: "synthetic",
-      timeoutMs: 1000,
-    };
-    await configure(config);
-    await source();
-    let calls = 0;
-    const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth: { synthetic: "synthetic-webhook-auth-0000000" },
-        fetch: async () => {
-          calls++;
-          throw new Error("Synthetic lost response");
-        },
-      },
-    };
     await repairRoutingDispatch(env, run);
     await advance();
+    await repairRoutingDispatch(env, run);
+    expect(sent).toHaveLength(1);
+    const row = (await rows())[0]!;
+    expect(row).toMatchObject({ state: "accepted", failure_code: "http_acceptance_only" });
+    const body = await verifiedWebhook(sent[0]!, signingSecret, row.operation_id);
+    expect(body).toBe(row.payload_json);
+    const payload = JSON.parse(body) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      kind: "notification",
+      messageId: "mail_synthetic-0001",
+      input: {},
+    });
+    expect(body).not.toContain("合成");
+    expect(sent[0]!.headers.get("Authorization")).toBeNull();
+  });
+  it("resends a failed webhook with the same id and body until accepted", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const sent: globalThis.Request[] = [];
+    let status = 503;
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      sent.push(request);
+      if (status === 0) throw new Error("Synthetic lost response");
+      return new Response(null, { status });
+    });
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({
+      state: "retry",
+      attempts: 1,
+      failure_code: "webhook_not_accepted",
+    });
+    status = 0;
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({ state: "retry", attempts: 2 });
+    status = 200;
+    clock += 300_000;
     await repairRoutingDispatch(env, run);
     const row = (await rows())[0]!;
-    expect(calls).toBe(1);
-    expect(row.state).toBe("uncertain");
-    await expect(
-      recordRoutingDispatchReceipt(env.MAIL_CATALOG, {
-        schemaVersion: 1,
-        operationId: row.operation_id,
-        requestSha256: row.request_sha256,
-        result: "not_found",
-      }),
-    ).rejects.toThrow();
-    await recordRoutingDispatchReceipt(env.MAIL_CATALOG, {
-      schemaVersion: 1,
-      operationId: row.operation_id,
-      requestSha256: row.request_sha256,
-      result: "handled",
+    expect(row).toMatchObject({ state: "accepted", attempts: 3 });
+    expect(sent).toHaveLength(3);
+    const bodies = await Promise.all(
+      sent.map((request) => verifiedWebhook(request, signingSecret, row.operation_id)),
+    );
+    expect(new Set(bodies)).toEqual(new Set([row.payload_json]));
+  });
+  it("ends an unaccepted webhook dead after the attempt budget", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: signingSecret }, async () => {
+      calls++;
+      return new Response(null, { status: 500 });
     });
+    for (let index = 0; index < 7; index++) {
+      // oxlint-disable-next-line no-await-in-loop -- Sequential repairs model successive cron runs.
+      await repairRoutingDispatch(env, run);
+      clock += 3_700_000;
+    }
+    expect(calls).toBe(5);
     expect((await rows())[0]).toMatchObject({
-      state: "accepted",
-      failure_code: "http_acceptance_only",
+      state: "dead",
+      attempts: 5,
+      failure_code: "retry_exhausted",
     });
+  });
+  it("retries an interrupted webhook attempt instead of holding it uncertain", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let accept = false;
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: signingSecret }, async () => {
+      calls++;
+      return new Response(null, { status: accept ? 204 : 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE routing_dispatch_outbox SET state='sending',lease_token='lost',lease_until=1 WHERE state='retry'",
+    ).run();
+    accept = true;
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(calls).toBe(2);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", attempts: 2 });
+  });
+  it("keeps an attempted webhook on its destination across a rule revision", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    let status = 500;
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status });
+    });
+    await repairRoutingDispatch(env, run);
+    config.revision = 2;
+    await configure(config);
+    status = 200;
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["notification.example.com", "notification.example.com"]);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", attempts: 2 });
+  });
+  it("never re-targets an attempted webhook to a new destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["old.example.com"]);
+    expect((await rows())[0]).toMatchObject({
+      state: "dead",
+      failure_code: "destination_changed",
+    });
+  });
+  it("ends an attempted webhook that reaches retry after a newer generation activated", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 500 });
+    });
+    await repairRoutingDispatch(env, run);
+    // Model the race: the observation that activates generation 2 does not see the
+    // row as retry, and the old attempt's result lands as retry afterwards.
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='accepted'").run();
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    await repairRoutingDispatch(env, run);
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT generation FROM routing_dispatch_control").first(),
+    ).toEqual({ generation: 2 });
+    await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_outbox SET state='retry'").run();
+    clock += 600_000;
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["old.example.com"]);
+    expect((await rows())[0]).toMatchObject({
+      state: "dead",
+      generation: 1,
+      failure_code: "destination_changed",
+    });
+  });
+  it("rebuilds a never-attempted webhook row for a new destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://old.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    const hosts: string[] = [];
+    const run = webhookRuntime({ synthetic: signingSecret }, async (request) => {
+      hosts.push(new URL(request.url).host);
+      return new Response(null, { status: 202 });
+    });
+    let gate = false;
+    run.gateNotification = async () =>
+      gate
+        ? { outcome: "allow", evidenceCode: "synthetic_allow" }
+        : { outcome: "hold", evidenceCode: "synthetic_hold" };
+    await repairRoutingDispatch(env, run);
+    expect((await rows())[0]).toMatchObject({ state: "ready", attempts: 0 });
+    config.revision = 2;
+    config.generation = 2;
+    config.destination.adapter = webhookAdapter("https://new.example.com/notify");
+    await configure(config);
+    gate = true;
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(hosts).toEqual(["new.example.com"]);
+    expect((await rows())[0]).toMatchObject({ state: "accepted", generation: 2 });
+  });
+  it("rejects mail field grants on a generic webhook destination", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = ["subject"];
+    await configure(config);
+    await expect(loadDispatchConfiguration(env.MAIL_ARCHIVE)).rejects.toThrow();
+  });
+  it("holds a webhook whose secret is not a whsec signing secret", async () => {
+    const config = artifact();
+    config.destination.adapter = webhookAdapter("https://notification.example.com/notify");
+    config.destination.offerFields = [];
+    await configure(config);
+    await source();
+    let calls = 0;
+    const run = webhookRuntime({ synthetic: "synthetic-webhook-auth-0000000" }, async () => {
+      calls++;
+      return new Response(null, { status: 202 });
+    });
+    await repairRoutingDispatch(env, run);
+    expect(calls).toBe(0);
+    expect(await rows()).toHaveLength(0);
   });
   it("cannot reconcile old-endpoint uncertainty through a replaced credential reference", async () => {
     const config = artifact();
@@ -694,35 +951,25 @@ describe("durable routing dispatch in workerd", () => {
   });
   it("keeps an immutable per-invocation credential snapshot across asynchronous gates", async () => {
     const config = artifact();
-    config.destination.adapter = {
-      kind: "webhook",
-      url: "https://adapter.example.com/notify",
-      authRef: "active",
-      timeoutMs: 1000,
-    };
+    config.destination.adapter = webhookAdapter("https://adapter.example.com/notify", "active");
+    config.destination.offerFields = [];
     await configure(config);
     await source();
-    const original = "synthetic-original-account-secret-0000";
-    const auth: Record<string, string> = { active: original };
-    let authorization: string | null = null;
+    const auth: Record<string, string> = { active: signingSecret };
+    let sent: globalThis.Request | undefined;
     const run: RoutingDispatchRuntime = {
-      ...runtime({}),
-      transport: {
-        auth,
-        fetch: async (input, init) => {
-          const request =
-            input instanceof globalThis.Request ? input : new globalThis.Request(input, init);
-          authorization = request.headers.get("Authorization");
-          return new Response(null, { status: 202 });
-        },
-      },
+      ...webhookRuntime(auth, async (request) => {
+        sent = request;
+        return new Response(null, { status: 202 });
+      }),
       gateNotification: async () => {
-        auth["active"] = "synthetic-replacement-account-secret-1111";
+        auth["active"] = otherSigningSecret;
         return { outcome: "allow", evidenceCode: "synthetic_allowed" };
       },
     };
     await repairRoutingDispatch(env, run);
-    expect(authorization).toBe(`Bearer ${original}`);
+    const row = (await rows())[0]!;
+    await verifiedWebhook(sent!, signingSecret, row.operation_id);
   });
   it("reconciles with a retained old-endpoint credential before activating a distinct new endpoint", async () => {
     const config = artifact();
@@ -888,9 +1135,16 @@ describe("durable routing dispatch in workerd", () => {
     await advance();
     expect((await repairRoutingDispatch(env, run)).status).toBe("draining");
     expect(second.requests).toHaveLength(0);
+    const control = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation,accepting FROM routing_dispatch_control WHERE id=1",
+      ).first();
+    // The old revision stops accepting claims while the handoff drains.
+    expect(await control()).toEqual({ revision: 1, generation: 1, accepting: 0 });
     first.setStatus("handled");
     await advance();
     await repairRoutingDispatch(env, run);
+    expect(await control()).toEqual({ revision: 2, generation: 2, accepting: 1 });
     expect(first.requests).toHaveLength(1);
     expect(second.requests).toHaveLength(1);
     expect(second.requests[0]?.attempt.generation).toBe(2);
@@ -945,6 +1199,104 @@ describe("durable routing dispatch in workerd", () => {
     config.revision = 1;
     await configure(config);
     expect((await repairRoutingDispatch(env)).status).toBe("stale");
+  });
+  it("cannot activate a same-generation destination change after a concurrent activation", async () => {
+    await configure(artifact());
+    await repairRoutingDispatch(env);
+    const first = artifact();
+    first.revision = 2;
+    first.generation = 2;
+    first.destination.id = "active-b";
+    const second = artifact();
+    second.revision = 3;
+    second.generation = 2;
+    second.destination.id = "active-c";
+    await configure(second);
+    let interleaved = false;
+    // Hold this worker's activation statement until another worker, which read
+    // the artifact with revision 2, has activated it.
+    const session = env.MAIL_CATALOG.withSession("first-primary");
+    const catalog = {
+      withSession: () => ({
+        batch: session.batch.bind(session),
+        prepare(query: string) {
+          const statement = session.prepare(query);
+          if (!query.startsWith("UPDATE routing_dispatch_control SET revision=")) return statement;
+          return {
+            bind: (...values: unknown[]) => ({
+              async run() {
+                if (!interleaved) {
+                  interleaved = true;
+                  await configure(first);
+                  expect(await activateRoutingDispatch(env)).toBe("active");
+                }
+                return statement.bind(...values).run();
+              },
+            }),
+          };
+        },
+      }),
+    } as unknown as D1Database;
+    expect(
+      (await repairRoutingDispatch({ MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: catalog }))
+        .status,
+    ).toBe("stale");
+    expect(interleaved).toBe(true);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation FROM routing_dispatch_control WHERE id=1",
+      ).first(),
+    ).toEqual({ revision: 2, generation: 2 });
+  });
+  it("leaves acceptance open when a concurrent worker activated first", async () => {
+    await configure(artifact());
+    await repairRoutingDispatch(env);
+    let interleaved = false;
+    // Hold this worker's pre-activation batch until another worker, which read
+    // `winner`, has activated it; this worker still holds `stored`.
+    const race = async (winner: Artifact, stored: Artifact) => {
+      interleaved = false;
+      const session = env.MAIL_CATALOG.withSession("first-primary");
+      const catalog = {
+        withSession: () => ({
+          prepare: session.prepare.bind(session),
+          async batch(statements: D1PreparedStatement[]) {
+            if (!interleaved) {
+              interleaved = true;
+              await configure(winner);
+              expect(await activateRoutingDispatch(env)).toBe("active");
+              await configure(stored);
+            }
+            return session.batch(statements);
+          },
+        }),
+      } as unknown as D1Database;
+      await configure(stored);
+      const { status } = await repairRoutingDispatch({
+        MAIL_ARCHIVE: env.MAIL_ARCHIVE,
+        MAIL_CATALOG: catalog,
+      });
+      expect(interleaved).toBe(true);
+      return status;
+    };
+    const control = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT revision,generation,accepting FROM routing_dispatch_control WHERE id=1",
+      ).first();
+    const same = artifact();
+    same.revision = 2;
+    expect(await race(same, same)).not.toBe("draining");
+    expect(await control()).toEqual({ revision: 2, generation: 1, accepting: 1 });
+    const winner = artifact();
+    winner.revision = 3;
+    winner.generation = 2;
+    winner.destination.id = "active-b";
+    const loser = artifact();
+    loser.revision = 4;
+    loser.generation = 2;
+    loser.destination.id = "active-c";
+    expect(await race(winner, loser)).toBe("stale");
+    expect(await control()).toEqual({ revision: 3, generation: 2, accepting: 1 });
   });
   it("revocation during asynchronous gating prevents the pending notification", async () => {
     const config = artifact();
@@ -1064,6 +1416,37 @@ describe("durable routing dispatch in workerd", () => {
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(["handled", "rejected"]).toContain((await rows())[0]?.state);
   });
+  it("records a re-extracted invalid source against its new extraction and backs off", async () => {
+    await configure(artifact());
+    const { rawKey } = await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_extractions SET metadata_json='{',updated_at=2 WHERE raw_key=?",
+    )
+      .bind(rawKey)
+      .run();
+    const job = async () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT source_sha256,extraction_updated_at,revision,state,failure_code,updated_at FROM routing_dispatch_jobs",
+      ).first();
+    await repairRoutingDispatch(env, run);
+    const held = {
+      source_sha256: rawSha,
+      extraction_updated_at: 2,
+      revision: 1,
+      state: "held",
+      failure_code: "invalid_source",
+      updated_at: clock,
+    };
+    expect(await job()).toEqual(held);
+    clock += 1000;
+    await repairRoutingDispatch(env, run);
+    expect(await job()).toEqual(held);
+    expect(destination.requests).toHaveLength(1);
+  });
   it("bounds work and lets malformed metadata yield to later sources", async () => {
     await configure(artifact());
     await source(1, { invalidMetadata: true });
@@ -1113,6 +1496,231 @@ describe("durable routing dispatch in workerd", () => {
     delete run.gateNotification;
     await repairRoutingDispatch(env, run);
     expect(destination.requests).toHaveLength(0);
+  });
+  it("rebuilds a never-attempted notification after its classification changes", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    let category = "billing";
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category,
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    let gate: "hold" | "allow" = "hold";
+    run.gateNotification = async () => ({ outcome: gate, evidenceCode: "synthetic_gate" });
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    // A later policy revision reclassifies the unsent mail before the gate allows it.
+    category = "finance";
+    gate = "allow";
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect(destination.requests[0]?.classification).toMatchObject({ category: "finance" });
+    expect((await rows())[0]?.state).toBe("handled");
+  });
+  it("claims only the exact payload it read when another worker rebuilds the row", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category: "billing",
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    let rebuilt = false;
+    run.gateNotification = async () => {
+      if (!rebuilt) {
+        // A worker whose source lease expired classifies differently and rebuilds
+        // the never-attempted row between this worker's read and its claim.
+        rebuilt = true;
+        const [row] = await rows();
+        const body = JSON.parse(row!.payload_json) as { classification: { category: string } };
+        body.classification.category = "finance";
+        const json = canonicalOfferJson(body);
+        await env.MAIL_CATALOG.prepare(
+          "UPDATE routing_dispatch_outbox SET payload_json=?,request_sha256=? WHERE operation_id=?",
+        )
+          .bind(json, await dispatchDigest(json), row!.operation_id)
+          .run();
+      }
+      return { outcome: "allow", evidenceCode: "synthetic_gate" };
+    };
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect(destination.requests[0]?.classification).toMatchObject({ category: "billing" });
+    const [row] = await rows();
+    expect(row?.state).toBe("handled");
+    expect(row?.request_sha256).toBe(destination.requests[0]?.requestSha256);
+  });
+  it("holds a notification whose insert lost to another worker's differently classified row", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    let category = "billing";
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category,
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    let gate: "hold" | "allow" = "hold";
+    run.gateNotification = async () => ({ outcome: gate, evidenceCode: "synthetic_gate" });
+    // Record the row a worker with the older "billing" classification writes.
+    await repairRoutingDispatch(env, run);
+    const [stale] = await env.MAIL_CATALOG.prepare("SELECT * FROM routing_dispatch_outbox")
+      .all<Record<string, unknown>>()
+      .then((result) => result.results);
+    await env.MAIL_CATALOG.prepare("DELETE FROM routing_dispatch_outbox").run();
+    // This worker classifies as "finance". Between its read (no row) and its insert,
+    // a worker whose source lease expired inserts the stale "billing" row.
+    category = "finance";
+    gate = "allow";
+    const race = raceOnce("INSERT OR IGNORE INTO routing_dispatch_outbox", () => insertRow(stale!));
+    await advance();
+    await repairRoutingDispatch(
+      { MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: race.catalog },
+      run,
+    );
+    expect(race.raced()).toBe(true);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    // The next pass rebuilds the never-attempted row from the current decision.
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect(destination.requests[0]?.classification).toMatchObject({ category: "finance" });
+    expect((await rows())[0]?.state).toBe("handled");
+  });
+  it("holds a row another worker reinserted after this worker deleted it for a rebuild", async () => {
+    const config = artifact();
+    await configure(config);
+    await source();
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    let gate: "hold" | "allow" = "hold";
+    run.gateNotification = async () => ({ outcome: gate, evidenceCode: "synthetic_gate" });
+    await repairRoutingDispatch(env, run);
+    const [stale] = await env.MAIL_CATALOG.prepare("SELECT * FROM routing_dispatch_outbox")
+      .all<Record<string, unknown>>()
+      .then((result) => result.results);
+    expect(stale?.["revision"]).toBe(1);
+    // Revision 2 makes the never-attempted row rebuild. Right after this worker deletes
+    // it, a worker still on revision 1 whose source lease expired inserts it again.
+    config.revision = 2;
+    await configure(config);
+    gate = "allow";
+    const race = raceOnce(
+      "DELETE FROM routing_dispatch_outbox WHERE operation_id=? AND attempts=0",
+      () => insertRow(stale!),
+      true,
+    );
+    await advance();
+    await repairRoutingDispatch(
+      { MAIL_ARCHIVE: env.MAIL_ARCHIVE, MAIL_CATALOG: race.catalog },
+      run,
+    );
+    expect(race.raced()).toBe(true);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts, row.revision])).toEqual([
+      ["ready", 0, 1],
+    ]);
+    // The next pass rebuilds the row under revision 2 and sends it.
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows()).map((row) => [row.state, row.revision])).toEqual([["handled", 2]]);
+  });
+  it("claims only the source identity it read when a rebuild keeps the same payload", async () => {
+    await configure(artifact());
+    await source();
+    const destination = service("retryable_error");
+    const run = runtime({ "active-a": destination.binding });
+    let rebuilt = false;
+    run.gateNotification = async () => {
+      if (!rebuilt) {
+        // A worker whose source lease expired read an older extraction of the same
+        // raw message. Its rebuild yields identical payload bytes but records the
+        // older extraction identity on the never-attempted row.
+        rebuilt = true;
+        await env.MAIL_CATALOG.prepare(
+          "UPDATE routing_dispatch_outbox SET extraction_updated_at=0",
+        ).run();
+      }
+      return { outcome: "allow", evidenceCode: "synthetic_gate" };
+    };
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(0);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["ready", 0]]);
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["retry", 1]]);
+    destination.setOffer("handled");
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(2);
+    expect(destination.requests[1]?.requestSha256).toBe(destination.requests[0]?.requestSha256);
+    expect((await rows())[0]?.state).toBe("handled");
+  });
+  it("keeps an attempted notification frozen when its classification changes", async () => {
+    const config = artifact();
+    config.routing.configJson = JSON.stringify({
+      schemaVersion: 1,
+      adoptions: [],
+      rules: [],
+      fallback: "unresolved",
+    });
+    await configure(config);
+    await source();
+    const destination = service("retryable_error");
+    const run = runtime({ "active-a": destination.binding });
+    let category = "billing";
+    run.resolveFallback = async () => ({
+      outcome: "review",
+      category,
+      urgent: false,
+      evidenceCode: "synthetic_classified",
+    });
+    await repairRoutingDispatch(env, run);
+    category = "finance";
+    destination.setOffer("handled");
+    await advance();
+    await repairRoutingDispatch(env, run);
+    expect(destination.requests).toHaveLength(1);
+    expect((await rows()).map((row) => [row.state, row.attempts])).toEqual([["retry", 1]]);
   });
   it.each([
     { category: "https://attacker.example.com/webhook" },

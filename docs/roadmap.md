@@ -171,9 +171,15 @@ establish production delivery.
       [owner status](plugins.md#kogane-implementation-and-adoption-status).
 - [x] Deterministic rules first, optional bounded Claude structured classification
       for unresolved cases, then one administrator-configured generic webhook.
-      Actual classifier credentials and webhook receiver are deferred. The Grok Bot
-      side builds its own webhook proxy that selects the active A/B account; fumi
-      sends to that one URL and does not select accounts (owner, 2026-11-12 22:50 UTC).
+      Actual classifier credentials and webhook receiver are deferred. A webhook
+      proxy selects the active Grok Bot A/B account; fumi sends to that one URL and
+      does not select accounts (owner, 2026-11-12 22:50 UTC). The proxy is built by
+      this project's agents (owner, 2026-11-20 17:13 UTC).
+- [x] Sign the generic webhook with Standard Webhooks, retry it with a stable
+      `webhook-id`, and send identifiers and classification only
+      ([ADR 0003](adr/0003-signed-notification-webhooks.md)).
+- [ ] Design and build the Grok Bot webhook proxy: signature check, `webhook-id`
+      deduplication and active-account forwarding.
 - [x] Fence the active generic destination by generation, drain old uncertainty
       before activation, and preserve stable operation identity across revisions.
 - [x] Implement authenticated dispatch, stable idempotency keys, an outbox,

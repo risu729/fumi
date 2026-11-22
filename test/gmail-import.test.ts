@@ -561,6 +561,111 @@ describe("bounded historical Gmail import", () => {
       ).first("imported_count"),
     ).toBe(0);
   });
+
+  it("reports only the items its own fenced checkpoint counted when another runner advances next", async () => {
+    await startGmailImport(env, "interleaved", scope);
+    const client = {
+      list: vi.fn(async (parameters: { pageToken?: string }) =>
+        parameters.pageToken === undefined
+          ? { messages: [{ id: "first0" }], nextPageToken: "page2" }
+          : { messages: [{ id: "second0" }] },
+      ),
+      getRaw: vi.fn(async (id: string) => message(id)),
+    };
+    const prepare = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    // Once the first runner's checkpoint has released its lease, a second runner
+    // claims and finishes the next page before the first runner builds its response.
+    let interleave: (() => Promise<unknown>) | undefined = () =>
+      runGmailImportPage(env, client, "interleaved", scope);
+    let other: unknown;
+    vi.spyOn(env.MAIL_CATALOG, "prepare").mockImplementation((sql: string) => {
+      const statement = prepare(sql);
+      if (!sql.includes("page_token=next_page_token")) return statement;
+      const bind = statement.bind.bind(statement);
+      statement.bind = (...values: unknown[]) => {
+        const bound = bind(...values);
+        for (const method of ["run", "first", "all"] as const) {
+          const original = bound[method].bind(bound) as (...args: unknown[]) => Promise<unknown>;
+          Object.assign(bound, {
+            [method]: async (...args: unknown[]) => {
+              const result = await original(...args);
+              const next = interleave;
+              interleave = undefined;
+              if (next) other = await next();
+              return result;
+            },
+          });
+        }
+        return bound;
+      };
+      return statement;
+    });
+    expect(await runGmailImportPage(env, client, "interleaved", scope)).toEqual({
+      status: "advanced",
+      imported: 1,
+    });
+    expect(other).toEqual({ status: "complete", imported: 1 });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT complete,imported_count,revision,lease_token FROM gmail_imports",
+      ).first(),
+    ).toEqual({ complete: 1, imported_count: 2, revision: 2, lease_token: null });
+  });
+
+  it("keeps the page outcome when releasing the lease fails, and the lease expires for replay", async () => {
+    const prepare = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    const release =
+      /^UPDATE gmail_imports SET lease_token=NULL,lease_until=0 WHERE import_id=\? AND lease_token=\?$/;
+    vi.spyOn(env.MAIL_CATALOG, "prepare").mockImplementation((sql: string) =>
+      release.test(sql)
+        ? ({
+            bind: () => ({
+              run: async () => {
+                throw new Error("Synthetic D1 failure with private detail");
+              },
+            }),
+          } as unknown as D1PreparedStatement)
+        : prepare(sql),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let failRaw = true;
+    const client = {
+      list: vi.fn(async () => ({ messages: [{ id: "release0" }] })),
+      getRaw: vi.fn(async (id: string) => {
+        if (failRaw) throw new GmailImportError("gmail_http_404");
+        return message(id);
+      }),
+    };
+    await startGmailImport(env, "release-failure", scope);
+    await expect(runGmailImportPage(env, client, "release-failure", scope)).rejects.toMatchObject({
+      code: "gmail_http_404",
+    });
+    expect(log).toHaveBeenCalledWith(
+      JSON.stringify({ event: "gmail_import_lease_release", status: "failed" }),
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private detail");
+    // The unreleased lease fences replay until it expires on its own.
+    failRaw = false;
+    expect(await runGmailImportPage(env, client, "release-failure", scope)).toEqual({
+      status: "busy",
+      imported: 0,
+    });
+    expect(client.getRaw).toHaveBeenCalledTimes(1);
+    await env.MAIL_CATALOG.prepare("UPDATE gmail_imports SET lease_until=?")
+      .bind(Date.now() - 1)
+      .run();
+    // A checkpoint that already committed is reported as such, not as a failure.
+    expect(await runGmailImportPage(env, client, "release-failure", scope)).toEqual({
+      status: "complete",
+      imported: 1,
+    });
+    expect(client.list).toHaveBeenCalledTimes(1);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT complete,imported_count,pending_json,lease_token FROM gmail_imports",
+      ).first(),
+    ).toEqual({ complete: 1, imported_count: 1, pending_json: null, lease_token: null });
+  });
 });
 
 describe("trusted Gmail import operator handler", () => {
@@ -832,7 +937,7 @@ describe("read-only Gmail transport", () => {
     for (const [url, options] of request.mock.calls) {
       expect(new URL(String(url)).origin).toBe("https://gmail.googleapis.com");
       expect(options?.method).toBe("GET");
-      expect(options?.redirect).toBe("error");
+      expect(options?.redirect).toBe("manual");
     }
     expect(String(request.mock.calls[3]?.[0])).toContain("/me/messages/123?format=raw");
     expect(sleep).toHaveBeenCalledWith(1000);
@@ -843,6 +948,57 @@ describe("read-only Gmail transport", () => {
         accessToken: async () => "unused",
       }),
     ).toThrow("readonly_scope_required");
+  });
+  it("retries a response body that fails mid-stream like any transient network failure", async () => {
+    const body = JSON.stringify(message());
+    let broken = 1;
+    const request = vi.fn<typeof fetch>().mockImplementation(async (url) => {
+      if (String(url).endsWith("/profile"))
+        return new Response(JSON.stringify({ emailAddress: "synthetic@example.invalid" }));
+      const text = String(url).includes("format=raw") ? body : '{"messages":[{"id":"123"}]}';
+      const fail = broken-- > 0;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text.slice(0, 12)));
+            if (fail) controller.error(new Error("synthetic connection reset"));
+            else {
+              controller.enqueue(new TextEncoder().encode(text.slice(12)));
+              controller.close();
+            }
+          },
+        }),
+      );
+    });
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const client = createReadonlyGmailTransport({
+      scopes: [GMAIL_READONLY_SCOPE],
+      expectedAccountHash: await accountHash(),
+      accessToken: async () => "synthetic-token",
+      fetch: request,
+      sleep,
+    });
+    const value = (await client.getRaw("123")) as { id: string; rawBytes: Uint8Array };
+    expect(value.id).toBe("123");
+    expect(value.rawBytes).toEqual(raw);
+    // Profile, the interrupted raw read and its retry after the first backoff.
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledWith(1000);
+    broken = 1;
+    expect(await client.list({ q: "", maxResults: 10, includeSpamTrash: true })).toEqual({
+      messages: [{ id: "123" }],
+    });
+    expect(request).toHaveBeenCalledTimes(5);
+    // A body that keeps failing uses the same bounded budget and fixed code as fetch failures.
+    broken = Infinity;
+    await expect(client.getRaw("123")).rejects.toThrow("gmail_unavailable");
+    expect(request).toHaveBeenCalledTimes(9);
+    // Complete but malformed content is not a network failure and is never retried.
+    request.mockImplementationOnce(async () => new Response('{"messages":'));
+    await expect(client.list({ q: "", maxResults: 10, includeSpamTrash: true })).rejects.toThrow(
+      "gmail_invalid_response",
+    );
+    expect(request).toHaveBeenCalledTimes(10);
   });
   it("fails closed on auth, redirects and overlarge responses without provider prose", async () => {
     const request = vi
@@ -861,5 +1017,78 @@ describe("read-only Gmail transport", () => {
     await expect(client.list({ q: "", maxResults: 10, includeSpamTrash: true })).rejects.toThrow(
       "gmail_response_too_large",
     );
+  });
+  it("stops at once on a redirect without following it or retrying it as a network failure", async () => {
+    const redirected = vi.fn(async () => undefined);
+    const request = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      // The Workers runtime validates request options here, as its fetch does.
+      void new Request(url, init);
+      return new Response(new ReadableStream({ cancel: redirected }), {
+        status: 302,
+        headers: { Location: "https://redirect.example.invalid/" },
+      });
+    });
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const client = createReadonlyGmailTransport({
+      scopes: [GMAIL_READONLY_SCOPE],
+      expectedAccountHash: await accountHash(),
+      accessToken: async () => "synthetic-token",
+      fetch: request,
+      sleep,
+    });
+    await expect(client.getRaw("123")).rejects.toThrow("gmail_invalid_response");
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[1]?.redirect).toBe("manual");
+    expect(redirected).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalledWith(1000);
+    // A verified profile does not change how a later redirect is handled.
+    request.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ emailAddress: "synthetic@example.invalid" })),
+    );
+    await expect(client.list({ q: "", maxResults: 10, includeSpamTrash: true })).rejects.toThrow(
+      "gmail_invalid_response",
+    );
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(redirected).toHaveBeenCalledTimes(2);
+    expect(sleep).not.toHaveBeenCalledWith(1000);
+  });
+  it("keeps the HTTP status outcome when releasing a failed response body rejects", async () => {
+    // Cancelling this body rejects, as an already failed stream can.
+    const failing = (status: number) =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            throw new Error("Synthetic cancel failure");
+          },
+        }),
+        { status },
+      );
+    const request = vi.fn<typeof fetch>().mockImplementation(async () => failing(401));
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const client = createReadonlyGmailTransport({
+      scopes: [GMAIL_READONLY_SCOPE],
+      expectedAccountHash: await accountHash(),
+      accessToken: async () => "synthetic-token",
+      fetch: request,
+      sleep,
+    });
+    await expect(client.getRaw("123")).rejects.toThrow("gmail_http_401");
+    expect(request).toHaveBeenCalledTimes(1);
+    // A retryable status still retries, and a redirect still stops at once.
+    request
+      .mockImplementationOnce(async () => failing(503))
+      .mockImplementationOnce(
+        async () => new Response(JSON.stringify({ emailAddress: "synthetic@example.invalid" })),
+      )
+      .mockImplementationOnce(async () => failing(302));
+    await expect(client.getRaw("123")).rejects.toThrow("gmail_invalid_response");
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(sleep).toHaveBeenCalledWith(1000);
+    request.mockImplementationOnce(async () => failing(503));
+    request.mockImplementationOnce(async () => new Response('{"messages":[]}'));
+    expect(await client.list({ q: "", maxResults: 10, includeSpamTrash: true })).toEqual({
+      messages: [],
+    });
+    expect(request).toHaveBeenCalledTimes(6);
   });
 });

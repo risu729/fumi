@@ -55,6 +55,7 @@ function message(bytes = mime, rawSize = bytes.byteLength, chunkSize = 37) {
     raw,
     rawSize,
     headers: new Headers({ "X-Fumi-Ingest-ID": "untrusted-marker" }),
+    canBeForwarded: true,
     forward,
     setReject: vi.fn(),
     async reply(_message: EmailMessage | EmailReplyMessageBuilder): Promise<EmailSendResult> {
@@ -205,7 +206,7 @@ describe("archive and forward ingress in workerd", () => {
     await expect(worker.scheduled(createScheduledController(), env)).rejects.toThrow(
       "Archive reconciliation did not complete",
     );
-    expect(error).toHaveBeenCalledTimes(4);
+    expect(error).toHaveBeenCalledTimes(5);
     expect(error).toHaveBeenNthCalledWith(
       1,
       JSON.stringify({ event: "archive_reconcile", status: "failed" }),
@@ -220,6 +221,10 @@ describe("archive and forward ingress in workerd", () => {
     );
     expect(error).toHaveBeenNthCalledWith(
       4,
+      JSON.stringify({ event: "outbound_reconcile", status: "deferred" }),
+    );
+    expect(error).toHaveBeenNthCalledWith(
+      5,
       JSON.stringify({ event: "event_delivery", status: "deferred" }),
     );
   });

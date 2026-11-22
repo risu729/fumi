@@ -379,10 +379,13 @@ export async function runGmailImportPage(
       await drain().catch(() => undefined);
       throw error;
     }
+    // The fenced checkpoint also releases the lease, so the count this page added is
+    // read from that same statement: another runner may finish a page right after it.
     const done =
       await env.MAIL_CATALOG.prepare(`UPDATE gmail_imports SET page_token=next_page_token,
       pending_json=NULL,next_page_token=NULL,complete=?,imported_count=(SELECT COUNT(*) FROM gmail_import_items WHERE import_id=?),revision=revision+1,
-      lease_token=NULL,lease_until=0 WHERE import_id=? AND lease_token=? AND revision=? AND lease_until>?`)
+      lease_token=NULL,lease_until=0 WHERE import_id=? AND lease_token=? AND revision=? AND lease_until>?
+      RETURNING imported_count`)
         .bind(
           row.next_page_token === null ? 1 : 0,
           importId,
@@ -391,26 +394,25 @@ export async function runGmailImportPage(
           row.revision,
           Date.now(),
         )
-        .run();
-    if (!done.meta.changes) throw new GmailImportError("import_lease_lost");
-    const total = await env.MAIL_CATALOG.prepare(
-      "SELECT imported_count FROM gmail_imports WHERE import_id=?",
-    )
-      .bind(importId)
-      .first<number>("imported_count");
+        .first<number>("imported_count");
+    if (done === null) throw new GmailImportError("import_lease_lost");
     return {
       status: row.next_page_token === null ? "complete" : "advanced",
-      imported: (total ?? 0) - row.imported_count,
+      imported: done - row.imported_count,
     };
   } catch (error) {
     if (error instanceof GmailImportError) throw error;
     throw new GmailImportError("gmail_import_failed");
   } finally {
+    // A failed release keeps the page outcome; the fenced lease expires on its own.
     await env.MAIL_CATALOG.prepare(
       "UPDATE gmail_imports SET lease_token=NULL,lease_until=0 WHERE import_id=? AND lease_token=?",
     )
       .bind(importId, lease)
-      .run();
+      .run()
+      .catch(() =>
+        console.error(JSON.stringify({ event: "gmail_import_lease_release", status: "failed" })),
+      );
   }
 }
 
