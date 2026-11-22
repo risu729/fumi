@@ -2,7 +2,7 @@ import * as v from "valibot";
 import { readRoutingConfig, type RoutingConfig } from "./routing.ts";
 import { loadShadowConfiguration } from "./routing-shadow-runtime.ts";
 import { loadDispatchConfiguration } from "./routing-dispatch-config.ts";
-import { CURRENT_EXTRACTION_SQL, MailReadError } from "./mail-read.ts";
+import { MailReadError } from "./mail-read.ts";
 import { readRuleRevision, type RuleRevision } from "./routing-rule-changes.ts";
 
 /**
@@ -517,16 +517,19 @@ interface JobEvidence {
 /** `explain_routing`: stored evidence for one message, newest first. */
 export async function explainRouting(env: RoutingRulesEnvironment, messageId: string) {
   const db = env.MAIL_CATALOG;
-  // The same lookup, conflict rule and current-extraction rule as read_email. A
-  // decision is current only when it was made for this extraction and catalog state,
-  // the same fence the shadow repair uses to re-evaluate a row.
+  // The same lookup and conflict rule as read_email. A decision is current exactly
+  // when the shadow repair would not re-evaluate it: a complete extraction of a
+  // present raw object, and the same extraction and catalog state as the row. A
+  // replaced raw object is then current only as the repair's blocked source_changed
+  // row; a complete row always has matching extraction and catalog SHA-256s.
   const sources = (
     await db
       .prepare(`SELECT s.raw_key,s.external_id,s.received_at,s.source_kind,s.notify_events,
         s.raw_sha256 AS catalog_sha256,
         e.raw_sha256 AS extraction_sha256,e.updated_at AS extraction_updated_at
         FROM archive_sources s LEFT JOIN mail_extractions e
-        ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL}
+        ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1' AND e.status='complete'
+        AND s.raw_state='present'
         WHERE s.external_id=? LIMIT 2`)
       .bind(messageId.slice("mail_".length))
       .all<{
@@ -709,7 +712,7 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
     classifications,
     classifications_truncated: classificationRows.length > limit,
     rule_id_note:
-      "Live dispatch does not store the deciding rule ID. A rule ID is attributed to a dispatch decision only from a current shadow decision under the active configuration's SHA-256 while the job's revision is the active revision.",
+      "Live dispatch does not store the deciding rule ID. A rule ID is attributed to a dispatch decision only from a current shadow decision under the active configuration's SHA-256, evaluated on the same extraction as the job, while the job's revision is the active revision.",
   };
 }
 

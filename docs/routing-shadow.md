@@ -215,35 +215,37 @@ Classifier outcomes come from `routing_classifications.result_json`, grouped by
 state, outcome, category and evidence code, one row per message and policy. Dispatch
 states come from `routing_dispatch_jobs` and the outbox lanes.
 
-Bounds. Raw keys are `ingest/<UTC receipt day>/<id>/raw.eml` for live and imported
-mail, and every table read here has a primary-key or unique index that starts with
-`raw_key`. Each source is one descending range scan of that index from the window's
-first day, newest day first, with no sort. `window_days` is 1 to 90 (default 30) whole
-UTC days ending today. `max_decisions` caps the rows each scan returns at 1 to 2,000
-(default 2,000); one extra row is read to detect truncation. The decision scan also
-reads, and skips, the window's rows of other configurations and of imported mail,
-so the rows it reads grow with those, never past the window. Within one UTC day the
-index orders rows by ID, not by time. When `truncated` is true, the counts cover only
-the scanned rows, `oldest_scanned_received_at` says how far they reach (rows of that
-oldest day may be left out), and `unmatched_covers_window` is `false`: an unmatched
-rule then had no match among the scanned decisions, not necessarily in the whole
-window. A test checks `EXPLAIN QUERY PLAN` for every scan. No migration is needed.
+Bounds. Raw keys are `ingest/<UTC receipt day>/<id>/raw.eml` for live and imported mail,
+and every table read here has a primary-key or unique index that starts with `raw_key`.
+Each source is one descending range scan of that index from the window's first day,
+newest day first, with no sort. `window_days` is 1 to 90 (default 30) whole UTC days
+ending today. `max_decisions` caps the rows each scan returns at 1 to 2,000 (default
+2,000); one extra row is read to detect truncation. The decision scan also reads, and
+skips, the window's rows of other configurations and of historical and imported mail, so
+the rows it reads grow with those, never past the window. Within one UTC day the index
+orders rows by ID, not by time. When `truncated` is true, the counts cover only the
+scanned rows, `oldest_scanned_received_at` says how far they reach (rows of that oldest
+day may be left out), and `unmatched_covers_window` is `false`: an unmatched rule then
+had no match among the scanned decisions, not necessarily in the whole window. A test
+checks `EXPLAIN QUERY PLAN` for every scan. No migration is needed.
 
-Explanation. Live dispatch does not store which rule matched. `explain_routing`
-reports a dispatch decision as `rule` or `default` only when a current shadow
-decision exists under the active configuration's SHA-256, was evaluated on the same
-extraction as the dispatch job, and the job's revision is the active revision;
-otherwise a static-rule decision is
-`rule_or_default` with a `null` rule ID. A handled owner lane reports `plugin`, a
-`model_*` evidence code reports `classifier`, and other held states report
+Explanation. Live dispatch does not store which rule matched. `explain_routing` reports
+a dispatch decision as `rule` or `default` only when a current shadow decision exists
+under the active configuration's SHA-256, was evaluated on the same extraction as the
+dispatch job, and the job's revision is the active revision; otherwise a static-rule
+decision is `rule_or_default` with a `null` rule ID. A handled owner lane reports
+`plugin`, a `model_*` evidence code reports `classifier`, and other held states report
 `unresolved` with their fixed reason. Without a dispatch job, the current shadow
-decision is reported (`rule`, `default`, `plugin_offer`, `suppressed` or
-`blocked`). From an outbox payload only the symbolic classification is read, never
-granted mail input. The message lookup by ID is the same as `read_email`'s. A
-shadow decision is `current` only for the current extraction (`read_email`'s rule:
-the raw object is present and its SHA-256 matches the extraction) and the same
-catalog SHA-256, source kind and `notify_events` as the source, the fence the
-shadow repair uses to re-evaluate a row.
+decision is reported (`rule`, `default`, `plugin_offer`, `suppressed` or `blocked`).
+From an outbox payload only the symbolic classification is read, never granted mail
+input. The message lookup by ID is the same as `read_email`'s. A shadow decision is
+`current` exactly when the shadow repair would not re-evaluate it: the raw object is
+present, its `mime-v1` extraction is complete, and the row has that extraction's SHA-256
+and update time and the source's catalog SHA-256, source kind and `notify_events`. A
+complete decision is only written when the extraction's SHA-256 matches the catalog's,
+so a current complete decision meets `read_email`'s current-extraction rule. A replaced
+raw object is current only as the `blocked` decision with `source_changed` that the
+repair records for it.
 
 Trust boundary. Inputs are a closed configuration choice, bounded integers and a
 `mail_` ID. Mail content and model output cannot widen what is returned: stored
