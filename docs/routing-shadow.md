@@ -198,7 +198,13 @@ Configurations. "Candidate" is the shadow artifact `config/routing-shadow-v1.jso
 enabled and the `routing_dispatch_control` row has accepted its revision and digest.
 `configuration_sha256` is the router hash above, the key of
 `routing_shadow_decisions`. Each rule carries `compared_to_other` (`same`, `changed`
-or `only_here`) against the other current configuration.
+or `only_here`) against the other current configuration. Each configuration's
+`status` is `configured`, `absent`, `unreadable` or `unavailable`. `unreadable` means
+the stored artifact is invalid; a retry returns the same until an administrator
+replaces it. `unavailable` means storage failed: R2 could not be reached for the
+artifact, or D1 could not be read for the `routing_dispatch_control` row. A later retry
+may succeed. Neither returns rules or a SHA-256, and `routing_rule_usage` then counts
+nothing.
 
 History. R2 keeps only the current object under each fixed key and no table stores
 earlier rule sets, so when a rule was added or changed is not known. `added_at` and
@@ -213,6 +219,13 @@ messages' `received_at`. A message with no rule match counts as `default_matches
 blocked and non-shadow rows are listed under `not_evaluated`. Messages that the
 scheduled shadow pass has not evaluated yet are not counted, and the active
 configuration has rows only while the shadow artifact holds the same configuration.
+`not_yet_evaluated` counts the live messages of the window that have no decision
+under the selected configuration, at most 1,000 (1,000 means at least that many).
+These are messages the shadow repair has not reached yet, including all of them for
+an active configuration the shadow artifact does not hold, and messages that repair
+never evaluates because the raw object is not present or has no complete extraction.
+The repair evaluates the oldest raw keys first, so right after a new candidate is
+uploaded the most recent mail can lag for days.
 Classifier outcomes come from `routing_classifications.result_json`, grouped by
 state, outcome, category and evidence code, one row per message and policy. Dispatch
 states come from `routing_dispatch_jobs` and the outbox lanes.
@@ -228,8 +241,12 @@ the rows it reads grow with those, never past the window. Within one UTC day the
 orders rows by ID, not by time. When `truncated` is true, the counts cover only the
 scanned rows, `oldest_scanned_received_at` says how far they reach (rows of that oldest
 day may be left out), and `unmatched_covers_window` is `false`: an unmatched rule then
-had no match among the scanned decisions, not necessarily in the whole window. A test
-checks `EXPLAIN QUERY PLAN` for every scan. No migration is needed.
+had no match among the scanned decisions, not necessarily in the whole window.
+`unmatched_covers_window` is also `false` while `not_yet_evaluated` is above zero, since
+a message without a decision might match a rule. The `not_yet_evaluated` count is one
+more range scan of the `raw_key` index of `archive_sources` over the window, with a
+primary-key lookup of the decision per source, stopped after 1,000 sources without one.
+A test checks `EXPLAIN QUERY PLAN` for every scan. No migration is needed.
 
 Explanation. Live dispatch does not store which rule matched. `explain_routing` reports
 a dispatch decision as `rule` or `default` only when a current shadow decision exists
@@ -240,7 +257,11 @@ decision is `rule_or_default` with a `null` rule ID. A handled owner lane report
 `unresolved` with their fixed reason. Without a dispatch job, the current shadow
 decision is reported (`rule`, `default`, `plugin_offer`, `suppressed` or `blocked`).
 From an outbox payload only the symbolic classification is read, never granted mail
-input. The message lookup by ID is the same as `read_email`'s. A shadow decision is
+input. The decisions under the candidate's and the active configuration's SHA-256 are
+always returned, whatever number of later configurations a message was evaluated under,
+so attribution does not depend on how many configurations followed. At most 16 decisions
+of other configurations are added, newest first, and `shadow_truncated` is `true` when
+more exist. The message lookup by ID is the same as `read_email`'s. A shadow decision is
 `current` when the raw object is present, its `mime-v1` extraction is complete, and the
 row has that extraction's SHA-256 and update time and the source's catalog SHA-256,
 source kind and `notify_events`: the shadow repair re-evaluates a row of a present,

@@ -1,7 +1,13 @@
 import * as v from "valibot";
 import { readRoutingConfig, type RoutingConfig } from "./routing.ts";
-import { loadShadowConfiguration } from "./routing-shadow-runtime.ts";
-import { loadDispatchConfiguration } from "./routing-dispatch-config.ts";
+import {
+  loadShadowConfiguration,
+  ShadowConfigurationUnavailableError,
+} from "./routing-shadow-runtime.ts";
+import {
+  DispatchConfigurationUnavailableError,
+  loadDispatchConfiguration,
+} from "./routing-dispatch-config.ts";
 import { MailReadError } from "./mail-read.ts";
 
 /**
@@ -27,11 +33,14 @@ export const ROUTING_USAGE_LIMITS = {
   maxSamples: 10,
   defaultSamples: 3,
   explainRows: 16,
+  maxNotYetEvaluated: 1000,
 } as const;
 
 type Outcome = RoutingConfig["fallback"];
 interface RuleSet {
-  status: "configured" | "absent" | "unreadable";
+  /** `unavailable`: storage could not be read, so a retry may succeed. `unreadable`:
+   * the stored artifact is invalid. */
+  status: "configured" | "absent" | "unreadable" | "unavailable";
   configurationSha256: string | null;
   uploadedAt: string | null;
   config: RoutingConfig | null;
@@ -53,7 +62,8 @@ const empty = (status: RuleSet["status"]): RuleSet => ({
   config: null,
 });
 
-/** Read both private artifacts. Unreadable configuration is reported, never guessed. */
+/** Read both private artifacts. Unreadable or unavailable configuration is reported,
+ * never guessed. */
 export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise<RoutingRuleSets> {
   let candidate: RuleSet;
   try {
@@ -66,8 +76,10 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
           config: readRoutingConfig(loaded.artifact.configJson),
         }
       : empty("absent");
-  } catch {
-    candidate = empty("unreadable");
+  } catch (error) {
+    candidate = empty(
+      error instanceof ShadowConfigurationUnavailableError ? "unavailable" : "unreadable",
+    );
   }
   const inactive = { revision: null, generation: null, enabled: null, activated: null };
   let active: ActiveRuleSet;
@@ -75,14 +87,19 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
     const loaded = await loadDispatchConfiguration(env.MAIL_ARCHIVE);
     if (!loaded) active = { ...empty("absent"), ...inactive };
     else {
-      const control = await env.MAIL_CATALOG.prepare(
-        "SELECT revision,configuration_sha256,accepting,paused FROM routing_dispatch_control WHERE id=1",
-      ).first<{
-        revision: number;
-        configuration_sha256: string;
-        accepting: number;
-        paused: number;
-      }>();
+      let control;
+      try {
+        control = await env.MAIL_CATALOG.prepare(
+          "SELECT revision,configuration_sha256,accepting,paused FROM routing_dispatch_control WHERE id=1",
+        ).first<{
+          revision: number;
+          configuration_sha256: string;
+          accepting: number;
+          paused: number;
+        }>();
+      } catch {
+        throw new DispatchConfigurationUnavailableError();
+      }
       const artifact = loaded.artifact;
       active = {
         status: "configured",
@@ -100,8 +117,13 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
           control.paused === 0,
       };
     }
-  } catch {
-    active = { ...empty("unreadable"), ...inactive };
+  } catch (error) {
+    active = {
+      ...empty(
+        error instanceof DispatchConfigurationUnavailableError ? "unavailable" : "unreadable",
+      ),
+      ...inactive,
+    };
   }
   return { candidate, active };
 }
@@ -260,6 +282,13 @@ export const USAGE_SQL = {
     WHERE raw_key>=? AND raw_key<? ORDER BY raw_key DESC LIMIT ?`,
   offers: `SELECT lane,state FROM routing_dispatch_outbox
     WHERE raw_key>=? AND raw_key<? ORDER BY raw_key DESC LIMIT ?`,
+  // Live sources of the window that have no decision under the configuration yet.
+  // Unary + keeps the planner on the raw_key range, not the primary key's source_kind.
+  notYetEvaluated: `SELECT 1 FROM archive_sources s
+    WHERE s.raw_key>=? AND s.raw_key<? AND +s.source_kind='email_routing' AND s.notify_events=1
+    AND NOT EXISTS (SELECT 1 FROM routing_shadow_decisions d
+      WHERE d.raw_key=s.raw_key AND d.configuration_sha256=?)
+    LIMIT ?`,
 } as const;
 
 /** `routing_rule_usage`: bounded, indexed scans of the most recent decisions. */
@@ -275,7 +304,7 @@ export async function routingRuleUsage(
   const cap = input.max_decisions;
   const db = env.MAIL_CATALOG;
   // One extra row per scan detects truncation.
-  const [shadow, classifications, jobs, offers] = await Promise.all([
+  const [shadow, classifications, jobs, offers, notYetEvaluated] = await Promise.all([
     set.configurationSha256 === null
       ? Promise.resolve([])
       : db
@@ -305,6 +334,13 @@ export async function routingRuleUsage(
       .bind(lower, INGEST_END, cap + 1)
       .all<{ lane: string; state: string }>()
       .then((rows) => rows.results),
+    set.configurationSha256 === null
+      ? Promise.resolve(0)
+      : db
+          .prepare(USAGE_SQL.notYetEvaluated)
+          .bind(lower, INGEST_END, set.configurationSha256, ROUTING_USAGE_LIMITS.maxNotYetEvaluated)
+          .all()
+          .then((rows) => rows.results.length),
   ]);
 
   const scanned = shadow.slice(0, cap);
@@ -407,11 +443,14 @@ export async function routingRuleUsage(
       unreadable,
       not_evaluated: blocked.list(),
       rules: ruleUsage,
-      // With truncation, "no match" covers only the scanned decisions, not the window.
+      // "No match" covers the window only when every live source in it has a decision
+      // under this configuration and none was cut by the row cap. The shadow repair
+      // evaluates the oldest raw keys first, so recent mail can lag a new configuration.
       unmatched_rule_ids: ruleUsage
         .filter((rule) => rule.matches === 0)
         .map((rule) => rule.rule_id),
-      unmatched_covers_window: !truncated,
+      not_yet_evaluated: notYetEvaluated,
+      unmatched_covers_window: !truncated && notYetEvaluated === 0,
       plugin_candidates: plugins.list(),
     },
     classifier: {
@@ -480,7 +519,24 @@ interface JobEvidence {
   updated_at: string;
 }
 
-/** `explain_routing`: stored evidence for one message, newest first. */
+const SHADOW_COLUMNS = `configuration_sha256,source_sha256,catalog_sha256,extraction_updated_at,
+  source_kind,notify_events,state,failure_code,decision_json,updated_at`;
+interface ShadowRow {
+  configuration_sha256: string;
+  source_sha256: string;
+  catalog_sha256: string | null;
+  extraction_updated_at: number;
+  source_kind: string;
+  notify_events: number;
+  state: string;
+  failure_code: string | null;
+  decision_json: string | null;
+  updated_at: number;
+}
+
+/** `explain_routing`: stored evidence for one message, newest first. The candidate and
+ * active configurations' decisions are always included; at most `explainRows` decisions
+ * of other configurations are, newest first. */
 export async function explainRouting(env: RoutingRulesEnvironment, messageId: string) {
   const db = env.MAIL_CATALOG;
   // The same lookup and conflict rule as read_email. A decision is current when
@@ -515,26 +571,23 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
   if (sources.length > 1) throw new MailReadError("message_conflict");
   const source = sources[0]!;
   const limit = ROUTING_USAGE_LIMITS.explainRows;
-  const [sets, shadowRows, job, offerRows, classificationRows] = await Promise.all([
-    loadRoutingRuleSets(env),
+  // The configuration hashes are needed first: the rows of the candidate and active
+  // configurations are always read, whatever number of later configurations exist.
+  const sets = await loadRoutingRuleSets(env);
+  const pinned = [sets.candidate.configurationSha256, sets.active.configurationSha256];
+  const [pinnedRows, otherRows, job, offerRows, classificationRows] = await Promise.all([
     db
-      .prepare(`SELECT configuration_sha256,source_sha256,catalog_sha256,extraction_updated_at,
-        source_kind,notify_events,state,failure_code,decision_json,updated_at
-        FROM routing_shadow_decisions WHERE raw_key=?
+      .prepare(`SELECT ${SHADOW_COLUMNS} FROM routing_shadow_decisions
+        WHERE raw_key=? AND configuration_sha256 IN (?,?)`)
+      .bind(source.raw_key, ...pinned)
+      .all<ShadowRow>()
+      .then((rows) => rows.results),
+    db
+      .prepare(`SELECT ${SHADOW_COLUMNS} FROM routing_shadow_decisions
+        WHERE raw_key=? AND configuration_sha256 IS NOT ? AND configuration_sha256 IS NOT ?
         ORDER BY updated_at DESC,configuration_sha256 LIMIT ?`)
-      .bind(source.raw_key, limit + 1)
-      .all<{
-        configuration_sha256: string;
-        source_sha256: string;
-        catalog_sha256: string | null;
-        extraction_updated_at: number;
-        source_kind: string;
-        notify_events: number;
-        state: string;
-        failure_code: string | null;
-        decision_json: string | null;
-        updated_at: number;
-      }>()
+      .bind(source.raw_key, ...pinned, limit + 1)
+      .all<ShadowRow>()
       .then((rows) => rows.results),
     db
       .prepare(`SELECT source_sha256,extraction_updated_at,state,failure_code,revision,updated_at
@@ -590,7 +643,10 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       : hash === sets.active.configurationSha256
         ? "active"
         : "other";
-  const shadowKept = shadowRows.slice(0, limit);
+  const shadowKept = [...pinnedRows, ...otherRows.slice(0, limit)].sort(
+    (a, b) =>
+      b.updated_at - a.updated_at || (a.configuration_sha256 < b.configuration_sha256 ? -1 : 1),
+  );
   const shadow = shadowKept.map((row): ShadowEvidence => {
     const decision = row.state === "complete" ? parsed(decisionSchema, row.decision_json) : null;
     return {
@@ -675,7 +731,7 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       classifications,
     ),
     shadow,
-    shadow_truncated: shadowRows.length > limit,
+    shadow_truncated: otherRows.length > limit,
     dispatch: { job: dispatchJob, offers, offers_truncated: offerRows.length > limit },
     classifications,
     classifications_truncated: classificationRows.length > limit,

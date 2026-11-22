@@ -227,8 +227,9 @@ const routingCategory = v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_-]{
 const ruleOutcome = v.picklist(["review", "ignore", "unresolved"]);
 const isoTime = v.pipe(v.string(), v.isoTimestamp());
 const count = v.pipe(v.number(), v.integer(), v.minValue(0));
+const ruleSetStatus = v.picklist(["configured", "absent", "unreadable", "unavailable"]);
 const ruleSetOutput = {
-  status: v.picklist(["configured", "absent", "unreadable"]),
+  status: ruleSetStatus,
   configuration_sha256: v.nullable(sha256),
   uploaded_at: v.nullable(isoTime),
   fallback: v.nullable(ruleOutcome),
@@ -272,7 +273,7 @@ const routingOutputs = {
   }),
   routing_rule_usage: v.strictObject({
     configuration: v.picklist(["candidate", "active"]),
-    status: v.picklist(["configured", "absent", "unreadable"]),
+    status: ruleSetStatus,
     configuration_sha256: v.nullable(sha256),
     window: v.strictObject({ days: count, start: isoTime, end: isoTime }),
     decisions: v.strictObject({
@@ -297,6 +298,7 @@ const routingOutputs = {
         }),
       ),
       unmatched_rule_ids: v.array(routingId),
+      not_yet_evaluated: v.pipe(count, v.maxValue(ROUTING_USAGE_LIMITS.maxNotYetEvaluated)),
       unmatched_covers_window: v.boolean(),
       plugin_candidates: v.array(
         v.strictObject({
