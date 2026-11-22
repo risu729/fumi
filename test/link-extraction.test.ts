@@ -145,4 +145,14 @@ describe("link extraction limits", () => {
     expect(extractLinkCandidates({ text: "h".repeat(1_000_000), html }).candidates).toEqual([]);
     expect(Date.now() - started).toBeLessThan(5_000);
   });
+
+  it("trims a long run of closing brackets in linear time", () => {
+    // Each trimmed bracket used to recount the whole URL, so this took minutes.
+    const text = `https://files.example.com/a${")".repeat(100_000)}${"]".repeat(100_000)}.`;
+    const started = Date.now();
+    expect(extractLinkCandidates({ text, html: null }).candidates).toEqual([
+      { index: 0, url: "https://files.example.com/a", sources: ["text"] },
+    ]);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });

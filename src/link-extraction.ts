@@ -71,17 +71,27 @@ function count(value: string, character: string): number {
   return total;
 }
 
-/** Remove sentence punctuation and unbalanced closing brackets after a URL in prose. */
+/** Remove sentence punctuation and unbalanced closing brackets after a URL in prose.
+ * Brackets are counted once and the counts updated as characters are removed, so
+ * the work stays linear in the length of the match. */
 function trimProseUrl(value: string): string {
-  let url = value;
-  while (url.length > 0) {
-    const last = url.at(-1) ?? "";
-    if (trailingPunctuation.has(last)) url = url.slice(0, -1);
-    else if (last === ")" && count(url, ")") > count(url, "(")) url = url.slice(0, -1);
-    else if (last === "]" && count(url, "]") > count(url, "[")) url = url.slice(0, -1);
-    else break;
+  const openParens = count(value, "(");
+  const openBrackets = count(value, "[");
+  let closeParens = count(value, ")");
+  let closeBrackets = count(value, "]");
+  let end = value.length;
+  while (end > 0) {
+    const last = value[end - 1] ?? "";
+    if (trailingPunctuation.has(last)) end--;
+    else if (last === ")" && closeParens > openParens) {
+      closeParens--;
+      end--;
+    } else if (last === "]" && closeBrackets > openBrackets) {
+      closeBrackets--;
+      end--;
+    } else break;
   }
-  return url;
+  return value.slice(0, end);
 }
 
 function* textUrls(text: string): Generator<string> {

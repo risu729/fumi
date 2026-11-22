@@ -67,6 +67,12 @@ export function mediaTypeEssence(value: string | null): string | null {
   return mediaTypePattern.test(essence) ? essence : null;
 }
 
+// The HTML patterns of WHATWG MIME Sniffing ("identifying a resource with an
+// unknown MIME type"), relaxed to accept any whitespace in the doctype and after
+// a tag name, `/` after a tag name, and `<!--` followed by anything.
+const htmlStart =
+  /^(?:<!--|<!doctype\s+html(?:[\s>]|$)|<(?:html|head|body|script|iframe|style|title|table|font|div|h1|a|b|br|p)[\s/>])/u;
+
 /** True when the first bytes look like an HTML document whatever its declared type.
  * NUL characters and leading replacement characters are removed first, so UTF-16
  * HTML, with or without a byte order mark, is recognized too. */
@@ -75,17 +81,19 @@ function looksLikeHtml(bytes: Uint8Array): boolean {
     .decode(bytes.subarray(0, 512))
     .replaceAll("\u0000", "")
     .replace(/^[\s\ufeff\ufffd]+/u, "")
-    .slice(0, 16)
+    .slice(0, 64)
     .toLowerCase();
-  return head.startsWith("<!doctype html") || head.startsWith("<html");
+  return htmlStart.test(head);
 }
 
 function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** Cancel a body without waiting for it: a cancellation that never settles must not
+ * outlive the deadline. */
 async function discard(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
+  await Promise.race([response.body?.cancel().catch(() => undefined), Promise.resolve()]);
 }
 
 function aborted(signal: AbortSignal): Promise<never> {

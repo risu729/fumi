@@ -187,9 +187,10 @@ const blockedSuffixes = [
   "onion",
   "alt",
 ];
-// A hostname label that is an IPv4 address in dotted or dashed form, as used by
-// wildcard DNS services that resolve `10.0.0.1.example` to the embedded address.
-const embeddedIpv4 = /(?:^|\.)(?:\d{1,3}[.-]){3}\d{1,3}(?:\.|$)/u;
+// Four dotted or dashed numbers between dots, dashes or the ends of the name, as
+// used by wildcard DNS services that resolve `10.0.0.1.example`, `10-0-0-1.example`
+// or `app-10-0-0-1.example` to the embedded address.
+const embeddedIpv4 = /(?:^|[.-])(?:\d{1,3}[.-]){3}\d{1,3}(?:[.-]|$)/u;
 
 /** Hostname rule only. The URL parser has already canonicalized IPv4 in decimal,
  * octal, hexadecimal and short forms, mapped full-width characters and applied IDNA. */

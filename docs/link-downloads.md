@@ -90,9 +90,10 @@ Destination rule, giving `blocked_destination`:
   embeds), IPv4-compatible forms, NAT64 `64:ff9b::/96`, ULA `fc00::/7`, link-local
   `fe80::/10`, site-local `fec0::/10` and multicast `ff00::/8` are refused.
 - Hostnames, after trailing dots are removed: single-label names (`localhost`,
-  `metadata`), names that are numeric but not canonical IPv4, names with a label
-  run that spells a dotted or dashed IPv4 address (`10.0.0.1.nip.example`,
-  `10-0-0-1.sslip.example`), and names that are or end in `localhost`, `local`,
+  `metadata`), names that are numeric but not canonical IPv4, names that contain
+  four dotted or dashed numbers that spell an IPv4 address, between dots, dashes or
+  the ends of the name (`10.0.0.1.nip.example`, `10-0-0-1.sslip.example`,
+  `app-10-0-0-1.nip.example`), and names that are or end in `localhost`, `local`,
   `localdomain`, `internal`, `intranet`, `private`, `corp`, `home`, `lan`, `arpa`,
   `test`, `invalid`, `onion` or `alt`. Full-width forms are mapped by the URL
   parser's IDNA processing first.
@@ -133,11 +134,16 @@ and the body read.
 - A 301, 302, 303, 307 or 308 with `Location` is resolved against the current URL
   and checked again before it is requested, so a refused hop is never contacted.
   At most five redirects are followed. Response bodies of hops are cancelled unread.
-- A 401, or any response with `WWW-Authenticate`, is `pending_login`.
+- Otherwise, a 401, or any response with `WWW-Authenticate`, is `pending_login`.
 - Any status other than 200 is `http_<status>`, including a 3xx without `Location`.
-- `text/html` and `application/xhtml+xml` are `pending_html`. So is a body whose
-  first bytes, after a BOM and whitespace, are `<!doctype html` or `<html`,
-  whatever its declared type. Links or forms on the page are never followed.
+- `text/html` and `application/xhtml+xml` are `pending_html`. So is a body that,
+  after a BOM and whitespace, starts like an HTML document, whatever its declared
+  type: `<!--`, `<!doctype html` (any whitespace between the words), or one of the
+  tags `html`, `head`, `body`, `script`, `iframe`, `style`, `title`, `table`,
+  `font`, `div`, `h1`, `a`, `b`, `br` or `p` followed by whitespace, `/` or `>`.
+  These are the HTML patterns of the
+  [WHATWG MIME Sniffing](https://mimesniff.spec.whatwg.org/#identifying-a-resource-with-an-unknown-mime-type)
+  rules, slightly relaxed. Links or forms on the page are never followed.
 - A `Content-Length` over the cap, or a streamed body that passes it, is
   `too_large`. The stream is read chunk by chunk and cancelled at the cap.
 
@@ -192,9 +198,20 @@ Other residual risks:
 - An opaque link, such as a click-tracking redirector, can perform an action on
   `GET` before it redirects. The action rule sees only the URL text; part B's
   selection lowers but does not remove this risk.
+- Any fetch tells the link's host that the message reached a live mailbox, as a
+  click would, and it comes from Cloudflare's network rather than from a browser.
 - The hostname rule is a list. Wildcard DNS names that encode an address another
-  way (hexadecimal labels, for example) are not recognized.
-- The action rule over-blocks words that contain a stem; such links stay unfetched.
+  way (hexadecimal labels such as `7f000001.nip.example`, or dashed IPv6 such as
+  `--1.sslip.example`) are not recognized.
+- The action rule sees only text. A word written with a lookalike letter that NFKC
+  does not fold (Cyrillic `ѕ` in `unѕubscribe`), encoded more than four times, or
+  hidden in an encoded query value (base64, for example) is not matched, and
+  neither is an action word in the host name (`unsubscribe.example.com/t/1`).
+- The action rule over-blocks words that contain a stem; such links stay
+  unfetched. This includes common receipt names such as
+  `/orders/123/confirmation.pdf`.
+- A redirect from `https:` to `http:` is followed, so a token in the URL of a later
+  hop can travel unencrypted.
 
 ## Proposed: part B, model selection
 
@@ -244,8 +261,8 @@ full URL (which can hold a token) is an open decision below.
    8,192 for any requested URL), file size
    (4 MiB; conversion currently accepts sources up to 2 MiB), total time (30 s),
    redirects (5), downloads per message and a daily download cap.
-5. Whether `http:` links are fetched or only `https:`, and whether non-default
-   ports stay refused.
+5. Whether `http:` links are fetched or only `https:` (including a redirect from
+   `https:` to `http:`), and whether non-default ports stay refused.
 6. Whether imported historical mail is in scope; its links have usually expired,
    and historical notifications are suppressed.
 7. Whether MCP results for a pending download return the full URL or only its

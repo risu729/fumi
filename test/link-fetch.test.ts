@@ -168,6 +168,57 @@ describe("link fetch", () => {
       });
   });
 
+  it.each([
+    "<!-- page -->\n<!DOCTYPE html><html>",
+    "<!DOCTYPE\nhtml>",
+    "<!doctype  HTML>",
+    "<html>",
+    "<HEAD><title>Sign in</title>",
+    "  <body onload=x>",
+    "<script>location.href='/'</script>",
+    "<iframe src=/>",
+    "<TITLE>Download</TITLE>",
+    "<div>",
+    "<p>Click",
+    "<a href=/f>",
+    "<br>",
+  ])("sniffs %j as an HTML page whatever its declared type", async (page) => {
+    const { send } = mockFetch({
+      "https://files.example.com/page": file(page, "application/octet-stream"),
+    });
+    expect(await fetchLinkFile("https://files.example.com/page", { fetch: send })).toEqual({
+      ok: false,
+      outcome: "pending_html",
+    });
+  });
+
+  it.each([
+    ["<?xml version='1.0'?><Invoice/>", "application/xml"],
+    ["<abbr>", "text/plain"],
+    ["<pre>", "text/plain"],
+    ["%PDF-1.7 <html>", "application/pdf"],
+  ])("keeps %j, which is not an HTML start", async (content, type) => {
+    const { send } = mockFetch({ "https://files.example.com/f": file(content, type) });
+    const result = await fetchLinkFile("https://files.example.com/f", { fetch: send });
+    expect(result.ok && result.provenance.mimeType).toBe(type);
+  });
+
+  it("does not wait for a refused response body to cancel", async () => {
+    const stuck = new ReadableStream<Uint8Array>({
+      pull() {},
+      cancel: () => new Promise<void>(() => undefined),
+    });
+    const { send } = mockFetch({
+      "https://files.example.com/stuck": () => new Response(stuck, { status: 404 }),
+    });
+    expect(
+      await fetchLinkFile("https://files.example.com/stuck", {
+        fetch: send,
+        limits: { timeoutMs: 50 },
+      }),
+    ).toEqual({ ok: false, outcome: "http_404" });
+  });
+
   it("maps login challenges and HTTP errors to fixed outcomes", async () => {
     const { send } = mockFetch({
       "https://files.example.com/401": file("", "text/plain", 401),

@@ -136,6 +136,9 @@ describe("destination rule", () => {
     "http://intranet./a",
     "http://10.0.0.1.nip.example/a",
     "http://10-0-0-1.sslip.example/a",
+    "http://app-10-0-0-1.nip.example/a",
+    "http://app-169-254-169-254-x.nip.example/a",
+    "http://customer-10.0.0.1.nip.example/a",
     "https://files.example.com:8443/a",
     "http://files.example.com:443/a",
     "ftp://files.example.com/a",
@@ -156,6 +159,8 @@ describe("destination rule", () => {
     "https://[2606:4700::1111]/a",
     "https://xn--r8jz45g.example/a",
     "https://cdn-1.files.example.com/a",
+    "https://v1-2-3.files.example.com/a",
+    "https://files-2026-11-22-1.example.com/a",
   ])("allows %s", (url) => {
     expect(checkLinkUrl(url).ok).toBe(true);
   });
