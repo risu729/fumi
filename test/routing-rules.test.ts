@@ -307,6 +307,44 @@ describe("list_routing_rules", () => {
     expect(listed.candidate).toMatchObject({ status: "unreadable", configuration_sha256: null });
     expect(JSON.stringify(listed)).not.toContain(SECRET);
   });
+
+  it("reports storage failures as unavailable, distinct from invalid configuration", async () => {
+    await configureCandidate();
+    await configureActive();
+    const failingR2 = {
+      ...env,
+      MAIL_ARCHIVE: {
+        get: async () => {
+          throw new Error("synthetic R2 outage");
+        },
+      } as unknown as R2Bucket,
+    };
+    const listed = await listRoutingRules(failingR2);
+    expect(v.is(toolOutputSchemas.list_routing_rules, listed)).toBe(true);
+    expect(listed.candidate).toMatchObject({ status: "unavailable", configuration_sha256: null });
+    expect(listed.active).toMatchObject({ status: "unavailable", activated: null });
+    // A D1 failure reading the activation state is also unavailable, not unreadable.
+    const failingD1 = {
+      ...env,
+      MAIL_CATALOG: {
+        prepare: (sql: string) => {
+          if (sql.includes("routing_dispatch_control")) throw new Error("synthetic D1 outage");
+          return env.MAIL_CATALOG.prepare(sql);
+        },
+      } as unknown as D1Database,
+    };
+    const partial = await listRoutingRules(failingD1);
+    expect(partial.candidate.status).toBe("configured");
+    expect(partial.active).toMatchObject({ status: "unavailable", rules: [], revision: null });
+    const report = await routingRuleUsage(failingD1, {
+      configuration: "active",
+      window_days: 1,
+      max_decisions: 10,
+      samples_per_rule: 0,
+    });
+    expect(v.is(toolOutputSchemas.routing_rule_usage, report)).toBe(true);
+    expect(report).toMatchObject({ status: "unavailable", configuration_sha256: null });
+  });
 });
 
 describe("routing_rule_usage", () => {
@@ -395,18 +433,54 @@ describe("routing_rule_usage", () => {
     await configureActive();
     await source(day(0), "alpha");
     await evaluateAll();
+    expect((await usage()).decisions).toMatchObject({
+      scanned: 1,
+      not_yet_evaluated: 0,
+      unmatched_covers_window: true,
+    });
     const active = await usage({ configuration: "active" });
+    // The live message has no decision under the active configuration, so the
+    // unmatched rules do not cover the window.
     expect(active).toMatchObject({
       configuration: "active",
       status: "configured",
       configuration_sha256: await routerHash(activeConfig),
-      decisions: { scanned: 0, unmatched_covers_window: true },
+      decisions: { scanned: 0, not_yet_evaluated: 1, unmatched_covers_window: false },
     });
     expect(active.decisions.unmatched_rule_ids).toEqual([
       "synthetic-alpha",
       "synthetic-beta",
       "synthetic-retired",
     ]);
+  });
+
+  it("does not claim the window is covered while the shadow repair lags a new configuration", async () => {
+    // The repair evaluates the oldest raw keys first, five per pass.
+    for (let offset = 6; offset >= 0; offset--)
+      // oxlint-disable-next-line no-await-in-loop -- Sources are inserted in order.
+      await source(day(offset), offset === 0 ? "beta newest" : "neither");
+    await configureCandidate();
+    await repairRoutingShadow(env);
+    const lagging = await usage();
+    expect(v.is(toolOutputSchemas.routing_rule_usage, lagging)).toBe(true);
+    expect(lagging.decisions).toMatchObject({
+      scanned: 5,
+      truncated: false,
+      not_yet_evaluated: 2,
+      unmatched_covers_window: false,
+    });
+    // The newest message, which matches synthetic-beta, is not evaluated yet.
+    expect(lagging.decisions.unmatched_rule_ids).toContain("synthetic-beta");
+    // Historical mail is never evaluated for live usage and does not hold coverage back.
+    await source(day(0), "beta historical", { notify: 0 });
+    await evaluateAll();
+    const settled = await usage();
+    expect(settled.decisions).toMatchObject({
+      scanned: 7,
+      not_yet_evaluated: 0,
+      unmatched_covers_window: true,
+      unmatched_rule_ids: ["synthetic-alpha", "synthetic-stale"],
+    });
   });
 
   it("counts blocked decisions, plugin candidates, classifier outcomes and dispatch states", async () => {
@@ -566,7 +640,9 @@ describe("routing_rule_usage", () => {
     for (const [name, sql] of Object.entries(USAGE_SQL)) {
       // oxlint-disable-next-line no-await-in-loop -- One plan per query.
       const rows = await env.MAIL_CATALOG.prepare(`EXPLAIN QUERY PLAN ${sql}`)
-        .bind(...(name === "decisions" ? ["a", "b", "c", 1] : ["a", "b", 1]))
+        .bind(
+          ...(["decisions", "notYetEvaluated"].includes(name) ? ["a", "b", "c", 1] : ["a", "b", 1]),
+        )
         .all<{ detail: string }>();
       const plan = rows.results.map((row) => row.detail);
       expect(plan[0], name).toMatch(
@@ -781,6 +857,64 @@ describe("explain_routing", () => {
       kind: "rule_or_default",
       rule_id: null,
       revision: 2,
+    });
+  });
+
+  it("keeps the candidate and active decisions after more than explainRows later configurations", async () => {
+    await configureActive();
+    await configureCandidate(activeConfig);
+    const message = await source(day(0), "alpha");
+    await evaluateAll();
+    await configureCandidate();
+    await evaluateAll();
+    const others = Array.from({ length: 20 }, (_, index) =>
+      env.MAIL_CATALOG.prepare(`INSERT INTO routing_shadow_decisions(raw_key,configuration_sha256,source_sha256,
+        catalog_sha256,extraction_updated_at,source_kind,notify_events,state,failure_code,decision_json,updated_at)
+        VALUES (?,?,?,?,1,'email_routing',1,'blocked','evaluation_error',NULL,?)`).bind(
+        message.rawKey,
+        index.toString(16).padStart(64, "f"),
+        "a".repeat(64),
+        "a".repeat(64),
+        Date.now() + 60_000 + index,
+      ),
+    );
+    await env.MAIL_CATALOG.batch([
+      ...others,
+      env.MAIL_CATALOG.prepare(`INSERT INTO routing_dispatch_jobs(raw_key,source_sha256,extraction_updated_at,
+        revision,state,failure_code,updated_at) VALUES (?,?,1,3,'complete',NULL,?)`).bind(
+        message.rawKey,
+        "a".repeat(64),
+        NOW,
+      ),
+      offer(message.rawKey, "action", "accepted", {
+        input: {},
+        classification: {
+          outcome: "review",
+          category: "notice",
+          urgent: false,
+          evidenceCode: "static_rule",
+        },
+      }),
+    ]);
+    const explained = await explainRouting(env, message.messageId);
+    expect(v.is(toolOutputSchemas.explain_routing, explained)).toBe(true);
+    expect(explained.shadow_truncated).toBe(true);
+    expect(explained.shadow).toHaveLength(18);
+    expect(
+      explained.shadow
+        .filter((row) => row.configuration !== "other")
+        .map((row) => [row.configuration, row.rule_id])
+        .sort(),
+    ).toEqual([
+      ["active", "synthetic-alpha"],
+      ["candidate", "synthetic-alpha"],
+    ]);
+    // Newest first: the later configurations' rows come before the pinned ones.
+    expect(explained.shadow[0]?.configuration).toBe("other");
+    expect(explained.decided_by).toMatchObject({
+      kind: "rule",
+      rule_id: "synthetic-alpha",
+      configuration_sha256: await routerHash(activeConfig),
     });
   });
 

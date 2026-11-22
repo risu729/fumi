@@ -9,6 +9,7 @@ import {
   dispatchDigest,
   exchangeOffer,
   exchangeWebhook,
+  mappedEntry,
   readDispatchBytes,
 } from "./plugin-offer.ts";
 import type {
@@ -220,8 +221,8 @@ function snapshotRuntime(
   };
 }
 function ready(adapter: NotificationAdapter, transport: OfferTransport) {
-  if (adapter.kind === "rpc") return !!transport.rpcServices?.[adapter.serviceRef];
-  const secret = transport.auth[adapter.authRef];
+  if (adapter.kind === "rpc") return !!mappedEntry(transport.rpcServices, adapter.serviceRef);
+  const secret = mappedEntry(transport.auth, adapter.authRef);
   if (adapter.kind === "webhook") return validSigningSecret(secret);
   return (
     typeof secret === "string" &&
@@ -230,7 +231,7 @@ function ready(adapter: NotificationAdapter, transport: OfferTransport) {
     !/[\r\n]/.test(secret) &&
     (adapter.kind === "https"
       ? adapter.serviceRef === null
-      : !!adapter.serviceRef && !!transport.services?.[adapter.serviceRef])
+      : !!adapter.serviceRef && !!mappedEntry(transport.services, adapter.serviceRef))
   );
 }
 async function credentialIdentity(
@@ -238,12 +239,12 @@ async function credentialIdentity(
   transport: OfferTransport,
 ): Promise<string | null> {
   if (adapter.kind === "rpc") {
-    const identity = transport.rpcIdentities?.[adapter.serviceRef];
+    const identity = mappedEntry(transport.rpcIdentities, adapter.serviceRef);
     return identity
       ? dispatchDigest(JSON.stringify(["fumi-routing-rpc-identity-v1", identity]))
       : null;
   }
-  const secret = transport.auth[adapter.authRef];
+  const secret = mappedEntry(transport.auth, adapter.authRef);
   return secret ? dispatchDigest(JSON.stringify(["fumi-routing-credential-v1", secret])) : null;
 }
 async function bindDestinationIdentity(config: DispatchConfiguration, transport: OfferTransport) {
@@ -251,7 +252,7 @@ async function bindDestinationIdentity(config: DispatchConfiguration, transport:
   if (
     destination &&
     (destination.adapter.kind !== "rpc" ||
-      transport.rpcIdentities?.[destination.adapter.serviceRef])
+      mappedEntry(transport.rpcIdentities, destination.adapter.serviceRef))
   )
     config.destinationSha256 = await dispatchDigest(
       JSON.stringify([

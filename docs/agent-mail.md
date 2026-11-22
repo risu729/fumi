@@ -82,12 +82,14 @@ are client hints, not authorization.
 
 Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
 `after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and `has:attachment`.
-Quote values containing spaces. `from:`, `to:` and `subject:` match substrings and
-ignore ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match
-stored text as written in the filter or in lowercase: `subject:Änderung` matches
-`Änderung` and `änderung`, but `subject:änderung` does not match `Änderung`. A query has
-at most 1,000 characters and 33 operators, counting repeated ones; a longer query or
-more operators fail with `query_too_long`, and `get_profile` reports the operator cap as
+Quote values containing spaces. `from:`, `to:` and `subject:` match literal substrings
+of any length within the query limit, through SQLite `instr()` rather than `LIKE`, whose
+patterns D1 caps at 50 bytes; `%`, `_` and `\` have no special meaning. They ignore
+ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match stored
+text as written in the filter or in lowercase: `subject:Änderung` matches `Änderung` and
+`änderung`, but `subject:änderung` does not match `Änderung`. A query has at most 1,000
+characters and 33 operators, counting repeated ones; a longer query or more operators
+fail with `query_too_long`, and `get_profile` reports the operator cap as
 `limits.search_filters`. The cap keeps every search, including the `filters` of
 `search_mail_content` and `search_mail_semantic`, within D1's 100 bound parameters per
 statement: a `from:`, `to:` or `subject:` value with uppercase non-ASCII binds two
