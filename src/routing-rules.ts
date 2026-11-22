@@ -517,11 +517,13 @@ interface JobEvidence {
 /** `explain_routing`: stored evidence for one message, newest first. */
 export async function explainRouting(env: RoutingRulesEnvironment, messageId: string) {
   const db = env.MAIL_CATALOG;
-  // The same lookup and conflict rule as read_email. A decision is current exactly
-  // when the shadow repair would not re-evaluate it: a complete extraction of a
-  // present raw object, and the same extraction and catalog state as the row. A
-  // replaced raw object is then current only as the repair's blocked source_changed
-  // row; a complete row always has matching extraction and catalog SHA-256s.
+  // The same lookup and conflict rule as read_email. A decision is current when
+  // the raw object is present, its extraction is complete, and the row has the same
+  // extraction and catalog state: for such a source the shadow repair re-evaluates
+  // exactly the rows that are not current. A missing or invalid raw object, or one
+  // without a complete extraction, is not re-evaluated and has no current decision.
+  // A replaced raw object is current only as the repair's blocked source_changed row;
+  // a complete row always has matching extraction and catalog SHA-256s.
   const sources = (
     await db
       .prepare(`SELECT s.raw_key,s.external_id,s.received_at,s.source_kind,s.notify_events,

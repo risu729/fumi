@@ -239,9 +239,12 @@ decision is `rule_or_default` with a `null` rule ID. A handled owner lane report
 decision is reported (`rule`, `default`, `plugin_offer`, `suppressed` or `blocked`).
 From an outbox payload only the symbolic classification is read, never granted mail
 input. The message lookup by ID is the same as `read_email`'s. A shadow decision is
-`current` exactly when the shadow repair would not re-evaluate it: the raw object is
-present, its `mime-v1` extraction is complete, and the row has that extraction's SHA-256
-and update time and the source's catalog SHA-256, source kind and `notify_events`. A
+`current` when the raw object is present, its `mime-v1` extraction is complete, and the
+row has that extraction's SHA-256 and update time and the source's catalog SHA-256,
+source kind and `notify_events`: the shadow repair re-evaluates a row of a present,
+completely extracted source exactly when it is not current. A missing or invalid raw
+object, or one without a complete extraction, has no current decision; the repair does
+not re-evaluate it either, so its old decisions stay and are reported as not current. A
 complete decision is only written when the extraction's SHA-256 matches the catalog's,
 so a current complete decision meets `read_email`'s current-extraction rule. A replaced
 raw object is current only as the `blocked` decision with `source_changed` that the
