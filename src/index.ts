@@ -14,9 +14,11 @@ import { repairRoutingShadow } from "./routing-shadow-runtime.ts";
 import { repairRoutingDispatch } from "./routing-dispatch.ts";
 import { routingRuntime } from "./routing-runtime.ts";
 import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
+import { ensureTakeoutWorkflow } from "./gmail-takeout-import.ts";
 import { classifyForwardError, type ForwardErrorReason } from "./forward-failure.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
+export { TakeoutImport } from "./gmail-takeout-workflow.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
 
 export type Receipt = ArchiveReceipt;
@@ -240,6 +242,13 @@ export default {
       }
     } catch {
       console.error(JSON.stringify({ event: "routing_shadow", status: "unavailable" }));
+      failed = true;
+    }
+    try {
+      const takeout = await ensureTakeoutWorkflow(env);
+      console.log(JSON.stringify({ event: "gmail_takeout", ...takeout }));
+    } catch {
+      console.error(JSON.stringify({ event: "gmail_takeout", status: "deferred" }));
       failed = true;
     }
     try {

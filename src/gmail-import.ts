@@ -3,6 +3,7 @@ import { requestProcessing, type ProcessingParams } from "./processing-jobs.ts";
 import {
   gmailId,
   gmailNamespace,
+  type GmailProvenance,
   gmailRawMatches,
   parseGmailProvenance,
 } from "./gmail-provenance.ts";
@@ -95,7 +96,8 @@ function page(value: unknown): { ids: string[]; next: string | null } {
   return { ids: unique, next: (p.nextPageToken as string | undefined) ?? null };
 }
 
-async function identity(namespace: string, id: string) {
+/** The fumi ingest ID of a Gmail message: one per account and message ID, across transports. */
+export async function gmailIngestId(namespace: string, id: string) {
   const digest = new Uint8Array(
     await crypto.subtle.digest(
       "SHA-256",
@@ -173,7 +175,7 @@ async function saveMessage(
   if (bytes.byteLength > GMAIL_IMPORT_RAW_LIMIT)
     throw new GmailImportError("gmail_raw_invalid_or_too_large");
   const rawSha256 = hex(await crypto.subtle.digest("SHA-256", bytes));
-  const ingestId = await identity(scope.accountNamespace, id);
+  const ingestId = await gmailIngestId(scope.accountNamespace, id);
   const time = Number(message.internalDate);
   if (
     message.id !== id ||
@@ -200,10 +202,27 @@ async function saveMessage(
     rawSha256,
   });
   if (!proposed) throw new GmailImportError("gmail_invalid_provenance");
+  return storeGmailSource(env, proposed, bytes);
+}
+
+/**
+ * Writes one Gmail-derived source: raw object and receipt with conditional writes, then
+ * the catalog row and provider provenance in one fenced commit. Returns the raw key.
+ */
+export async function storeGmailSource(
+  env: Pick<GmailImportEnvironment, "MAIL_CATALOG" | "MAIL_ARCHIVE">,
+  proposed: GmailProvenance,
+  bytes: Uint8Array,
+): Promise<string> {
+  const id = proposed.messageId;
+  const { rawKey, rawSha256 } = proposed;
+  const prefix = rawKey.slice(0, -"/raw.eml".length);
+  const ingestId = prefix.slice(prefix.lastIndexOf("/") + 1);
+  const receivedAt = new Date(Number(proposed.internalDate)).toISOString();
   const previousKey = await env.MAIL_CATALOG.prepare(
     "SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?",
   )
-    .bind(scope.accountNamespace, id)
+    .bind(proposed.accountNamespace, proposed.messageId)
     .first<{ raw_key: string }>();
   if (previousKey && previousKey.raw_key !== rawKey)
     throw new GmailImportError("gmail_identity_conflict");
@@ -220,7 +239,7 @@ async function saveMessage(
         ingestId,
         receivedAt,
         sha256: rawSha256,
-        gmailNamespace: scope.accountNamespace,
+        gmailNamespace: proposed.accountNamespace,
         gmailMessageId: id,
         eventNotifications: "0",
       },
@@ -245,9 +264,10 @@ async function saveMessage(
   const provenance = parseGmailProvenance(await receipt.json());
   if (
     !provenance ||
+    provenance.schemaVersion !== proposed.schemaVersion ||
     provenance.rawKey !== rawKey ||
     provenance.rawSha256 !== rawSha256 ||
-    provenance.accountNamespace !== scope.accountNamespace ||
+    provenance.accountNamespace !== proposed.accountNamespace ||
     provenance.messageId !== id ||
     provenance.rawSize !== bytes.byteLength ||
     provenance.internalDate !== proposed.internalDate

@@ -16,6 +16,8 @@ export type TakeoutEntry = {
   kind: "entry";
   /** Byte offset of the entry's From_ line in the whole mbox stream. */
   offset: number;
+  /** Stream offset just past the entry's separator: where the next entry starts. */
+  end: number;
   messageId: string;
   threadId: string;
   /** From_ date in milliseconds; second precision. */
@@ -28,6 +30,7 @@ export type TakeoutEntry = {
 export type TakeoutOversize = {
   kind: "oversize";
   offset: number;
+  end: number;
   messageId: string;
   /** Raw size after stripping, above the limit when reported. */
   size: number;
@@ -71,10 +74,10 @@ const latin1 = new TextDecoder("latin1");
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const UINT64_MAX = (1n << 64n) - 1n;
 
-/** Converts a decimal Gmail ID to the 16-digit hex form the Gmail API uses; null if over 64 bits. */
+/** Converts a decimal Gmail ID to the unpadded hex form the Gmail API uses; null if over 64 bits. */
 function toHex(decimal: string): string | null {
   const value = BigInt(decimal);
-  return value > UINT64_MAX ? null : value.toString(16).padStart(16, "0");
+  return value > UINT64_MAX ? null : value.toString(16);
 }
 
 /** Returns the From_ date in milliseconds, or NaN for an impossible date or zone. */
@@ -210,8 +213,13 @@ export class TakeoutMboxSplitter {
 
   readonly #rawLimit: number;
 
-  constructor(rawLimit = GMAIL_IMPORT_RAW_LIMIT) {
+  /**
+   * `startOffset` is the stream offset of the first pushed byte; a run resumed at a
+   * checkpoint starts at an entry's From_ line, so offsets stay stream-wide.
+   */
+  constructor(rawLimit = GMAIL_IMPORT_RAW_LIMIT, startOffset = 0) {
     this.#rawLimit = rawLimit;
+    this.#base = startOffset;
   }
 
   push(chunk: Uint8Array): TakeoutItem[] {
@@ -296,10 +304,12 @@ export class TakeoutMboxSplitter {
       if (boundary < 0 && !endsWithCrlfCrlf(bytes))
         throw new TakeoutMboxError("takeout_missing_separator", head.offset);
       const total = this.#dropped + size;
+      const end = this.#base + (boundary >= 0 ? boundary + 2 : bytes.length);
       if (this.#dropped > 0 || total > this.#rawLimit)
         items.push({
           kind: "oversize",
           offset: head.offset,
+          end,
           messageId: head.messageId,
           size: total,
         });
@@ -307,6 +317,7 @@ export class TakeoutMboxSplitter {
         items.push({
           kind: "entry",
           offset: head.offset,
+          end,
           messageId: head.messageId,
           threadId: head.threadId,
           fromDate: head.fromDate,

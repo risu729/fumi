@@ -232,6 +232,67 @@ Synthetic workerd tests cover pending, blocked, failed, indexed, deferred and mi
 runs, managed row states, window continuation, cursor validation, a failed coverage
 read and the query plan. They do not establish production import coverage.
 
+## Google Takeout transport
+
+Status: implemented and tested with synthetic mbox files; no Takeout run has been
+configured in production. It follows
+[ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md).
+
+An operator stores each account's Takeout mbox files in the private R2 bucket
+`fumi-takeout` (binding `TAKEOUT_ARCHIVE`) and sets the optional Worker secret
+`GMAIL_TAKEOUT_CONFIG`. R2 bindings cannot be read-only, so the ADR's read-only binding
+is kept in code: only the Workflow reads the bucket, and nothing in fumi writes it. It
+is the only way to configure a run; HTTP and mail cannot choose objects, accounts or
+behaviour:
+
+```json
+{
+  "runId": "takeout-main-2026-11",
+  "accountNamespace": "gmail-…",
+  "objects": [{ "key": "<namespace>/<date>/part-001.mbox", "size": 2147483648 }],
+  "onConflict": "stop"
+}
+```
+
+- The objects are read in order as one byte stream, so a mailbox split across Takeout
+  parts is one run. Each object must have exactly the configured size before any
+  entry is read; otherwise the run stops with `takeout_object_size_mismatch`.
+- The five-minute cron starts the `TakeoutImport` Workflow (`fumi-gmail-takeout`, one
+  instance at a time) for a configured run that is still `running`, and starts a new
+  instance when the previous one ended. Each Workflow step takes the run's lease and
+  processes at most 100 entries from the checkpoint.
+- [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The
+  stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
+  and Takeout's separator removed. A malformed or cut-off stream stops the run with
+  the splitter's fixed code and stream offset.
+- The checkpoint `gmail_takeout_runs.next_offset` is the stream offset of the next
+  unprocessed entry. It advances in the same D1 batch that records the entry in
+  `gmail_takeout_items` with one outcome:
+  - `imported`: stored through the same path as the API transports, with receipt
+    schema `gmail-takeout-v1` (below), then dispatched for processing.
+  - `verified`: the account already has this message ID with the same raw SHA-256.
+  - `conflict`: the account already has this message ID with a different raw
+    SHA-256. The stored original is kept. With `onConflict: "stop"` (the default) the
+    run stops at that entry with `takeout_raw_conflict`. After review, the same run
+    resumes with `onConflict: "record"`; a stopped run accepts a changed
+    configuration only when its account and objects are unchanged.
+  - `oversize`: over the 25 MiB raw limit; not stored.
+- The ingest ID is the same `gmail-import-v1` identity as the API transports, so a
+  message has one archive source per account whichever transport saw it first.
+
+The `gmail-takeout-v1` receipt has the `gmail-import-v1` fields plus
+`takeout: { runId, objectKey, entryOffset, labels }`. `internalDate` is the `From_`
+date in milliseconds, which has second precision. `labelIds` is empty, because Takeout
+holds label names, not API label IDs. The names (localized, possibly RFC 2047
+encoded, at most 8 KiB) are kept as stored in `gmail_takeout_labels`, which the
+reconciler rebuilds from receipts. The `label_ids` search filter still matches API IDs
+only. The ADR's per-entry SHA-256 is not recorded separately: the raw SHA-256 and the
+entry offset identify the entry.
+
+Progress and outcomes are D1 rows. The run's `status`, `stop_code` and `stop_offset`,
+and the per-outcome counts and `from_date` range in `gmail_takeout_items`, are the
+evidence for the per-account verification in the ADR.
+
 ## Primary references
 
 - [Gmail message list](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list)

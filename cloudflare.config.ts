@@ -33,6 +33,11 @@ export default defineConfig({
         concurrency: { limit: 25 },
         defaultRetention: { successRetention: "3 days", errorRetention: "3 days" },
       }),
+      TakeoutImport: exports.workflow({
+        name: "fumi-gmail-takeout",
+        concurrency: { limit: 1 },
+        defaultRetention: { successRetention: "30 days", errorRetention: "30 days" },
+      }),
     },
     env: {
       ...(routingRpc
@@ -50,6 +55,9 @@ export default defineConfig({
         ? { MANAGED_MAIL_SEARCH: bindings.aiSearch({ name: searchInstance }) }
         : {}),
       MAIL_ARCHIVE: bindings.r2({ name: "fumi-mail" }),
+      // Google Takeout mbox files for the Gmail backfill (ADR 0004). Only the
+      // TakeoutImport Workflow reads it; nothing writes it.
+      TAKEOUT_ARCHIVE: bindings.r2({ name: "fumi-takeout" }),
       MAIL_CATALOG: bindings.d1({
         name: "fumi-catalog",
         ...(catalogId ? { id: catalogId } : {}),
@@ -71,6 +79,11 @@ export default defineConfig({
         name: "fumi-mail-processing",
         worker: "fumi",
         exportName: "MailProcessing",
+      }),
+      GMAIL_TAKEOUT: bindings.workflow({
+        name: "fumi-gmail-takeout",
+        worker: "fumi",
+        exportName: "TakeoutImport",
       }),
     },
     // Set explicitly: for an unset value cf sends no preview setting at deploy
