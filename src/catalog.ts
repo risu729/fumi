@@ -240,8 +240,8 @@ async function commitObservations(
       if (gmail.takeout)
         statements.push(
           db
-            .prepare(`INSERT INTO gmail_takeout_labels(raw_key,account_namespace,message_id,labels)
-        SELECT ?,?,?,? WHERE ${fence}
+            .prepare(`INSERT INTO gmail_takeout_labels(raw_key,account_namespace,message_id,labels,run_id,entry_offset)
+        SELECT ?,?,?,?,?,? WHERE ${fence}
         AND EXISTS (SELECT 1 FROM gmail_messages WHERE raw_key=? AND account_namespace=? AND message_id=?)
         ON CONFLICT(raw_key) DO NOTHING`)
             .bind(
@@ -249,6 +249,8 @@ async function commitObservations(
               namespace,
               gmail.messageId,
               gmail.takeout.labels,
+              gmail.takeout.runId,
+              gmail.takeout.entryOffset,
               ...fenceArgs,
               rawKey,
               namespace,

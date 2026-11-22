@@ -218,6 +218,8 @@ export async function storeGmailSource(
   const { rawKey, rawSha256 } = proposed;
   const prefix = rawKey.slice(0, -"/raw.eml".length);
   const ingestId = prefix.slice(prefix.lastIndexOf("/") + 1);
+  if (ingestId !== (await gmailIngestId(proposed.accountNamespace, id)))
+    throw new GmailImportError("gmail_identity_conflict");
   const receivedAt = new Date(Number(proposed.internalDate)).toISOString();
   const previousKey = await env.MAIL_CATALOG.prepare(
     "SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?",

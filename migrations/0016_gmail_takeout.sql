@@ -29,10 +29,14 @@ CREATE TABLE gmail_takeout_items (
 );
 CREATE INDEX gmail_takeout_items_outcome ON gmail_takeout_items(run_id,outcome);
 -- Takeout label names are localized display names, not Gmail API label IDs, so they
--- stay out of gmail_messages.label_ids_json and the label_ids search filter.
+-- stay out of gmail_messages.label_ids_json and the label_ids search filter. A row comes
+-- from the Takeout receipt of an imported message, or from the run's item for a
+-- message another transport stored first.
 CREATE TABLE gmail_takeout_labels (
   raw_key TEXT PRIMARY KEY,
   account_namespace TEXT NOT NULL,
   message_id TEXT NOT NULL,
-  labels TEXT NOT NULL
+  labels TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  entry_offset INTEGER NOT NULL
 );

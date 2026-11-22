@@ -11,9 +11,10 @@ import { gmailIngestId, storeGmailSource } from "./gmail-import.ts";
 import {
   gmailNamespace,
   parseGmailProvenance,
+  takeoutLabelsFit,
   takeoutObjectKey,
-  TAKEOUT_LABELS_LIMIT,
 } from "./gmail-provenance.ts";
+import { MAX_RECEIPT_BYTES } from "./reconcile.ts";
 import { GMAIL_IMPORT_RAW_LIMIT, GmailImportError } from "./gmail-transport.ts";
 import { TakeoutMboxError, TakeoutMboxSplitter, type TakeoutItem } from "./gmail-takeout-mbox.ts";
 
@@ -49,6 +50,14 @@ const configSchema = v.strictObject({
   ),
   /** What an entry whose message already exists with different bytes does. */
   onConflict: v.optional(v.picklist(["stop", "record"]), "stop"),
+  /**
+   * A Gmail message ID starts with the receipt time in milliseconds (`id >> 20`), and
+   * the From_ date is that time in whole seconds. An entry that disagrees stops the run,
+   * because mail body text can imitate an entry boundary. Set false only after review.
+   */
+  checkIdDate: v.optional(v.boolean(), true),
+  /** Raising it resumes a stopped run without changing its policy. */
+  attempt: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0)), 0),
 });
 export type TakeoutConfig = v.InferOutput<typeof configSchema>;
 
@@ -88,6 +97,8 @@ const configJson = (config: TakeoutConfig) =>
     accountNamespace: config.accountNamespace,
     objects: config.objects,
     onConflict: config.onConflict,
+    checkIdDate: config.checkIdDate,
+    attempt: config.attempt,
   });
 
 interface RunRow {
@@ -99,7 +110,7 @@ interface RunRow {
 
 /**
  * Creates the run, or resumes a stopped run whose account and objects are unchanged
- * (for example with `onConflict` changed after a reviewed conflict).
+ * and whose configuration changed in any other field (a policy, or `attempt`).
  */
 export async function startTakeoutRun(db: D1Database, config: TakeoutConfig): Promise<RunRow> {
   const json = configJson(config);
@@ -235,19 +246,17 @@ export async function runTakeoutChunk(
     const record = async (
       item: TakeoutItem,
       outcome: Outcome,
-      details: {
-        rawSha256?: string;
-        rawKey?: string;
-        size?: number;
-        fromDate?: number;
-      },
+      details: { rawSha256?: string; rawKey?: string; size?: number; fromDate?: number },
+      labels?: string,
     ) => {
-      const results = await db.batch([
+      const fence = `EXISTS(SELECT 1 FROM gmail_takeout_runs WHERE run_id=? AND lease_token=?
+        AND lease_until>? AND next_offset=?)`;
+      const fenceArgs = [config.runId, lease, Date.now(), item.offset];
+      const statements = [
         db
           .prepare(
             `INSERT INTO gmail_takeout_items(run_id,entry_offset,message_id,outcome,from_date,raw_size,raw_sha256,raw_key)
-            SELECT ?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM gmail_takeout_runs WHERE run_id=? AND lease_token=?
-              AND lease_until>? AND next_offset=?)
+            SELECT ?,?,?,?,?,?,?,? WHERE ${fence}
             ON CONFLICT(run_id,entry_offset) DO UPDATE SET outcome=excluded.outcome,raw_sha256=excluded.raw_sha256,
               raw_key=excluded.raw_key`,
           )
@@ -260,41 +269,84 @@ export async function runTakeoutChunk(
             details.size ?? null,
             details.rawSha256 ?? null,
             details.rawKey ?? null,
-            config.runId,
-            lease,
-            Date.now(),
-            item.offset,
+            ...fenceArgs,
           ),
+      ];
+      // A message another transport stored first gets its Takeout label names here.
+      if (labels !== undefined && details.rawKey)
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO gmail_takeout_labels(raw_key,account_namespace,message_id,labels,run_id,entry_offset)
+              SELECT ?,?,?,?,?,? WHERE ${fence} ON CONFLICT(raw_key) DO NOTHING`,
+            )
+            .bind(
+              details.rawKey,
+              config.accountNamespace,
+              item.messageId,
+              labels,
+              config.runId,
+              item.offset,
+              ...fenceArgs,
+            ),
+        );
+      statements.push(
         db
           .prepare(
             `UPDATE gmail_takeout_runs SET next_offset=?,lease_until=?
             WHERE run_id=? AND lease_token=? AND lease_until>? AND next_offset=?`,
           )
           .bind(item.end, Date.now() + LEASE_MS, config.runId, lease, Date.now(), item.offset),
-      ]);
-      if (!results[1]?.meta.changes) throw new GmailImportError("takeout_lease_lost");
+      );
+      const results = await db.batch(statements);
+      if (!results.at(-1)?.meta.changes) throw new GmailImportError("takeout_lease_lost");
       offset = item.end;
       processed++;
     };
     const handle = async (item: TakeoutItem): Promise<TakeoutChunkResult | null> => {
       if (item.offset !== offset) throw new GmailImportError("takeout_offset_mismatch");
+      const halt = async (code: string): Promise<TakeoutChunkResult> => {
+        await stop(db, config.runId, lease, code, item.offset);
+        return { status: "stopped", processed, code, offset: item.offset };
+      };
       if (item.kind === "oversize") {
         await record(item, "oversize", { size: item.size });
         return null;
       }
+      if (config.checkIdDate) {
+        const lag = Number(BigInt(`0x${item.messageId}`) >> 20n) - item.fromDate;
+        if (!(lag >= 0 && lag < 1000)) return halt("takeout_id_date_mismatch");
+      }
+      if (!takeoutLabelsFit(item.labels)) return halt("takeout_labels_too_long");
       const rawSha256 = hex(await crypto.subtle.digest("SHA-256", item.raw));
       const details = { rawSha256, size: item.raw.byteLength, fromDate: item.fromDate };
       const existing = await db
-        .prepare(`SELECT g.raw_key,s.raw_sha256 FROM gmail_messages g
-          JOIN archive_sources s ON s.raw_key=g.raw_key
+        .prepare(`SELECT g.raw_key,s.raw_sha256,s.raw_state,s.receipt_state,l.run_id,l.entry_offset
+          FROM gmail_messages g JOIN archive_sources s ON s.raw_key=g.raw_key
+          LEFT JOIN gmail_takeout_labels l ON l.raw_key=g.raw_key
           WHERE g.account_namespace=? AND g.message_id=?`)
         .bind(config.accountNamespace, item.messageId)
-        .first<{ raw_key: string; raw_sha256: string | null }>();
+        .first<{
+          raw_key: string;
+          raw_sha256: string | null;
+          raw_state: string;
+          receipt_state: string;
+          run_id: string | null;
+          entry_offset: number | null;
+        }>();
       if (existing) {
+        if (existing.raw_state !== "present" || existing.receipt_state !== "valid")
+          return halt("takeout_existing_source_invalid");
+        const rawKey = existing.raw_key;
+        // This entry was stored by this run before its outcome was recorded.
+        if (existing.run_id === config.runId && existing.entry_offset === item.offset) {
+          if (existing.raw_sha256 !== rawSha256) return halt("takeout_raw_conflict");
+          await record(item, "imported", { ...details, rawKey });
+          return null;
+        }
         // The stored original is kept either way; only the comparison is recorded.
         const same = existing.raw_sha256 === rawSha256;
         if (!same && config.onConflict === "stop") {
-          const conflictOffset = item.offset;
           await db
             .prepare(
               `INSERT INTO gmail_takeout_items(run_id,entry_offset,message_id,outcome,from_date,raw_size,raw_sha256,raw_key)
@@ -302,36 +354,18 @@ export async function runTakeoutChunk(
             )
             .bind(
               config.runId,
-              conflictOffset,
+              item.offset,
               item.messageId,
               item.fromDate,
               item.raw.byteLength,
               rawSha256,
-              existing.raw_key,
+              rawKey,
             )
             .run();
-          await stop(db, config.runId, lease, "takeout_raw_conflict", conflictOffset);
-          return {
-            status: "stopped",
-            processed,
-            code: "takeout_raw_conflict",
-            offset: conflictOffset,
-          };
+          return halt("takeout_raw_conflict");
         }
-        await record(item, same ? "verified" : "conflict", {
-          ...details,
-          rawKey: existing.raw_key,
-        });
+        await record(item, same ? "verified" : "conflict", { ...details, rawKey }, item.labels);
         return null;
-      }
-      if (item.labels.length > TAKEOUT_LABELS_LIMIT) {
-        await stop(db, config.runId, lease, "takeout_labels_too_long", item.offset);
-        return {
-          status: "stopped",
-          processed,
-          code: "takeout_labels_too_long",
-          offset: item.offset,
-        };
       }
       const receivedAt = new Date(item.fromDate).toISOString();
       const ingestId = await gmailIngestId(config.accountNamespace, item.messageId);
@@ -354,15 +388,9 @@ export async function runTakeoutChunk(
           labels: item.labels,
         },
       });
-      if (!proposed) {
-        await stop(db, config.runId, lease, "takeout_invalid_provenance", item.offset);
-        return {
-          status: "stopped",
-          processed,
-          code: "takeout_invalid_provenance",
-          offset: item.offset,
-        };
-      }
+      if (!proposed) return halt("takeout_invalid_provenance");
+      if (new TextEncoder().encode(JSON.stringify(proposed)).length > MAX_RECEIPT_BYTES)
+        return halt("takeout_receipt_too_large");
       await storeGmailSource(env, proposed, item.raw);
       await requestProcessing(db, env.MAIL_PROCESSING, rawKey);
       await record(item, "imported", { ...details, rawKey });
@@ -432,6 +460,36 @@ export async function runTakeoutChunk(
         console.error(JSON.stringify({ event: "gmail_takeout_lease_release", status: "failed" })),
       );
   }
+}
+
+/** Fixed codes a chunk may fail with; anything else is reported as takeout_import_failed. */
+export const TAKEOUT_FAILURE_CODES = new Set([
+  "takeout_import_failed",
+  "takeout_lease_lost",
+  "takeout_offset_mismatch",
+  "takeout_object_missing",
+  "takeout_object_size_mismatch",
+  "takeout_offset_outside_objects",
+  "gmail_identity_conflict",
+  "gmail_source_conflict",
+  "gmail_receipt_conflict",
+  "gmail_catalog_busy",
+]);
+
+/**
+ * Stops a running run after its Workflow step failed every retry, so a failure that
+ * repeats for the same entry ends in a recorded code instead of an endless restart.
+ * The failing step already released its lease; a live lease means another runner.
+ */
+export async function stopTakeoutRun(db: D1Database, runId: string, code: string) {
+  const fixed = TAKEOUT_FAILURE_CODES.has(code) ? code : "takeout_import_failed";
+  await db
+    .prepare(
+      `UPDATE gmail_takeout_runs SET status='stopped',stop_code=?,stop_offset=next_offset
+      WHERE run_id=? AND status='running' AND lease_until<=?`,
+    )
+    .bind(fixed, runId, Date.now())
+    .run();
 }
 
 export const TAKEOUT_INSTANCE_PREFIX = "takeout-";

@@ -250,7 +250,9 @@ behaviour:
   "runId": "takeout-main-2026-11",
   "accountNamespace": "gmail-…",
   "objects": [{ "key": "<namespace>/<date>/part-001.mbox", "size": 2147483648 }],
-  "onConflict": "stop"
+  "onConflict": "stop",
+  "checkIdDate": true,
+  "attempt": 0
 }
 ```
 
@@ -260,16 +262,29 @@ behaviour:
 - The five-minute cron starts the `TakeoutImport` Workflow (`fumi-gmail-takeout`, one
   instance at a time) for a configured run that is still `running`, and starts a new
   instance when the previous one ended. Each Workflow step takes the run's lease and
-  processes at most 100 entries from the checkpoint.
+  processes at most 100 entries from the checkpoint. When a step still fails after its
+  five retries, the Workflow stops the run with that step's fixed code (or
+  `takeout_import_failed`), so a broken run does not restart every five minutes.
 - [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The
   stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
   and Takeout's separator removed. A malformed or cut-off stream stops the run with
   the splitter's fixed code and stream offset.
+- With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
+  `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
+  milliseconds, and the `From_` date is that time cut to seconds, so the difference
+  must be 0 to 999 ms. A mismatch stops the run with `takeout_id_date_mismatch`. This
+  catches a message body that imitates a Takeout separator with a made-up ID. It does
+  not stop a sender who copies a consistent ID and date into the body; such a forged
+  entry would still need the real separator layout, and the run's conflict and
+  verification counts are reviewed before the run is accepted. A run may disable the
+  check only after the stopped entry has been reviewed.
 - The checkpoint `gmail_takeout_runs.next_offset` is the stream offset of the next
   unprocessed entry. It advances in the same D1 batch that records the entry in
   `gmail_takeout_items` with one outcome:
   - `imported`: stored through the same path as the API transports, with receipt
-    schema `gmail-takeout-v1` (below), then dispatched for processing.
+    schema `gmail-takeout-v1` (below), then dispatched for processing. If the Worker
+    stops after storing the entry but before recording it, the retry finds this run's
+    own receipt at the same offset and records `imported`.
   - `verified`: the account already has this message ID with the same raw SHA-256.
   - `conflict`: the account already has this message ID with a different raw
     SHA-256. The stored original is kept. With `onConflict: "stop"` (the default) the
@@ -277,6 +292,11 @@ behaviour:
     resumes with `onConflict: "record"`; a stopped run accepts a changed
     configuration only when its account and objects are unchanged.
   - `oversize`: over the 25 MiB raw limit; not stored.
+- A stopped run resumes from its checkpoint when the configuration changes, for
+  example by raising `attempt` after a transient failure.
+- Other stop codes: `takeout_existing_source_invalid` (the account's existing source
+  for this message ID is missing or not present in R2), `takeout_labels_too_long`,
+  `takeout_receipt_too_large` and `takeout_invalid_provenance`.
 - The ingest ID is the same `gmail-import-v1` identity as the API transports, so a
   message has one archive source per account whichever transport saw it first.
 
@@ -284,10 +304,13 @@ The `gmail-takeout-v1` receipt has the `gmail-import-v1` fields plus
 `takeout: { runId, objectKey, entryOffset, labels }`. `internalDate` is the `From_`
 date in milliseconds, which has second precision. `labelIds` is empty, because Takeout
 holds label names, not API label IDs. The names (localized, possibly RFC 2047
-encoded, at most 8 KiB) are kept as stored in `gmail_takeout_labels`, which the
-reconciler rebuilds from receipts. The `label_ids` search filter still matches API IDs
-only. The ADR's per-entry SHA-256 is not recorded separately: the raw SHA-256 and the
-entry offset identify the entry.
+encoded, at most 8 KiB in UTF-8) are kept as stored in `gmail_takeout_labels`, keyed
+by raw key with the run ID and entry offset. For an imported entry the row comes from
+its receipt, so the reconciler rebuilds it. For a `verified` or `conflict` entry the
+message was stored by another transport, so the row comes from the run instead and
+the first run to see the message keeps it. The `label_ids` search filter still
+matches API IDs only. The ADR's per-entry SHA-256 is not recorded separately: the raw
+SHA-256 and the entry offset identify the entry.
 
 Progress and outcomes are D1 rows. The run's `status`, `stop_code` and `stop_offset`,
 and the per-outcome counts and `from_date` range in `gmail_takeout_items`, are the

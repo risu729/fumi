@@ -1,10 +1,12 @@
 import { env as runtimeEnv } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { NonRetryableError } from "cloudflare:workflows";
 import {
   ensureTakeoutWorkflow,
   runTakeoutChunk,
   startTakeoutRun,
+  stopTakeoutRun,
   takeoutConfig,
   TAKEOUT_CHUNK_ENTRIES,
   type TakeoutConfig,
@@ -12,6 +14,7 @@ import {
 import { parseGmailProvenance } from "../src/gmail-provenance.ts";
 import { reconcileArchive } from "../src/reconcile.ts";
 import { GmailImportError } from "../src/gmail-transport.ts";
+import { takeoutStepError } from "../src/gmail-takeout-workflow.ts";
 
 const workflow = {
   createBatch: vi
@@ -30,9 +33,13 @@ const namespace = "synthetic-takeout";
 // Synthetic entries only; the From_ dates are real weekdays.
 const message = (n: number, body = `Body ${n}.`) =>
   `Message-ID: <m${n}@example.invalid>\r\nSubject: Synthetic ${n}\r\n\r\n${body}\r\n`;
-const entry = (n: number, body?: string, labels = "Inbox,Opened") =>
-  `From ${1_000_000 + n}@xxx Tue Jul 08 09:44:${String(n % 60).padStart(2, "0")} +0000 2025\r\n` +
-  `X-GM-THRID: ${1_000_000 + (n - (n % 2))}\r\nX-Gmail-Labels: ${labels}\r\n${message(n, body)}\r\n`;
+// A Gmail ID starts with the receipt time in milliseconds; the From_ date is that time
+// in whole seconds.
+const fromDate = (n: number) => Date.parse(`2025-07-08T09:44:${String(n % 60).padStart(2, "0")}Z`);
+const gmailId = (n: number, lag = 250) => (BigInt(fromDate(n) + lag) << 20n) + BigInt(n);
+const entry = (n: number, body?: string, labels = "Inbox,Opened", id = gmailId(n)) =>
+  `From ${id}@xxx Tue Jul 08 09:44:${String(n % 60).padStart(2, "0")} +0000 2025\r\n` +
+  `X-GM-THRID: ${gmailId(n - (n % 2))}\r\nX-Gmail-Labels: ${labels}\r\n${message(n, body)}\r\n`;
 const mbox = (count: number, from = 0) =>
   Array.from({ length: count }, (_, index) => entry(from + index)).join("");
 
@@ -127,10 +134,10 @@ describe("Google Takeout import", () => {
       FROM gmail_messages g JOIN gmail_takeout_labels l ON l.raw_key=g.raw_key
       WHERE g.account_namespace=? AND g.message_id=?`,
     )
-      .bind(namespace, (1_000_003).toString(16))
+      .bind(namespace, gmailId(3).toString(16))
       .first<Record<string, string>>();
     expect(row).toMatchObject({
-      thread_id: (1_000_002).toString(16),
+      thread_id: gmailId(2).toString(16),
       internal_date: String(Date.parse("2025-07-08T09:44:03Z")),
       label_ids_json: "[]",
       labels: "Inbox,Opened",
@@ -171,8 +178,15 @@ describe("Google Takeout import", () => {
     const objects = await upload(mbox(5), ["a/part-1.mbox"]);
     expect(await drain(config("first", objects))).toMatchObject({ status: "complete" });
     const before = await env.MAIL_ARCHIVE.list();
+    // As for a message another transport stored first, labels come from the item.
+    await env.MAIL_CATALOG.prepare("DELETE FROM gmail_takeout_labels").run();
     expect(await drain(config("again", objects))).toMatchObject({ status: "complete" });
     expect(await outcomes("again")).toEqual({ verified: 5 });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM gmail_takeout_labels WHERE run_id='again' AND labels='Inbox,Opened'",
+      ).first("n"),
+    ).toBe(5);
     expect((await env.MAIL_ARCHIVE.list()).objects.map((o) => o.etag)).toEqual(
       before.objects.map((o) => o.etag),
     );
@@ -227,6 +241,94 @@ describe("Google Takeout import", () => {
       offset: encoder.encode(mbox(2)).length,
     });
     expect(await outcomes("cut")).toEqual({ imported: 2 });
+  });
+
+  it("stops at an entry whose message ID does not match its From_ date", async () => {
+    // Body text that imitates an entry boundary, with an ID the sender chose.
+    const forged = `${entry(0, `hello\r\n\r\nFrom 999999@xxx Tue Jul 08 09:44:00 +0000 2025\r\nX-GM-THRID: 999999\r\nX-Gmail-Labels: Inbox\r\nSubject: forged`)}${entry(1)}`;
+    const objects = await upload(forged, ["a/forged.mbox"]);
+    const fake = encoder.encode(forged).indexOf(encoder.encode("From 999999")[0]!, 1);
+    const result = await drain(config("forged", objects));
+    expect(result).toMatchObject({ status: "stopped", code: "takeout_id_date_mismatch" });
+    expect((result as { offset: number }).offset).toBeGreaterThanOrEqual(fake);
+    expect(await outcomes("forged")).toEqual({ imported: 1 });
+  });
+
+  it("stops before storing labels whose UTF-8 form would not fit a receipt", async () => {
+    const objects = await upload(entry(0, undefined, "ラベル".repeat(1000)), ["a/labels.mbox"]);
+    expect(await drain(config("labels", objects))).toMatchObject({
+      status: "stopped",
+      code: "takeout_labels_too_long",
+      offset: 0,
+    });
+    expect((await env.MAIL_ARCHIVE.list()).objects).toEqual([]);
+  });
+
+  it("records an entry stored just before a lost commit as imported, not verified", async () => {
+    const objects = await upload(mbox(2), ["a/crash.mbox"]);
+    const run = config("crash", objects);
+    await startTakeoutRun(env.MAIL_CATALOG, run);
+    vi.spyOn(env.MAIL_CATALOG, "batch").mockRejectedValueOnce(new Error("D1 unavailable"));
+    await expect(runTakeoutChunk(env, run)).rejects.toThrow("takeout_import_failed");
+    vi.restoreAllMocks();
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    expect(await outcomes("crash")).toEqual({ imported: 2 });
+  });
+
+  it("stops at an existing source whose raw object is missing", async () => {
+    const objects = await upload(mbox(1), ["a/missing.mbox"]);
+    await drain(config("first", objects));
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state='missing'").run();
+    expect(await drain(config("second", objects))).toMatchObject({
+      status: "stopped",
+      code: "takeout_existing_source_invalid",
+      offset: 0,
+    });
+  });
+
+  it("resumes a stopped run when its attempt is raised, and stops failed runs with fixed codes", async () => {
+    const objects = await upload(mbox(1), ["a/part.mbox"]);
+    const wrong = [{ key: "a/part.mbox", size: objects[0]!.size + 1 }];
+    expect(await drain(config("retry", wrong))).toMatchObject({ status: "stopped" });
+    expect(await startTakeoutRun(env.MAIL_CATALOG, config("retry", wrong))).toMatchObject({
+      status: "stopped",
+    });
+    expect(
+      await startTakeoutRun(env.MAIL_CATALOG, config("retry", wrong, { attempt: 1 })),
+    ).toMatchObject({ status: "running" });
+
+    await startTakeoutRun(env.MAIL_CATALOG, config("failed", objects));
+    await stopTakeoutRun(env.MAIL_CATALOG, "failed", "select * from secrets");
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT status,stop_code,stop_offset FROM gmail_takeout_runs WHERE run_id='failed'",
+      ).first(),
+    ).toEqual({ status: "stopped", stop_code: "takeout_import_failed", stop_offset: 0 });
+    // A live lease belongs to another runner, which keeps going.
+    await startTakeoutRun(env.MAIL_CATALOG, config("leased", objects));
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE gmail_takeout_runs SET lease_token='other',lease_until=? WHERE run_id='leased'",
+    )
+      .bind(Date.now() + 60_000)
+      .run();
+    await stopTakeoutRun(env.MAIL_CATALOG, "leased", "gmail_receipt_conflict");
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT status FROM gmail_takeout_runs WHERE run_id='leased'",
+      ).first("status"),
+    ).toBe("running");
+  });
+
+  it("lets only fixed codes out of a Workflow step", () => {
+    expect(takeoutStepError(new GmailImportError("gmail_receipt_conflict")).message).toBe(
+      "gmail_receipt_conflict",
+    );
+    expect(takeoutStepError(new Error("D1_ERROR: near 'secret'")).message).toBe(
+      "takeout_import_failed",
+    );
+    expect(takeoutStepError(new GmailImportError("takeout_config_conflict"))).toBeInstanceOf(
+      NonRetryableError,
+    );
   });
 
   it("starts one Workflow instance per configured run from the cron", async () => {

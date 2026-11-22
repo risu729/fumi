@@ -12,7 +12,11 @@ export interface GmailTakeoutSource {
   labels: string;
 }
 
+/** UTF-8 bytes of X-Gmail-Labels kept in a receipt, which must stay under 16 KiB. */
 export const TAKEOUT_LABELS_LIMIT = 8 * 1024;
+const utf8 = new TextEncoder();
+export const takeoutLabelsFit = (labels: string) =>
+  labels.length <= TAKEOUT_LABELS_LIMIT && utf8.encode(labels).length <= TAKEOUT_LABELS_LIMIT;
 
 /**
  * `gmail-import-v1` comes from the Gmail API (OAuth or connector). `gmail-takeout-v1`
@@ -52,7 +56,7 @@ function validTakeout(p: Partial<GmailProvenance>): boolean {
     Number.isSafeInteger(t.entryOffset) &&
     (t.entryOffset ?? -1) >= 0 &&
     typeof t.labels === "string" &&
-    t.labels.length <= TAKEOUT_LABELS_LIMIT &&
+    takeoutLabelsFit(t.labels) &&
     Array.isArray(p.labelIds) &&
     p.labelIds.length === 0 &&
     Number(p.internalDate) % 1000 === 0
