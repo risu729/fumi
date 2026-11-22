@@ -52,7 +52,7 @@ const mbox =
     id: "1837071459230217941",
     thread: "1837071459230217940",
     date: "Wed Jan 01 00:00:00 +0900 2025",
-    labels: "Archived,Unread,\r\n =?UTF-8?B?44Op44OZ44Or?=",
+    labels: "Archived,Unread,=?UTF-8?B?44Op44OZ44Or?=",
     message: second,
   }) +
   entry({ id: "18446744073709551615", labels: "", message: third });
@@ -74,7 +74,7 @@ describe("Takeout mbox splitter", () => {
       messageId: "197e96c24a6cf6d5",
       threadId: "197e96c24a6cf6d4",
       fromDate: Date.parse("2024-12-31T15:00:00Z"),
-      labels: "Archived,Unread, =?UTF-8?B?44Op44OZ44Or?=",
+      labels: "Archived,Unread,=?UTF-8?B?44Op44OZ44Or?=",
     });
     expect(items[2]).toMatchObject({ messageId: "ffffffffffffffff", labels: "" });
   });
@@ -88,7 +88,8 @@ describe("Takeout mbox splitter", () => {
   it("keeps a body line that looks like a From_ line but is not one", () => {
     const body = message(
       "quoted",
-      "From 123@xxx yesterday\r\n\r\nFrom 1@xxx Tue Jul 08 09:44:28 +0000\r\n",
+      "From 123@xxx yesterday\r\n\r\nFrom 1@xxx Tue Jul 08 09:44:28 +0000\r\n\r\n" +
+        "From 5@xxx Tue Jul 08 09:44:28 +0000 2025\r\nSubject: quoted mbox\r\n",
     );
     const items = split(entry({ id: "1", message: body }), 4) as TakeoutEntry[];
     expect(items).toHaveLength(1);
@@ -123,7 +124,11 @@ describe("Takeout mbox splitter", () => {
         messageId: "000000000000000a",
         size: encoder.encode(big).length,
       });
-      expect(items[1]).toMatchObject({ kind: "entry", messageId: "000000000000000b" });
+      expect(items[1]).toMatchObject({
+        kind: "entry",
+        offset: entry({ id: "10", message: big }).length,
+        messageId: "000000000000000b",
+      });
       expect(decoder.decode((items[1] as TakeoutEntry).raw)).toBe(small);
     }
   });
@@ -143,6 +148,10 @@ describe("Takeout mbox splitter", () => {
       "Tue Jul 08 09:44:28 2025",
       "Tue Foo 08 09:44:28 +0000 2025",
       "Tue Feb 30 09:44:28 +0000 2025",
+      "Mon Jul 08 09:44:28 +0000 2025",
+      "Tue Jul 08 24:00:00 +0000 2025",
+      "Tue Jul 08 09:44:28 +9900 2025",
+      "Thu Jan 01 00:00:00 +0000 0070",
     ])
       expect(
         failure(() => split(entry({ id: "1", date, message: first }))),
@@ -155,6 +164,15 @@ describe("Takeout mbox splitter", () => {
       code: "takeout_invalid_from_line",
       offset: 0,
     });
+    expect(failure(() => split("From 1@xxx Tue Jul"))).toEqual({
+      code: "takeout_invalid_from_line",
+      offset: 0,
+    });
+  });
+
+  it("applies a negative zone offset", () => {
+    const items = split(entry({ id: "1", date: "Sun Jan 01 00:00:00 -0130 2006", message: first }));
+    expect(items[0]).toMatchObject({ fromDate: Date.parse("2006-01-01T01:30:00Z") });
   });
 
   it("stops when the Gmail headers are missing or malformed", () => {
@@ -178,23 +196,65 @@ describe("Takeout mbox splitter", () => {
     });
   });
 
-  it("stops at a second entry with invalid Gmail headers, at that entry's offset", () => {
-    const head = entry({ id: "1", message: first });
-    const text = `${head}From 2@xxx Tue Jul 08 09:44:28 +0000 2025\r\nSubject: x\r\n\r\nbody\r\n\r\n`;
-    expect(failure(() => split(text, 5))).toEqual({
-      code: "takeout_invalid_gmail_headers",
-      offset: head.length,
-    });
+  it("stops when a line after the labels starts with whitespace", () => {
+    // A folded label line and a message whose first line starts with a space look the same.
+    for (const size of [1, 64, 10_000])
+      expect(
+        failure(() => split(entry({ id: "1", message: ` leading\r\n${first}` }), size)),
+      ).toEqual({
+        code: "takeout_invalid_gmail_headers",
+        offset: 0,
+      });
   });
 
-  it("stops when the last entry has no Takeout separator", () => {
-    const text = `From 1@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 1\r\nX-Gmail-Labels: Inbox\r\nSubject: x\r\n\r\nbody`;
-    expect(failure(() => split(text))).toEqual({ code: "takeout_missing_separator", offset: 0 });
+  it("stops at a later entry with invalid Gmail headers, at that entry's offset", () => {
+    const head = entry({ id: "1", message: first });
+    const text = `${head}From 2@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 2\r\nSubject: x\r\n\r\nbody\r\n\r\n`;
+    for (const size of [5, 10_000])
+      expect(failure(() => split(text, size))).toEqual({
+        code: "takeout_invalid_gmail_headers",
+        offset: head.length,
+      });
+  });
+
+  it("stops when a message has no final line break before the next entry", () => {
+    const head = entry({ id: "1", message: first });
+    const text = `${head.slice(0, -2)}${entry({ id: "2", message: second })}`;
+    for (const size of [3, 10_000])
+      expect(failure(() => split(text, size))).toEqual({
+        code: "takeout_missing_separator",
+        offset: head.length - 2,
+      });
+  });
+
+  it("stops at a stream cut off inside the last entry", () => {
+    const whole = entry({ id: "1", message: first });
+    const headers =
+      "From 1@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 1\r\nX-Gmail-Labels: Inbox\r\n";
+    for (const cut of [
+      whole.slice(0, -2),
+      whole.slice(0, -3),
+      `${headers}Subject: x\r\n\r\nline1\r\n`,
+      headers,
+    ])
+      expect(failure(() => split(cut))).toEqual({ code: "takeout_missing_separator", offset: 0 });
+    expect(failure(() => split(headers.slice(0, -2)))).toEqual({
+      code: "takeout_invalid_gmail_headers",
+      offset: 0,
+    });
   });
 
   it("stops at Gmail headers over the header limit", () => {
     const labels = "L".repeat(64 * 1024 + 10);
     const text = entry({ id: "1", labels, message: first });
     expect(failure(() => split(text, 4096))).toEqual({ code: "takeout_header_limit", offset: 0 });
+  });
+
+  it("ends once and refuses later pushes", () => {
+    const splitter = new TakeoutMboxSplitter();
+    splitter.push(encoder.encode(mbox));
+    expect(splitter.end()).toHaveLength(1);
+    expect(splitter.end()).toEqual([]);
+    expect(() => splitter.push(encoder.encode("x"))).toThrow();
   });
 });
