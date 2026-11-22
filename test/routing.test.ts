@@ -125,6 +125,9 @@ describe("bounded shadow CEL routing in workerd", () => {
     'subject != "unrelated" && hasAttachments == true',
     "!(hasAttachments == false) && (false || true)",
     '"確認".contains("確") && subject.endsWith("12345")',
+    // Accepted escapes keep their JSON meaning in the CEL parser.
+    'subject.contains("\\u78ba\\u8a8d") && "\\"\\\\\\t" == "\\u0022\\u005c\\u0009"',
+    '"\\b\\f\\n\\r" == "\\u0008\\u000C\\u000a\\u000d"',
   ])("supports the declared boolean/string CEL subset %#", async (match) => {
     const router = await compileShadowRouter(
       JSON.stringify({
@@ -314,6 +317,16 @@ describe("bounded shadow CEL routing in workerd", () => {
     "(".repeat(1000) + "true" + ")".repeat(1000),
     '"a"'.repeat(1000),
     Array.from({ length: 130 }, () => "true").join(" && "),
+    // CEL reads `"""` as a triple-quoted string, while the token preflight reads an
+    // empty string and then a new literal. Neither form may pass.
+    'subject == """x"""',
+    '"""a" """ == subject || !!hasAttachments || subject == """ " """',
+    // JSON reads `\/` as `/`, but the CEL parser keeps both characters, so the rule
+    // would silently compare a different string.
+    'subject.contains("a\\/b")',
+    // JSON pairs surrogate escapes into one character; the CEL parser rejects them.
+    'subject.contains("\\ud83d\\ude00")',
+    'subject.contains("\\uDFFF")',
   ])("rejects unsupported or resource-intensive CEL before evaluation %#", async (match) => {
     await expect(
       compileShadowRouter(

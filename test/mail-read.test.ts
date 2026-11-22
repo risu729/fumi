@@ -263,9 +263,33 @@ describe("bounded private mail reads", () => {
     expect(await ids("subject:\u00c4nderung")).toEqual(["mail_latin"]);
     expect(await ids("subject:\u00e4nderung")).toEqual(["mail_latin"]);
   });
+  it("matches filter values longer than D1's 50-byte LIKE pattern limit literally", async () => {
+    const ascii = "Quarterly synthetic statement for the account ending 0000";
+    const kana = "あ".repeat(20);
+    const percent = "%".repeat(30);
+    await insert("ascii", "2026-11-11T00:00:00.000Z", { subject: `Re: ${ascii}` });
+    await insert("kana", "2026-11-10T00:00:00.000Z", { subject: `【${kana}】` });
+    await insert("percent", "2026-11-09T00:00:00.000Z", { subject: `${percent} off` });
+    await insert("other", "2026-11-08T00:00:00.000Z", { subject: "%_\\ other" });
+    const ids = async (query: string) =>
+      (await searchMail(env, principal, { query })).emails.map((m) => m.id);
+    expect(await ids(`subject:"${ascii.toUpperCase()}"`)).toEqual(["mail_ascii"]);
+    expect(await ids(`subject:${kana}`)).toEqual(["mail_kana"]);
+    expect(await ids(`subject:${"Ä".repeat(30)}`)).toEqual([]);
+    expect(await ids(`subject:${percent}`)).toEqual(["mail_percent"]);
+    expect(await ids("subject:%_\\")).toEqual(["mail_other"]);
+    // A NUL is part of the value, not the end of it.
+    expect(await ids("subject:\u0000")).toEqual([]);
+    expect(await ids('subject:""')).toEqual([
+      "mail_ascii",
+      "mail_kana",
+      "mail_percent",
+      "mail_other",
+    ]);
+  });
   it("binds the most filters D1 allows next to every other search parameter", async () => {
     await insert("latin", "2026-11-10T00:00:00.000Z", { subject: "Änderung" });
-    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    // Each subject:Ä binds two values, the most a filter can bind.
     const filters = (count: number) => Array.from({ length: count }, () => "subject:Ä");
     const most = filters(MAX_SEARCH_FILTERS).join(" ");
     expect((await searchMail(env, principal, { query: most })).emails.map((m) => m.id)).toEqual([

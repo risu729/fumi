@@ -162,7 +162,11 @@ const BREAK_ELEMENTS = new Set([
 
 function decodeEntities(value: string): string {
   return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, name: string) => {
-    if (name[0] !== "#") return entities[name.toLowerCase()] ?? match;
+    if (name[0] !== "#") {
+      // Own entries only: `&constructor;` must not decode to an inherited member.
+      const key = name.toLowerCase();
+      return Object.hasOwn(entities, key) ? entities[key]! : match;
+    }
     const code =
       name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
     return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)

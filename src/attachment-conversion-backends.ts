@@ -28,7 +28,7 @@ export interface ConversionBindings {
   AI?: ManagedDocuments;
   ATTACHMENT_OCR?: ManagedOcr;
 }
-export const documentFormats: Readonly<Record<string, string>> = {
+const documentFormats: Readonly<Record<string, string>> = {
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
   "application/vnd.oasis.opendocument.text": "odt",
@@ -39,19 +39,27 @@ export const documentFormats: Readonly<Record<string, string>> = {
   "text/csv": "csv",
   "text/html": "html",
 };
-export const ocrFormats: Readonly<Record<string, string>> = {
+const ocrFormats: Readonly<Record<string, string>> = {
   "application/pdf": "pdf",
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/webp": "webp",
 };
+// The MIME type is untrusted attachment metadata. Own entries only, so a value
+// such as `constructor` cannot resolve to an inherited Object.prototype member.
+export function documentFormat(mime: string): string | undefined {
+  return Object.hasOwn(documentFormats, mime) ? documentFormats[mime] : undefined;
+}
+export function ocrFormat(mime: string): string | undefined {
+  return Object.hasOwn(ocrFormats, mime) ? ocrFormats[mime] : undefined;
+}
 export const record = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new ConversionBlocked("invalid_provider_response");
   return value as Record<string, unknown>;
 };
 export function itemKey(sha: string, mime: string) {
-  return `fumi-${sha}.${ocrFormats[mime]}`;
+  return `fumi-${sha}.${ocrFormat(mime)}`;
 }
 export function remoteId(value: unknown, expectedKey: string) {
   const response = record(value);
@@ -74,7 +82,7 @@ export async function convertDocument(
   mime: string,
   sha: string,
 ) {
-  const name = `fumi-${sha}.${documentFormats[mime]}`;
+  const name = `fumi-${sha}.${documentFormat(mime)}`;
   const result = record(
     await binding.toMarkdown(
       { name, blob: new Blob([bytes], { type: mime }) },
