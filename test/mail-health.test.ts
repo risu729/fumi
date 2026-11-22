@@ -56,6 +56,7 @@ async function ingress(
   forward: Forward,
   messageId: string | null,
   extraction: "current" | "stale" | "none" = messageId === null ? "none" : "current",
+  from = "synthetic@example.invalid",
 ) {
   const rawKey = `synthetic/forward/${id}`;
   const schemaVersion =
@@ -68,7 +69,7 @@ async function ingress(
     schemaVersion,
     ingestId: id,
     receivedAt,
-    envelope: { from: "synthetic@example.invalid", to: "archive@example.invalid" },
+    envelope: { from, to: "archive@example.invalid" },
     reportedRawSize: 100,
     archive: { status: "stored", key: rawKey, size: 100, sha256: "a".repeat(64) },
     forward,
@@ -255,6 +256,49 @@ describe("bounded read-only archival health evidence", () => {
     const text = JSON.stringify(result);
     for (const secret of ["@example.invalid", "synthetic/forward/", "Synthetic"])
       expect(text).not.toContain(secret);
+  });
+  it("recovers only by a msg-id shaped Message-ID from the same envelope sender", async () => {
+    const at = (time: string) => `2026-11-21T${time}:00.000Z`;
+    const failed = { status: "failed", code: "forward_failed" } as const;
+    // postal-mime returns "<>" for an empty header; an unrelated later "<>" is no recovery.
+    await ingress("empty-id", at("00:00"), failed, "<>");
+    await ingress("empty-later", at("00:05"), { status: "forwarded" }, "<>");
+    // Ids without a local or domain part are not keys either.
+    await ingress("no-local", at("01:00"), failed, "<@example.invalid>");
+    await ingress("no-local-later", at("01:05"), { status: "forwarded" }, "<@example.invalid>");
+    await ingress("no-domain", at("02:00"), failed, "<x@>");
+    await ingress("no-domain-later", at("02:05"), { status: "forwarded" }, "<x@>");
+    // The same Message-ID from another envelope sender is not a recovery.
+    await ingress("other-sender", at("03:00"), failed, "<e@example.invalid>");
+    await ingress(
+      "other-sender-later",
+      at("03:05"),
+      { status: "forwarded" },
+      "<e@example.invalid>",
+      "current",
+      "another@example.invalid",
+    );
+    // A short but well-formed id still matches from the same sender.
+    await ingress("short", at("04:00"), failed, "<a@b>");
+    await ingress("short-later", at("04:05"), { status: "forwarded" }, "<a@b>");
+    const section = forwardFailures(await getMailHealth(env, reader, now));
+    expect(section.counts).toEqual({
+      receipt_forward_failures: 5,
+      receipt_forward_failures_recovered: 1,
+      receipt_forward_failures_unrecovered: 1,
+      receipt_forward_failures_recovery_unknown: 3,
+    });
+    expect(
+      Object.fromEntries(
+        section.failed_forwards.map((row) => [row.id, [row.recovery, row.recovered_by]]),
+      ),
+    ).toEqual({
+      "mail_empty-id": ["unknown", null],
+      "mail_no-local": ["unknown", null],
+      "mail_no-domain": ["unknown", null],
+      "mail_other-sender": ["unrecovered", null],
+      mail_short: ["recovered", "mail_short-later"],
+    });
   });
   it("caps the failed forward list and reports zero failures as an empty observation", async () => {
     let result = await getMailHealth(env, reader, now);

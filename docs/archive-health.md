@@ -92,24 +92,36 @@ come from the retained receipt snapshot
 before reasons existed show `forward_failed` and `null`. Pass an `id` to `read_email`
 for the message itself.
 
-`recovery` is `recovered` when a later ingress row in the window was forwarded and its
-current MIME extraction has the same `Message-ID` header; `recovered_by` names the
-earliest such row. It is `unrecovered` when the failed row has a Message-ID and no such
-row exists, and `unknown` when its extraction is missing, pending, blocked or stale or
-has no Message-ID. The match reads `mail_extractions.metadata_json`, so it needs no new
-index or migration; the 1,000-row window bounds its cost. Matching is deliberately
-narrow:
+`recovery` is `recovered` when a later ingress row in the window was forwarded, its
+current MIME extraction has the same `Message-ID` header and its receipt has the same
+envelope sender (`envelope.from`); `recovered_by` names the earliest such row. It is
+`unrecovered` when the failed row has a usable Message-ID and no such row exists, and
+`unknown` when its extraction is missing, pending, blocked or stale or has no usable
+Message-ID. A usable Message-ID has a non-empty part on each side of `@` once angle
+brackets are trimmed, so `<>` (what the parser returns for an empty header),
+`<@host>` or `<id@>` give `unknown` rather than matching every other mail with the
+same degenerate value (review fix, 2026-11-22 14:00 UTC). The match reads
+`mail_extractions.metadata_json` and the receipt snapshot, so it needs no new index or
+migration; the 1,000-row window bounds its cost. Matching is deliberately narrow:
 
-- A sender's resend under a new Message-ID counts as `unrecovered`. Envelope sender
-  and subject were not used: two distinct mails can share them.
+- `recovered_by` is a later forwarded copy of the same message, not necessarily a
+  retry. One message delivered to two aliases arrives as two ingress rows with the
+  same Message-ID and envelope sender, so a failure to one alias reads as `recovered`
+  by the sibling copy to the other alias even if the failed delivery was never
+  retried. Check which alias `recovered_by` was addressed to.
+- A sender's resend under a new Message-ID counts as `unrecovered`. Subject was not
+  used: two distinct mails can share it. Envelope sender alone is not a key either,
+  but a different envelope sender rules a match out, so a sender reusing another
+  sender's Message-ID does not count.
 - A forwarded copy received before the failure, or at the same instant, is not a
   recovery.
 - The parsed header values are compared exactly, angle brackets and letter case
   included; a genuine retry carries the same bytes.
 - Message-ID is an untrusted header. A recovery is a hint that the destination
   accepted an attempt of the same message, not proof of Gmail inbox placement. Any
-  sender who knows a failed message's Message-ID, including its own sender, can make
-  that failure read as `recovered` by getting a later message with the same header
+  sender who knows a failed message's Message-ID and can send from the same envelope
+  sender, including the original sender reusing a constant Message-ID, can make that
+  failure read as `recovered` by getting a later message with the same header
   forwarded. Check the `recovered_by` message before relying on a recovery.
 - A retry outside the window, not yet cataloged, or without a current extraction is
   not seen, so the failure stays `unrecovered` until that retry is extracted.

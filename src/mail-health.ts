@@ -156,7 +156,9 @@ export async function getMailHealth(
       "COUNT(*) AS records,(SELECT COUNT(*) FROM observed)>" + CATALOG_LIMIT + " AS truncated";
     // One query lists the newest failed forwards and counts recovery over the same window.
     // A failure is recovered when a later forwarded ingress row in the window carries the
-    // same Message-ID header in a current extraction; without that header it is unknown.
+    // same Message-ID header in a current extraction and the same envelope sender. Without
+    // a msg-id shaped header (a non-empty part on each side of '@', so not "<>") it is
+    // unknown. The match may be a copy of the same message to another alias, not a retry.
     const forwardFailures = async (): Promise<ForwardFailureSection> => {
       if (!schemaAvailable) return { status: "unknown", reason: "query_unavailable" };
       if (!tables.has("archive_sources") || !tables.has("mail_extractions"))
@@ -166,16 +168,23 @@ export async function getMailHealth(
         rows = (
           await bounded(() =>
             env.MAIL_CATALOG.prepare(
-              `${catalogWindow}, keyed AS MATERIALIZED (
+              `${catalogWindow}, headers AS (
               SELECT s.health_row,s.external_id,s.received_at,s.forward_status,s.receipt_snapshot,
               ${KNOWN_RECEIPT_SQL} AS known_receipt,
               CASE WHEN ${CURRENT_EXTRACTION_SQL} AND json_valid(e.metadata_json)
                 AND json_type(e.metadata_json,'$.messageId')='text'
-              THEN json_extract(e.metadata_json,'$.messageId') END AS message_key
+              THEN json_extract(e.metadata_json,'$.messageId') END AS message_id
               FROM sample s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
               WHERE s.source_kind='email_routing'),
+            keyed AS MATERIALIZED (SELECT h.*,
+              CASE WHEN instr(trim(message_id,'<> '),'@')>1
+                AND instr(trim(message_id,'<> '),'@')<length(trim(message_id,'<> '))
+              THEN message_id END AS message_key,
+              CASE WHEN known_receipt=1 THEN json_extract(receipt_snapshot,'$.envelope.from') END AS envelope_from
+              FROM headers h),
             failed AS MATERIALIZED (SELECT f.*,CASE WHEN f.message_key IS NULL THEN NULL ELSE (
               SELECT r.external_id FROM keyed r WHERE r.message_key=f.message_key AND r.known_receipt=1
+              AND r.envelope_from=f.envelope_from
               AND r.forward_status='forwarded' AND r.received_at>f.received_at
               ORDER BY r.received_at,r.external_id LIMIT 1) END AS recovered_by
               FROM keyed f WHERE f.known_receipt=1 AND f.forward_status='failed'),
