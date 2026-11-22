@@ -298,6 +298,21 @@ describe("bounded read-only archival health evidence", () => {
     });
     expect(JSON.stringify(result)).not.toContain("bad id");
   });
+  it("makes the failed forward list unknown when a v3 snapshot has an invalid SMTP status", async () => {
+    await ingress(
+      "bad-status",
+      "2026-11-21T00:00:00.000Z",
+      { status: "failed", code: "rejected_permanent", smtpStatus: "2.0.0" },
+      null,
+    );
+    const result = await getMailHealth(env, reader, now);
+    expect(counts(result.sections.catalog)["receipt_forward_failures"]).toBe(1);
+    expect(result.sections.forward_failures).toEqual({
+      status: "unknown",
+      reason: "invalid_catalog_evidence",
+    });
+    expect(JSON.stringify(result)).not.toContain("2.0.0");
+  });
   it("requires mail:read before inspecting catalog state", async () => {
     const prepare = vi.fn();
     await expect(
