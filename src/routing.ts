@@ -111,8 +111,9 @@ function order(a: { priority: number; id: string }, b: { priority: number; id: s
 }
 
 // A deliberately restricted CEL token alphabet bounds parser recursion before parsing.
-// Strings are JSON-style double quoted literals; comments, escapes other than JSON,
-// collections, selectors, macros, numeric operations and regular expressions are excluded.
+// Strings are double quoted literals whose escapes mean the same in JSON and CEL
+// (\" \\ \b \f \n \r \t \uXXXX); JSON's \/ is not a CEL escape. Comments, collections,
+// selectors, macros, numeric operations and regular expressions are excluded.
 function preflight(expression: string) {
   if (
     expression.length > ROUTING_LIMITS.expressionBytes ||
@@ -123,7 +124,7 @@ function preflight(expression: string) {
   let depth = 0;
   let count = 0;
   const token =
-    /\s+|"(?:[^"\\\p{Cc}]|\\["\\/bfnrt]|\\u[a-fA-F0-9]{4})*"|[a-zA-Z][a-zA-Z0-9]*|&&|\|\||==|!=|[!().,]/uy;
+    /\s+|"(?:[^"\\\p{Cc}]|\\["\\bfnrt]|\\u[a-fA-F0-9]{4})*"|[a-zA-Z][a-zA-Z0-9]*|&&|\|\||==|!=|[!().,]/uy;
   while (offset < expression.length) {
     token.lastIndex = offset;
     const match = token.exec(expression);

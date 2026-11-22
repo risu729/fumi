@@ -60,8 +60,10 @@ identifiers, parentheses, `!`, `&&`, `||`, `==`, `!=`, and string `contains`,
 `startsWith`, `endsWith`. AST validation enforces operand types and boolean results.
 Macros, collections, indexing, property selection, regex, arithmetic, conversions,
 timestamps, optional types and arbitrary functions are rejected. Double unary
-negation, comments, single-quoted, triple-quoted and raw strings, and non-JSON string
-escapes are outside this deliberately narrow contract. A string literal directly
+negation, comments, single-quoted, triple-quoted and raw strings are outside this
+deliberately narrow contract. String escapes are limited to `\"`, `\\`, `\b`, `\f`,
+`\n`, `\r`, `\t` and `\uXXXX`, which mean the same in JSON and CEL; JSON's `\/` is
+rejected because the CEL parser keeps it as two characters. A string literal directly
 followed by `"` is rejected, so the token check and the CEL parser always split
 string literals the same way.
 

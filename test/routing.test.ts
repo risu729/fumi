@@ -125,6 +125,8 @@ describe("bounded shadow CEL routing in workerd", () => {
     'subject != "unrelated" && hasAttachments == true',
     "!(hasAttachments == false) && (false || true)",
     '"確認".contains("確") && subject.endsWith("12345")',
+    // Accepted escapes keep their JSON meaning in the CEL parser.
+    'subject.contains("\\u78ba\\u8a8d") && "\\"\\\\\\t" == "\\u0022\\u005c\\u0009"',
   ])("supports the declared boolean/string CEL subset %#", async (match) => {
     const router = await compileShadowRouter(
       JSON.stringify({
@@ -318,6 +320,9 @@ describe("bounded shadow CEL routing in workerd", () => {
     // empty string and then a new literal. Neither form may pass.
     'subject == """x"""',
     '"""a" """ == subject || !!hasAttachments || subject == """ " """',
+    // JSON reads `\/` as `/`, but the CEL parser keeps both characters, so the rule
+    // would silently compare a different string.
+    'subject.contains("a\\/b")',
   ])("rejects unsupported or resource-intensive CEL before evaluation %#", async (match) => {
     await expect(
       compileShadowRouter(
