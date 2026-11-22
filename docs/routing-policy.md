@@ -7,11 +7,17 @@ minimum confidence, daily call cap and whether explicit policy exclusions may be
 ignored. `ROUTING_ANTHROPIC_API_KEY` is an optional Worker secret. Absent, disabled
 or invalid configuration holds unresolved mail without calling a provider.
 
-The configuration has `schemaVersion: 1`, `enabled`, `provider: "anthropic"`,
-`model`, `instructions`, `maxCallsPerDay` (1–1000), `minimumConfidence` (0.5–1), and
-`allowModelIgnore`. No account, endpoint, password or private policy belongs in
-the repository. Operators choose the model and budget before activation; the
-implementation does not select a paid model or provision credentials implicitly.
+The configuration has `schemaVersion: 1`, `enabled`, `provider: "anthropic"`, `model`,
+`instructions`, `maxCallsPerDay` (1–1000), `minimumConfidence` (0.5–1), and
+`allowModelIgnore`, plus an optional `linkSelection: { "enabled": boolean }` that
+routing ignores and that only
+[link selection](link-downloads.md#implemented-model-selection) reads. Link selection
+uses the same `model`, key and daily budget whatever `enabled` says; it is off unless
+`linkSelection.enabled` is `true`. Because the classification cache is keyed by the
+policy object's SHA-256, changing that field also stops reuse of earlier
+classifications. No account, endpoint, password or private policy belongs in the
+repository. Operators choose the model and budget before activation; the implementation
+does not select a paid model or provision credentials implicitly.
 
 Fumi forwards review decisions to one administrator-configured generic webhook or
 adapter. Descriptive categories do not choose a bot, account or endpoint. Downstream
@@ -38,7 +44,8 @@ prompts nor provider responses appear in logs or durable result records.
 Migration `0012_routing_policy.sql` persists classification leases, results,
 attempt counts, a shared UTC-day budget and trusted notification context. A
 sixty-second lease excludes overlapping calls for the same source/policy. Calls
-reserve budget atomically before submission. Errors retry no sooner than fifteen
+reserve budget atomically before submission; link selection reserves from the same
+UTC-day row, so the cap covers both. Errors retry no sooner than fifteen
 minutes and at most three submitted attempts per source/policy; ambiguous provider
 requests consume budget. Changing policy cannot reset the shared daily budget.
 Completed decisions are reused only for the same source and MIME manifest.
