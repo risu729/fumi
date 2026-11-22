@@ -184,6 +184,15 @@ establish production delivery.
       configuration, provenance fences and bounded repair. Historical mail is
       suppressed and no dispatch is permitted. Private policy activation and model
       shadow evaluation remain separate.
+- [x] Read routing rules, per-rule usage and one message's routing explanation
+      over MCP behind `mail:routing`, part of
+      [#145](https://github.com/risu729/fumi/issues/145). Per-rule change history is
+      not retained. See
+      [routing shadow](routing-shadow.md#reading-rules-and-their-usage-over-mcp).
+- [ ] Change rules over MCP: propose, update or retire a rule as a new
+      configuration revision, validated before activation, by an authenticated
+      owner or operator only, and keep a revision log so rule history becomes
+      available ([#145](https://github.com/risu729/fumi/issues/145) item 2).
 
 ## Phase 2C: outbound email through MCP
 

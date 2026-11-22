@@ -117,7 +117,14 @@ export async function loadDispatchConfiguration(bucket: R2Bucket) {
   }
   const configurationSha256 = await dispatchDigest(JSON.stringify(artifact));
   const destinationSha256 = await dispatchDigest(JSON.stringify(artifact.destination));
-  return { artifact, router, adoptions, configurationSha256, destinationSha256 };
+  return {
+    artifact,
+    router,
+    adoptions,
+    configurationSha256,
+    destinationSha256,
+    uploaded: object.uploaded,
+  };
 }
 export type DispatchConfiguration = NonNullable<
   Awaited<ReturnType<typeof loadDispatchConfiguration>>

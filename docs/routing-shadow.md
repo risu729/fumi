@@ -155,3 +155,85 @@ after the other archive maintenance stages. Removing the configuration object
 disables further decisions while preserving existing evidence. This library never
 creates an outbox entry, sends mail, calls a plugin, or notifies a destination,
 regardless of the configured outcome or a message's contents.
+
+## Reading rules and their usage over MCP
+
+Status: implements the read-only part of
+[#145](https://github.com/risu729/fumi/issues/145) (items 1, 3 and 4) on 2026-11-22
+07:47 UTC, with synthetic workerd tests. Changing rules over MCP (item 2) is not
+implemented; see the [roadmap](roadmap.md). The tool names, the reuse of
+`mail:routing` and the output schemas are proposed and await the owner's approval.
+
+Three MCP tools read the private configuration and the stored decisions. They
+need the `mail:routing` grant, the operator scope of the `/api/admin/routing/*`
+routes ([routing dispatch](routing-dispatch.md)). `mail:read`, `mail:send` and
+the other mail scopes do not grant them, and the tools are not listed for a
+principal without `mail:routing`. All three are read-only and call no plugin,
+model or webhook.
+
+| Tool | Returns |
+| --- | --- |
+| `list_routing_rules` | Candidate and active rules with `id`, `priority`, `match`, `outcome`, `category`, `urgent`; each configuration's SHA-256 and R2 upload time; the active revision, generation, `enabled` and `activated` |
+| `routing_rule_usage` | Per-rule match count, first and last matched receipt time, sample `mail_` IDs and unmatched rules over a window; plugin candidates, classifier outcomes by category and dispatch states |
+| `explain_routing` | For one `mail_` ID: the deciding rule, plugin or classifier outcome with the configuration SHA-256 or dispatch revision, and the stored decision rows behind it |
+
+Exposure. `match` expressions can contain private addresses. These tools are the
+only path that returns rule bodies, and they return them only to an authenticated
+`mail:routing` principal, whose MCP client then holds them in its context. They are
+never logged: the tools write no log line, their errors are fixed codes, and the
+existing generic configuration errors still exclude expressions. Dispatch
+destinations, owner adapters, credentials and owner manifest bodies are not
+returned. Give `mail:routing` only to an owner or operator principal; a
+notification receiver that reads mail needs `mail:read`, not `mail:routing`.
+
+Configurations. "Candidate" is the shadow artifact `config/routing-shadow-v1.json`.
+"Active" is the routing configuration inside the dispatch artifact
+`config/routing-dispatch-v1.json`; `activated` is true only when that artifact is
+enabled and the `routing_dispatch_control` row has accepted its revision and digest.
+`configuration_sha256` is the router hash above, the key of
+`routing_shadow_decisions`. Each rule carries `compared_to_other` (`same`, `changed`
+or `only_here`) against the other current configuration.
+
+History. R2 keeps only the current object under each fixed key and no table stores
+earlier rule sets, so when a rule was added or changed is not known. `added_at` and
+`changed_at` are always `null`, and `history.available` is `false`. The upload time
+is that of the whole current artifact. Rule history needs a stored revision log, which
+belongs with item 2.
+
+Usage. Counts come from `routing_shadow_decisions` for the selected configuration's
+SHA-256, restricted to live provenance (`email_routing`, `notify_events = 1`).
+Historical and imported mail is suppressed and never counted. Matched times are the
+messages' `received_at`. A message with no rule match counts as `default_matches`;
+blocked and non-shadow rows are listed under `not_evaluated`. Messages that the
+scheduled shadow pass has not evaluated yet are not counted, and the active
+configuration has rows only while the shadow artifact holds the same configuration.
+Classifier outcomes come from `routing_classifications.result_json`, grouped by
+state, outcome, category and evidence code, one row per message and policy. Dispatch
+states come from `routing_dispatch_jobs` and the outbox lanes.
+
+Bounds. Raw keys are `ingest/<UTC receipt day>/<id>/raw.eml` for live and imported
+mail, and every table read here has a primary-key or unique index that starts with
+`raw_key`. Each source is one descending range scan of that index from the window's
+first day, newest day first, with no sort. `window_days` is 1 to 90 (default 30) whole
+UTC days ending today. `max_decisions` caps each scan at 1 to 2,000 rows (default
+2,000); one extra row is read to detect truncation. When `truncated` is true, the
+counts cover only the scanned rows, `oldest_scanned_received_at` says how far they
+reach, and `unmatched_covers_window` is `false`: an unmatched rule then had no match
+among the scanned decisions, not necessarily in the whole window. A test checks
+`EXPLAIN QUERY PLAN` for every scan. No migration is needed.
+
+Explanation. Live dispatch does not store which rule matched. `explain_routing`
+reports a dispatch decision as `rule` or `default` only when a current shadow
+decision exists under the active configuration's SHA-256 and the dispatch job's
+revision is the active revision; otherwise a static-rule decision is
+`rule_or_default` with a `null` rule ID. A handled owner lane reports `plugin`, a
+`model_*` evidence code reports `classifier`, and other held states report
+`unresolved` with their fixed reason. Without a dispatch job, the current shadow
+decision is reported (`rule`, `default`, `plugin_offer`, `suppressed` or
+`blocked`). From an outbox payload only the symbolic classification is read, never
+granted mail input. The message lookup by ID is the same as `read_email`'s.
+
+Trust boundary. Inputs are a closed configuration choice, bounded integers and a
+`mail_` ID. Mail content and model output cannot widen what is returned: stored
+decision and classification JSON is parsed with closed schemas, and a value outside
+them is reported as unreadable rather than passed through.

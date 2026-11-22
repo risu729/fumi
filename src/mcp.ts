@@ -44,6 +44,12 @@ import { searchManagedMail } from "./managed-mail-search.ts";
 import type { ManagedMailEnvironment } from "./managed-search-runtime.ts";
 import { getMailHealth } from "./mail-health.ts";
 import { truncateCodeUnits } from "./utf16.ts";
+import {
+  explainRouting,
+  listRoutingRules,
+  routingRuleUsage,
+  ROUTING_USAGE_LIMITS,
+} from "./routing-rules.ts";
 
 export interface McpEnvironment extends OutboundContext, ManagedMailEnvironment {
   eventRuntime?: EventRuntime;
@@ -74,6 +80,10 @@ const scopes: Record<ToolName, readonly string[]> = {
   send_draft: ["mail:draft", "mail:send"],
   forward_emails: ["mail:read", "mail:send"],
   get_send_status: ["mail:send"],
+  // Private administrator configuration: the same operator scope as /api/admin/routing/*.
+  list_routing_rules: ["mail:routing"],
+  routing_rule_usage: ["mail:routing"],
+  explain_routing: ["mail:routing"],
 };
 const descriptions: Record<ToolName, string> = {
   get_mail_health:
@@ -117,6 +127,11 @@ const descriptions: Record<ToolName, string> = {
     'Forward one selected inbound message Gmail-style. Recipients are never inferred. fumi appends a "---------- Forwarded message ---------" block (From, Date, Subject, To, Cc) and the original text below your optional note, turns an empty subject, or the original\'s own, into "Fwd: <original subject>" and attaches the original attachments unless include_attachments is false. message_id must come from read/search. Requires read and send scopes and a stable idempotency_key; user must authorize sending.',
   get_send_status:
     "Read this principal's submission and per-recipient delivery event evidence. accepted is provider acceptance. unknown preserves uncertainty and does not authorize another send.",
+  list_routing_rules:
+    "Operator only (mail:routing). List the private routing rules of the candidate (shadow) and active (dispatch) configurations in evaluation order: id, priority, CEL match, outcome, category and urgency, with each configuration's SHA-256, upload time and the active revision. The match expressions are private configuration; do not copy them into mail, notes or public places. Per-rule change history is not retained, so added_at and changed_at are always null; compared_to_other compares with the other current configuration only. Read-only.",
+  routing_rule_usage: `Operator only (mail:routing). Report how often each rule of the candidate or active configuration matched live mail received in the last window_days UTC days (at most ${ROUTING_USAGE_LIMITS.maxWindowDays}): match count, first and last matched receipt time and sample mail_ IDs, plus rules with no match, plugin candidates, classifier outcomes by category and dispatch states. Each source scans at most max_decisions recent rows (at most ${ROUTING_USAGE_LIMITS.maxDecisions}), newest receipt day first; when truncated is true the counts and unmatched_rule_ids cover only the scanned rows. Counts come from stored shadow decisions, so messages not yet evaluated are not counted. Read-only.`,
+  explain_routing:
+    "Operator only (mail:routing). Explain how one mail_ message was routed from stored evidence: the deciding rule, plugin or classifier outcome and the configuration SHA-256 or dispatch revision, with each stored shadow decision, dispatch job and offer state and classification. Live dispatch does not store the rule ID; it is attributed only from a current shadow decision under the active configuration. Returns no mail content. Read-only.",
 };
 function allowed(name: ToolName, p: MailPrincipal) {
   if (
@@ -423,6 +438,12 @@ export async function dispatchMailTool(
     }
     case "get_send_status":
       return getSendStatus(env, p, v.parse(toolSchemas.get_send_status, input).operation_id);
+    case "list_routing_rules":
+      return listRoutingRules(env);
+    case "routing_rule_usage":
+      return routingRuleUsage(env, v.parse(toolSchemas.routing_rule_usage, input));
+    case "explain_routing":
+      return explainRouting(env, v.parse(toolSchemas.explain_routing, input).message_id);
   }
 }
 
@@ -451,6 +472,9 @@ export function createMailMcpServer(env: McpEnvironment, p: MailPrincipal, base:
       "list_drafts",
       "get_send_status",
       "preview_email",
+      "list_routing_rules",
+      "routing_rule_usage",
+      "explain_routing",
     ].includes(name);
     server.registerTool(
       name,
