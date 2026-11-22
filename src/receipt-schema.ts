@@ -72,11 +72,18 @@ export const receiptSchema = v.variant("schemaVersion", [
   v.strictObject({
     schemaVersion: v.literal(3),
     ...common,
-    forward: v.strictObject({
-      status: v.literal("failed"),
-      code: v.picklist(FORWARD_ERROR_CODES),
-      smtpStatus: v.optional(v.pipe(v.string(), v.regex(SMTP_ENHANCED_STATUS))),
-    }),
+    forward: v.pipe(
+      v.strictObject({
+        status: v.literal("failed"),
+        code: v.picklist(FORWARD_ERROR_CODES),
+        smtpStatus: v.optional(v.pipe(v.string(), v.regex(SMTP_ENHANCED_STATUS))),
+      }),
+      // An unclassified failure without a status is always written as v1.
+      v.check(
+        (forward) => forward.code !== "forward_failed" || forward.smtpStatus !== undefined,
+        "An unclassified v3 failure must carry an enhanced status",
+      ),
+    ),
   }),
 ]);
 

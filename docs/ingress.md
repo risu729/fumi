@@ -36,29 +36,34 @@ else unclassified:
 | --- | --- | --- |
 | `550 5.7.1 ...` or `550-5.7.1 ...` anywhere | `rejected_permanent` | `5.7.1` |
 | `421 4.7.0 ...` | `rejected_temporary` | `4.7.0` |
-| Starts with `552 ...`, no enhanced status | `rejected_permanent` | none |
-| Only `... 4.2.2 ...`, no reply code (see note) | `rejected_temporary` | `4.2.2` |
-| A `TimeoutError`, or `timeout` / `timed out` with no SMTP code | `timeout` | none |
+| A `TimeoutError`, or `timeout` / `timed out` with no paired SMTP reply | `timeout` | none |
 | Anything else | `forward_failed` | none |
 
-A reply code counts only when it starts the text or is followed by an enhanced status of
-the same class, so `Error 500 - internal` or `user550@...` stays unclassified. An
-enhanced status must stand alone: digits or a dot next to it (a version number or IPv4
-address) do not match. Only the `4` and `5` classes count: a `2.x.x` status cannot
-explain a failure and has the shape of a version number, so the classifier ignores it
-and never records it as `smtpStatus` (review fix, 2026-11-22 08:05 UTC). The rest of the
-text is still classified: `runtime 2.1.3 timed out` gives `timeout`, and
-`550 build 2.1.3: 5.7.1` gives `rejected_permanent` with `5.7.1`. The destination check
-keeps its own `invalid_target` code, which also covers the forwarding-loop guard.
+Only a 4xx or 5xx reply code directly followed (after a space or hyphen) by an enhanced
+status of the same class classifies as a rejection. Neither part may sit inside an
+address, path, hostname or longer number, so `user550@...` and `GET /550 5.1.1/x` stay
+unclassified. The classifier ignores everything else that merely looks like SMTP and
+records `forward_failed` (review fix, 2026-11-22 14:00 UTC):
 
-Note on the bare-status row, a known limitation pending an owner decision (2026-11-22
-08:20 UTC): a `4.x.x` or `5.x.x` status with no reply code still classifies. For
-example, `runtime 4.1.3 failed` gives `rejected_temporary` with `smtpStatus` `4.1.3` and
-writes a v3 receipt, although the number may be a version rather than an SMTP status.
+- A reply code alone, such as `552 Requested mail action aborted`, `404 Not Found` or
+  `500 Internal Server Error`: it is too often an HTTP status.
+- An enhanced status alone, such as `runtime 4.1.3 failed`, `node 5.0.1 crashed`,
+  `http://h/v1/5.0.0/x`, `5.1.1:25 refused` or `port 465 5.0.0`: it is too often a
+  version number, path segment or address. A `2.x.x` status never counts either.
+- A reply code and status of different classes, such as `550 4.1.1`.
+
+So a bare enhanced status is not classified and the receipt stays an unchanged v1
+`forward_failed`. The timeout words count only as a word of their own: inside an
+address, URL or hostname, such as `timeout@example.com` or `timeout.example.com`, they
+do not, while `connection-timeout` and `upstream timeout.` do. A paired reply wins over
+a timeout word: `421 4.4.2 connection timed out` gives `rejected_temporary` with
+`4.4.2`. The destination check keeps its own `invalid_target` code, which also covers
+the forwarding-loop guard.
 
 The receipt keeps the oldest version that can hold the outcome. Success,
 `invalid_target` and an unclassified `forward_failed` stay unchanged v1 receipts.
-A classified failure is a v3 receipt:
+A classified failure is a v3 receipt, and a v3 receipt with `forward_failed` and no
+`smtpStatus` is invalid because that outcome is always v1:
 
 ```json
 {"schemaVersion": 3, "forward": {"status": "failed", "code": "rejected_permanent", "smtpStatus": "5.7.1"}}
