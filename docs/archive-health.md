@@ -16,12 +16,15 @@ Retained validated ingress snapshots report known archive-capture and Gmail forw
 failures separately. V1 and v3 receipts both count as forwarding failures; v3 adds a
 [failure reason](ingress.md#forward-failure-reasons). V2 standalone receipts count
 intentional forwarding omission as `receipt_forward_skipped`; it is neither successful
-forwarding nor a forwarding failure. A failure remains known when a later scan finds the
-receipt object missing. Missing, malformed or absent snapshots are unknown; they do not
-prove successful capture or forwarding. Gmail imports have no SMTP forwarding receipt
-and are not counted as failed ingress snapshots. Recipient addresses, object keys,
-Message-ID headers, cursors, policy text and provider error text are never returned.
-The only message identifiers returned are the opaque `mail_` IDs of
+forwarding nor a forwarding failure. V4 [Gmail relay](gmail-relay.md#health) receipts
+count there too, and also as `receipt_gmail_relay`; `gmail_relay` counts relayed
+deliveries, including dropped copies, over its own 1,000-row window. A failure remains
+known when a later scan finds the receipt object missing. Missing, malformed or absent
+snapshots are unknown; they do not prove successful capture or forwarding. Gmail imports
+have no SMTP forwarding receipt and are not counted as failed ingress snapshots.
+Recipient addresses, object keys, Message-ID headers, cursors, policy text and provider
+error text are never returned. The only message identifiers returned are the opaque
+`mail_` IDs of
 [failed forwards](#failed-forwards-and-retry-recovery).
 
 MIME coverage distinguishes current complete extractions, blocked records,
@@ -44,7 +47,7 @@ be outside the window. Missing optional tables or failed queries make the affect
 section explicitly unknown. A missing scan checkpoint is also unknown. The scan
 counter describes completed R2 listing passes, not upstream email acceptance.
 
-There are at most nine fixed read queries and a shared five-second deadline.
+There are at most ten fixed read queries and a shared five-second deadline.
 An expired query cannot start further queries; a database operation already in
 flight may finish later. Sections are not a single transactional snapshot. Counts
 and truncation apply only to their stated window, even when every reported count

@@ -336,7 +336,14 @@ async function normalize(
     const receipt = source?.receipt_snapshot
       ? parseReceipt(JSON.parse(source.receipt_snapshot))
       : null;
-    if (!receipt || receipt.archive.status !== "stored" || receipt.archive.key !== replyKey)
+    // Gmail forwarding delivered a relay to fumi's forwarding address, not to the address
+    // the mail was sent to, so it has no default sender either (#161).
+    if (
+      !receipt ||
+      receipt.archive.status !== "stored" ||
+      receipt.archive.key !== replyKey ||
+      receipt.schemaVersion === 4
+    )
       fail("reply_sender_unavailable");
     sender = receipt.envelope.to;
   }

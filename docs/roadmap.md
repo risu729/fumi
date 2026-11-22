@@ -12,8 +12,10 @@ Target state: fumi operates independently of Gmail, except for capturing mail th
 still sends by hand from Gmail. Existing Gmail forwarding is temporary and will be
 retired after migration readiness is verified. Historical Gmail backfill remains in
 scope, and so does ongoing capture of Gmail SENT mail (see phase 2A, owner, 2026-11-17
-17:37 UTC). Other ongoing Gmail synchronization, automatic recovery of live archive gaps
-from Gmail, and Gmail inbox management are out of scope.
+17:37 UTC), and so does capturing mail delivered directly to Gmail through Gmail
+forwarding ([ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md), owner,
+2026-11-22 21:29 UTC). Other ongoing Gmail synchronization, automatic recovery of live
+archive gaps from Gmail, and Gmail inbox management are out of scope.
 
 ## Phase 0: development foundation
 
@@ -56,6 +58,13 @@ from Gmail, and Gmail inbox management are out of scope.
       the initial keep-all behavior.
 - [x] Complete and record staged production acceptance for selected routes.
 - [ ] Extend capture to remaining routes after checking specialist compatibility.
+- [x] Capture mail delivered directly to Gmail: Gmail forwards every incoming message
+      to fumi, which never forwards it back and drops the copies it already holds
+      ([#161](https://github.com/risu729/fumi/issues/161),
+      [ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md)). See
+      [mail delivered directly to Gmail](gmail-relay.md). Synthetic tests only.
+- [ ] Turn on Gmail forwarding to fumi and record its acceptance; see the
+      [operator steps](gmail-relay.md#operator-steps).
 
 See the [ingress implementation and runbook](ingress.md). Private route inventory,
 rollback snapshots and real-message acceptance evidence stay outside this public repo.
@@ -265,7 +274,9 @@ from Gmail is captured from Gmail SENT instead (phase 2A, owner, 2026-11-17
       retiring the Gmail copy; synthetic tests do not establish SMTP behavior.
 - [ ] Disable Gmail forwarding in fumi and adopted specialist routes through a
       separately authorized cutover; remove forwarding-only configuration when
-      no longer needed and verify mail handling without Gmail delivery.
+      no longer needed and verify mail handling without Gmail delivery. Relay
+      recognition reads `FORWARD_TO`, so it needs its own setting for the Gmail
+      account first ([limits](gmail-relay.md#limits)).
 
 The optional runtime is implemented; production cutover remains separate.
 Current forwarding remains enabled;

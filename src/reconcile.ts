@@ -111,7 +111,8 @@ async function readReceipt(bucket: R2Bucket, candidate: Candidate): Promise<Rece
     "schemaVersion" in value &&
     value.schemaVersion !== 1 &&
     value.schemaVersion !== 2 &&
-    value.schemaVersion !== 3
+    value.schemaVersion !== 3 &&
+    value.schemaVersion !== 4
   ) {
     return { state: "invalid", code: "unsupported_receipt" };
   }
@@ -221,10 +222,13 @@ async function observe(
   // Standalone originals may become visible before their write returns or even
   // after SMTP rejection. Only matching confirmed capture evidence releases
   // lifecycle events and owner/generic actions. Orphans remain readable but held.
+  // A Gmail relay (v4) is new live mail in either mode (#161).
   const notifyEvents =
     evidence !== null &&
     (standalone
-      ? receipt?.schemaVersion === 2 && receipt.archive.status === "stored" && !evidenceMismatch
+      ? (receipt?.schemaVersion === 2 || receipt?.schemaVersion === 4) &&
+        receipt.archive.status === "stored" &&
+        !evidenceMismatch
       : receipt?.schemaVersion !== 2 && raw?.customMetadata?.["eventNotifications"] === "1");
   return {
     observation: {

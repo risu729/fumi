@@ -4,3 +4,5 @@ pateat = "pateat"
 kogane = "kogane"
 risu = "risu"
 THRID = "THRID"
+# Gmail's forwarding envelope sender, `<user>+caf_=<destination>@gmail.com`.
+caf = "caf"

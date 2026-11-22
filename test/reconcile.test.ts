@@ -288,7 +288,7 @@ describe("forward failure reasons", () => {
     await putRaw(1);
     await env.MAIL_ARCHIVE.put(
       `${prefix(1)}/receipt.json`,
-      JSON.stringify({ ...receipt(1, "a".repeat(64)), schemaVersion: 4 }),
+      JSON.stringify({ ...receipt(1, "a".repeat(64)), schemaVersion: 5 }),
     );
     await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
     expect(await issueCodes()).toEqual(["unsupported_receipt"]);
@@ -372,7 +372,7 @@ describe("bounded R2 catalog reconciliation in workerd", () => {
     await env.MAIL_ARCHIVE.put("ingest/not-an-ingest/private", "unexpected");
     await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, "not json");
     await env.MAIL_ARCHIVE.put(`${prefix(2)}/receipt.json`, "x".repeat(MAX_RECEIPT_BYTES + 1));
-    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 4 }));
+    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 5 }));
     const crossKey = receipt(4, "0".repeat(64));
     crossKey.archive = {
       status: "stored",

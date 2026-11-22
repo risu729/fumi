@@ -9,7 +9,9 @@ separate. Encrypted attachments remain intact in their original MIME.
 Gmail forwarding is temporary. The
 [roadmap](roadmap.md#phase-2d-retire-gmail-forwarding) includes its retirement after
 independent mail handling is verified. Gmail-based archive recovery is out of scope;
-historical backfill remains a migration task.
+historical backfill remains a migration task. Mail delivered directly to Gmail comes
+back through Gmail's own forwarding and is handled as described in
+[mail delivered directly to Gmail](gmail-relay.md).
 
 ## Delivery and storage boundaries
 
@@ -83,7 +85,9 @@ The handler accepts at most the Email Routing limit of 25 MiB. It reads bytes
 without MIME decoding or text re-encoding, enforces the actual byte count as well
 as the declared size, and checks SHA-256 on the R2 write. It stores one attempt
 per invocation rather than deduplicating by the untrusted Message-ID header.
-Duplicate SMTP deliveries therefore remain distinct evidence. A later logical
+Duplicate SMTP deliveries therefore remain distinct evidence. The one exception is a
+[Gmail relay](gmail-relay.md#dropping-copies-fumi-already-holds) of mail fumi already
+holds, which needs its own `X-Fumi-Ingest-ID` and Message-ID to match. A later logical
 message index may link them using provenance and content hashes.
 
 Objects use `ingest/YYYY-MM-DD/<random-ingest-id>/raw.eml` and `receipt.json`. The
