@@ -160,9 +160,10 @@ regardless of the configured outcome or a message's contents.
 
 Status: implements the read-only part of
 [#145](https://github.com/risu729/fumi/issues/145) (items 1, 3 and 4) on 2026-11-22
-07:47 UTC, with synthetic workerd tests. Changing rules over MCP (item 2) is not
-implemented; see the [roadmap](roadmap.md). The tool names, the reuse of
-`mail:routing` and the output schemas are proposed and await the owner's approval.
+07:47 UTC, with synthetic workerd tests. Changing rules over MCP (item 2) is
+described in [changing candidate rules over MCP](#changing-candidate-rules-over-mcp).
+The tool names, the reuse of `mail:routing` and the output schemas are proposed and
+await the owner's approval.
 
 Three MCP tools read the private configuration and the stored decisions. They
 need the `mail:routing` grant, the operator scope of the `/api/admin/routing/*`
@@ -194,11 +195,14 @@ enabled and the `routing_dispatch_control` row has accepted its revision and dig
 `routing_shadow_decisions`. Each rule carries `compared_to_other` (`same`, `changed`
 or `only_here`) against the other current configuration.
 
-History. R2 keeps only the current object under each fixed key and no table stores
-earlier rule sets, so when a rule was added or changed is not known. `added_at` and
-`changed_at` are always `null`, and `history.available` is `false`. The upload time
-is that of the whole current artifact. Rule history needs a stored revision log, which
-belongs with item 2.
+History. R2 keeps only the current object under each fixed key. When the candidate
+was last written by the rule change tools below, its custom metadata names a revision
+record, and `history` reports that record (`revision_id`, `operation`, `rule_id`,
+`changed_by`, `changed_at`, the previous revision and SHA-256). Each candidate rule's
+`added_at` and `changed_at` then come from that record; a time is `null` when the rule
+was last changed outside these tools. A candidate written directly to R2 has no record,
+so `history.available` is `false` and every time is `null`. Active rules never carry
+times. `uploaded_at` is the upload time of the whole current artifact.
 
 Usage. Counts come from `routing_shadow_decisions` for the selected configuration's
 SHA-256, restricted to live provenance (`email_routing`, `notify_events = 1`).
@@ -245,3 +249,78 @@ Trust boundary. Inputs are a closed configuration choice, bounded integers and a
 `mail_` ID. Mail content and model output cannot widen what is returned: stored
 decision and classification JSON is parsed with closed schemas, and a value outside
 them is reported as unreadable rather than passed through.
+
+## Changing candidate rules over MCP
+
+Status: implements [#145](https://github.com/risu729/fumi/issues/145) item 2 on
+2026-11-22 08:05 UTC, with synthetic workerd tests. The tool names, the reuse of
+`mail:routing`, the revision record layout and the output schemas are proposed and
+await the owner's approval.
+
+| Tool | Change |
+| --- | --- |
+| `propose_routing_rule` | Add one rule: `id`, `priority`, `match`, `outcome`, optional `category` and `urgent` |
+| `update_routing_rule` | Replace `priority`, `match`, `outcome`, `category` and `urgent` of `rule_id`; omitted `category` and `urgent` are removed |
+| `retire_routing_rule` | Remove `rule_id`; the revision records keep the earlier configurations |
+
+Candidate only. The tools write only the shadow artifact
+`config/routing-shadow-v1.json`, which produces shadow decisions and never dispatches.
+They never read or write `config/routing-dispatch-v1.json` or
+`routing_dispatch_control`, and no MCP tool activates, drains or reconciles dispatch.
+Activation stays the administrator's separate steps: write the reviewed configuration
+into the dispatch artifact, then `POST /api/admin/routing/activate`. Every result has
+`activated: false`. Adoptions, owner manifests and `fallback` are never changed.
+
+Authorization. The tools need `mail:routing`, the scope that already authorizes the
+`/api/admin/routing/*` writes, including activation, drain, receipts and context.
+They are hidden from and refused for any other principal. Tool inputs come only from
+the authenticated caller; no mail-processing, classifier or scheduled path calls them.
+The tool descriptions require the owner's explicit instruction and forbid changes
+derived from mail content, retrieved documents or model output, and the tools are
+annotated as destructive so a client can ask for confirmation. A server cannot tell
+whether a model in the owner's own MCP client chose the arguments; that remains the
+client's confirmation step.
+
+Validation. Each call builds the full new artifact and checks it with
+`parseShadowArtifact`, the validator the scheduled reader uses (256 KiB artifact,
+strict shape, full router compilation: at most 32 ordinary rules, the bounded CEL
+subset over `subject`, `from`, `to` and `hasAttachments`, 64 KiB configuration).
+Nothing is written when a check fails. Errors are `{"error": {"code", "path"}}`, where
+`path` is an input key path such as `rule.match`, never a value:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_arguments` | The input does not match the tool schema (rule ID pattern, priority 0–1000, outcome, category pattern) |
+| `rule_match_invalid` | The expression is outside the CEL subset or its bounds |
+| `rule_category_not_allowed` | `category` or `urgent` on a rule whose outcome is not `review` |
+| `rule_id_exists`, `rule_not_found`, `rule_unchanged` | Duplicate ID, unknown ID, or an update with no effect |
+| `rule_limit_exceeded` | The candidate already has 32 rules |
+| `configuration_too_large`, `configuration_invalid` | The new configuration exceeds a byte bound or fails compilation |
+| `configuration_absent`, `configuration_unreadable`, `configuration_unavailable` | No candidate, an invalid current candidate, or R2 unreachable |
+| `configuration_conflict` | `expected_configuration_sha256` is not the current candidate, or another write won the race |
+
+Concurrency. The caller passes `expected_configuration_sha256`, the candidate's
+`configuration_sha256` from `list_routing_rules`. A different current hash is
+rejected. The candidate is then replaced with an R2 conditional write on the etag that
+was read (`onlyIf.etagMatches`), so a write that lands in between makes this call fail
+with `configuration_conflict` instead of overwriting it. Of two concurrent changes from
+the same revision, exactly one commits. Read the candidate again and retry.
+
+Revision records. Before the conditional write, each change writes an immutable
+record `config/routing-shadow-revisions/<uuid>.json` in the same private bucket:
+`schemaVersion: 1`, `revisionId`, `previousRevisionId`, `previousConfigurationSha256`,
+`configurationSha256`, `operation`, `ruleId`, `principalId`, `createdAt`, `ruleTimes`
+(`{id, addedAt, changedAt}` per rule, carried forward) and `artifactJson`, the exact
+committed artifact. The committed candidate's custom metadata is
+`{revision_id, configuration_sha256}`. A record whose write lost the race is deleted
+and is never referenced; the chain from the current candidate through
+`previousRevisionId` is the audit trail. Records are never deleted by these tools and
+keep retired rule bodies. No migration is needed.
+
+Logs. A committed change logs one line: `event: "routing_rule_change"`, `operation`,
+`principal_id`, `revision_id` and the previous and new configuration SHA-256. Rule
+IDs, expressions, outcomes and addresses are never logged. Synthetic tests check
+authorization and denial, each operation, validation failures that write nothing, a
+stale hash, a write that lands between read and commit, two concurrent changes, the
+32-rule cap, the absence of rule text in logs, and that the dispatch artifact and
+control row stay unchanged.

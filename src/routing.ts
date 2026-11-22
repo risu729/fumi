@@ -51,7 +51,8 @@ const adoptionSchema = v.strictObject({
   timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(5000)),
   onFailure: v.literal("hold"),
 });
-const ruleSchema = v.strictObject({
+/** One ordinary rule, as the configuration validator reads it. */
+export const routingRuleSchema = v.strictObject({
   id: idSchema,
   priority: prioritySchema,
   match: matchSchema,
@@ -62,7 +63,7 @@ const ruleSchema = v.strictObject({
 const configSchema = v.strictObject({
   schemaVersion: v.literal(1),
   adoptions: v.pipe(v.array(adoptionSchema), v.maxLength(ROUTING_LIMITS.plugins)),
-  rules: v.pipe(v.array(ruleSchema), v.maxLength(ROUTING_LIMITS.rules)),
+  rules: v.pipe(v.array(routingRuleSchema), v.maxLength(ROUTING_LIMITS.rules)),
   fallback: outcomeSchema,
 });
 const metadataSchema = v.strictObject({
@@ -420,6 +421,17 @@ export function readRoutingConfig(configJson: string): RoutingConfig {
     return { ...config, rules: [...config.rules].sort(order) };
   } catch {
     throw new RoutingConfigError();
+  }
+}
+
+/** Whether one ordinary rule expression is inside the supported CEL subset and its
+ * bounds, checked by the same compiler as the whole configuration. */
+export function isValidRoutingRuleMatch(expression: string): boolean {
+  try {
+    compilePredicate(expression, ["subject", "from", "to", "hasAttachments"]);
+    return true;
+  } catch {
+    return false;
   }
 }
 

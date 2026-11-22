@@ -132,9 +132,23 @@ export async function loadShadowConfiguration(bucket: R2Bucket) {
     throw new ShadowConfigurationUnavailableError();
   }
   if (!object) return null;
-  const artifact = v.parse(configArtifactSchema, JSON.parse(await configBytes(object)) as unknown);
+  return {
+    ...(await parseShadowArtifact(await configBytes(object))),
+    uploaded: object.uploaded,
+    etag: object.etag,
+    customMetadata: object.customMetadata ?? {},
+  };
+}
+
+/** The one validator for the fixed artifact: the byte bound, the strict artifact
+ * shape and the full router compilation. Readers and the MCP rule tools both use it.
+ * Errors carry no configuration text. */
+export async function parseShadowArtifact(json: string) {
+  if (json.length > CONFIG_BYTES || new TextEncoder().encode(json).byteLength > CONFIG_BYTES)
+    throw new Error("Invalid shadow configuration");
+  const artifact = v.parse(configArtifactSchema, JSON.parse(json) as unknown);
   const router = await compileShadowRouter(artifact.configJson, artifact.manifests);
-  return { artifact, router, uploaded: object.uploaded };
+  return { artifact, router };
 }
 
 /** Scheduled, bounded shadow-only replay. The fixed R2 artifact is administrator-owned. */

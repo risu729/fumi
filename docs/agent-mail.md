@@ -28,17 +28,17 @@ Server secrets:
 | `GMAIL_IMPORT_CONFIG` | Optional private operator run/account/cutoff configuration |
 | `GMAIL_IMPORT_ACCESS_TOKEN` | Optional manually provisioned Gmail read-only access token |
 
-Principal IDs are `user:<verified sub>` or `service:<verified common_name>`.
-An unlisted principal has no access. Grants contain `scopes`, `fromAddresses`
-and optional `fromDomains`; every field is validated. The scopes are
-`mail:read`, `mail:draft`, `mail:send`, `mail:events`, `mail:import` and
-`mail:routing`. `mail:import` grants only server-configured historical import
-operations; it does not authorize a caller to select credentials or import scope.
-See [historical Gmail import](gmail-import.md). `mail:routing` is the operator
-scope for the `/api/admin/routing/*` routes and the routing rule tools below; it
-grants no mail read or send. A domain grant permits
-any local part at that exact domain, without permitting its subdomains or
-unrelated addresses. The provider must also have verified the sending domain.
+Principal IDs are `user:<verified sub>` or `service:<verified common_name>`. An unlisted
+principal has no access. Grants contain `scopes`, `fromAddresses` and optional
+`fromDomains`; every field is validated. The scopes are `mail:read`, `mail:draft`,
+`mail:send`, `mail:events`, `mail:import` and `mail:routing`. `mail:import` grants only
+server-configured historical import operations; it does not authorize a caller to select
+credentials or import scope. See [historical Gmail import](gmail-import.md).
+`mail:routing` is the operator scope for the `/api/admin/routing/*` routes and the
+routing rule tools below, including the candidate rule changes; it grants no mail read
+or send. A domain grant permits any local part at that exact domain, without permitting
+its subdomains or unrelated addresses. The provider must also have verified the sending
+domain.
 
 This is a single-owner inbound archive: `mail:read` permits all inbound records.
 Drafts, staged attachments, outgoing records and outbound notifications remain
@@ -73,6 +73,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key; Gmail-style reply quote and forward block |
 | `get_send_status` | Submission state plus per-recipient delivery evidence |
 | `list_routing_rules`, `routing_rule_usage`, `explain_routing` | `mail:routing` only: private rules, bounded per-rule usage and one message's routing evidence ([routing shadow](routing-shadow.md#reading-rules-and-their-usage-over-mcp)) |
+| `propose_routing_rule`, `update_routing_rule`, `retire_routing_rule` | `mail:routing` only: change one candidate rule as a new revision with an expected SHA-256; never activates ([routing shadow](routing-shadow.md#changing-candidate-rules-over-mcp)) |
 
 Schemas are generated from Valibot through Standard Schema and Standard JSON
 Schema. Results include structured data and machine-readable error codes.

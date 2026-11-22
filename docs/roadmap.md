@@ -186,13 +186,16 @@ establish production delivery.
       shadow evaluation remain separate.
 - [x] Read routing rules, per-rule usage and one message's routing explanation
       over MCP behind `mail:routing`, part of
-      [#145](https://github.com/risu729/fumi/issues/145). Per-rule change history is
-      not retained. See
+      [#145](https://github.com/risu729/fumi/issues/145). Per-rule times come
+      from the revision records of the rule change tools below. See
       [routing shadow](routing-shadow.md#reading-rules-and-their-usage-over-mcp).
-- [ ] Change rules over MCP: propose, update or retire a rule as a new
-      configuration revision, validated before activation, by an authenticated
-      owner or operator only, and keep a revision log so rule history becomes
-      available ([#145](https://github.com/risu729/fumi/issues/145) item 2).
+- [x] Change rules over MCP: propose, update or retire a candidate rule as a new
+      configuration revision, validated before anything is written, behind
+      `mail:routing`, with an expected SHA-256 and an R2 conditional write, and
+      immutable revision records so rule history becomes available
+      ([#145](https://github.com/risu729/fumi/issues/145) item 2). Activation stays a
+      separate administrator action. See
+      [routing shadow](routing-shadow.md#changing-candidate-rules-over-mcp).
 
 ## Phase 2C: outbound email through MCP
 
