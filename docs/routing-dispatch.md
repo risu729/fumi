@@ -187,22 +187,35 @@ Amended (owner, 2026-11-20 17:13 UTC): the proxy is a Worker built by this proje
 agents, because the Grok Bot side has no runtime. The signed, retrying `webhook`
 adapter above implements [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
-Decision (owner, 2026-11-21 17:18 UTC): the proxy design is accepted.
+Decision (owner, 2026-11-21 17:18 UTC to 2026-11-22 14:23 UTC): the receiver is a
+generic webhook relay. It is a Worker in its own repository, built by this
+project's agents.
 
-- **Repository.** The proxy lives in its own repository, not in fumi.
-- **Account choice.** The proxy reads techo `main:state/active` on every request
-  and forwards to that account's Grok automation webhook. It re-signs the request
-  with that account's `whsec_` secret and keeps the same `webhook-id`.
-- **Deduplication.** One Durable Object deduplicates by `webhook-id` for 7 days.
-- **Unknown result.** When Grok does not answer in time, fumi's next attempt
-  resends, which may produce a duplicate run. The Grok routine checks existing
-  drafts and replies for the `messageId` before acting.
-- **No fallback.** The proxy never falls back to the inactive account.
-- **Where URLs live.**
-  - The Grok trigger URLs and secrets are Worker secrets of the proxy.
-  - The proxy URL is the `destination.adapter.url` of fumi's private routing
-    artifact.
-  - Neither is kept in a repository.
+- **Sources and routes.** A source, such as fumi, POSTs to `/in/<source>` with
+  Standard Webhooks signing. Its route lists targets, for example
+  `fumi → [grok-a, grok-b]`, and sends to one active target. The route shape
+  allows a "send to all" mode later, but that is not built until a second real
+  destination exists.
+- **Active target.** The relay never reads git. While a Grok account holds the
+  lease, its scheduled runs call the relay's MCP tool `set_active` with that
+  account's lease time. The relay refuses an older lease time. A daily agent check
+  compares the result with techo's `state/active`.
+- **Grok trigger.** A routine's webhook trigger is
+  `https://api2.cursor.sh/automations/webhook/<id>`. The relay calls it with
+  `Authorization: Bearer <crsr_ key>`; Grok does not verify Standard Webhooks
+  (gate, 2026-11-22 14:22 UTC). The bot can create the trigger but cannot read its
+  URL or key, so the owner copies them from the routine panel into the relay's
+  Worker secrets. Neither value is kept in a repository.
+- **Routine input.** The routine reads only `kind` and `messageId` from the body
+  and reads the mail through `fumi_read_email`. A forged body therefore carries
+  only an id.
+- **Deduplication.** The relay deduplicates on (`source`, `webhook-id`) for 7 days.
+  When Grok does not answer in time, fumi's next attempt resends, which may cause a
+  duplicate run. The routine checks existing drafts and replies for the
+  `messageId` before acting.
+- **No fallback.** The relay never falls back to the inactive account.
+- **The relay URL** is the `destination.adapter.url` in fumi's private routing
+  artifact.
 
 ## Input disclosure and source integrity
 
