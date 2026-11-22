@@ -1,10 +1,14 @@
 # Historical Gmail import
 
 Status: implemented for synthetic local validation. OAuth provisioning, production
-migration, activation and real-mail import require explicit operator execution.
-This is a historical migration, not Gmail synchronization or archive-gap recovery.
-Ongoing capture of Gmail SENT mail after the frozen cutoff is planned separately
-in the [roadmap](roadmap.md) (owner, 2026-11-17 17:37 UTC) and is not implemented.
+migration, activation and real-mail import require explicit operator execution. This is
+a historical migration, not Gmail synchronization or archive-gap recovery. The backfill
+is to be finished from Google Takeout instead
+([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)); the connector run
+stopped on 2026-11-12 after 4,810 messages (internal dates 2026-08-24T09:21:29Z to
+2026-11-11T16:59:42Z, measured 2026-11-17 14:10 UTC). Ongoing capture of Gmail SENT mail
+after the frozen cutoff is planned separately in the [roadmap](roadmap.md) (owner,
+2026-11-17 17:37 UTC) and is not implemented.
 
 ## Trusted operator surface
 
