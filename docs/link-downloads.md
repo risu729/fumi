@@ -91,8 +91,9 @@ Destination rule, giving `blocked_destination`:
   `fe80::/10`, site-local `fec0::/10` and multicast `ff00::/8` are refused.
 - Hostnames, after trailing dots are removed: single-label names (`localhost`,
   `metadata`), names that are numeric but not canonical IPv4, names that contain
-  four dotted or dashed numbers that spell an IPv4 address, between dots, dashes or
-  the ends of the name (`10.0.0.1.nip.example`, `10-0-0-1.sslip.example`,
+  four dotted or dashed numbers of one to three digits each (the values are not
+  checked, so `300-400-500-600` counts), between dots, dashes or the ends of the
+  name (`10.0.0.1.nip.example`, `10-0-0-1.sslip.example`,
   `app-10-0-0-1.nip.example`), and names that are or end in `localhost`, `local`,
   `localdomain`, `internal`, `intranet`, `private`, `corp`, `home`, `lan`, `arpa`,
   `test`, `invalid`, `onion` or `alt`. Full-width forms are mapped by the URL
@@ -210,6 +211,15 @@ Other residual risks:
 - The action rule over-blocks words that contain a stem; such links stay
   unfetched. This includes common receipt names such as
   `/orders/123/confirmation.pdf`.
+- The hostname rule refuses every name with four such numbers, public or not, so
+  reverse-DNS style hosts (`cdn-1-2-3-4.example.net`,
+  `ec2-203-0-113-5.compute.example`) and date-and-time names
+  (`build-2026-11-22-10-30.example.com`) stay unfetched.
+- The HTML sniff ignores the declared type, unlike WHATWG MIME Sniffing, which
+  applies these patterns only to an unknown type. A declared SVG, XML or Markdown
+  file that starts with a comment or one of the listed tags
+  (`<!-- note -->` before `<svg>`, `<p align="center">` in a README) is
+  `pending_html`, not a file.
 - A redirect from `https:` to `http:` is followed, so a token in the URL of a later
   hop can travel unencrypted.
 
