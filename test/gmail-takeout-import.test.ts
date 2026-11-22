@@ -159,7 +159,6 @@ describe("Google Takeout import", () => {
     await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources").run();
     // Each sweep call reads one bounded page of the archive bucket.
     for (let page = 0; page < 100; page++)
-      // oxlint-disable-next-line no-await-in-loop -- Sweep pages are sequential.
       if ((await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG)).status === "complete") break;
     expect(
       await env.MAIL_CATALOG.prepare(
