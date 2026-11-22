@@ -1,6 +1,8 @@
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { createConnectorGmailTransport } from "./gmail-connector-transport.ts";
+import { gmailId } from "./gmail-provenance.ts";
 import {
+  gmailImportCoverage,
   runGmailImportPage,
   startGmailImport,
   type GmailImportEnvironment,
@@ -29,8 +31,8 @@ export interface GmailImportRuntime {
 }
 
 /** Network POST requests may expose an empty stream instead of a null body. */
-async function hasNoInput(request: Request): Promise<boolean> {
-  if (new URL(request.url).search) return false;
+async function hasNoInput(request: Request, query = false): Promise<boolean> {
+  if (!query && new URL(request.url).search) return false;
   if (!request.body) return true;
   const reader = request.body.getReader();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -115,8 +117,18 @@ export async function handleGmailImport(
   if (!action) return respond({ error: { code: "not_found" } }, 404);
   if (request.method !== (action === "status" ? "GET" : "POST"))
     return respond({ error: { code: "method_not_allowed" } }, 405);
-  // These actions intentionally have no request body, query scope, IDs, or credentials.
-  if (!(await hasNoInput(request))) return respond({ error: { code: "invalid_request" } }, 400);
+  // Only status takes one optional coverage position within the configured run. No action
+  // accepts a request body, query scope, run or account selector, or credentials.
+  const query = new URL(request.url).searchParams;
+  const after = action === "status" ? query.get("after") : null;
+  if (
+    (action === "status" &&
+      ([...query.keys()].some((key) => key !== "after") ||
+        query.getAll("after").length > 1 ||
+        (after !== null && !gmailId(after)))) ||
+    !(await hasNoInput(request, action === "status"))
+  )
+    return respond({ error: { code: "invalid_request" } }, 400);
   try {
     if (action === "start") {
       await startGmailImport(env, runtime.importId, runtime.scope);
@@ -145,6 +157,14 @@ export async function handleGmailImport(
       pending_count:
         state.pending_json === null ? 0 : (JSON.parse(state.pending_json) as unknown[]).length,
       busy: state.lease_until > Date.now(),
+      // Archival completion above is independent of these downstream stages, and a
+      // coverage read failure must not hide it.
+      downstream: await gmailImportCoverage(env.MAIL_CATALOG, runtime.importId, after).catch(
+        (error: unknown) => ({
+          status: "unknown",
+          reason: error instanceof GmailImportError ? error.code : "coverage_query_unavailable",
+        }),
+      ),
     });
   } catch (error) {
     return respond(
