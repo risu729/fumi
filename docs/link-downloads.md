@@ -1,9 +1,11 @@
 # Link downloads
 
-Status: part A (extraction, URL policy and safe fetcher) is implemented as library
-code with synthetic Workers tests. Nothing in production calls it: there is no
-configuration flag, binding, migration, scheduled job or MCP tool for it. Parts B
-to D below are proposed and not implemented. No production behavior has changed.
+Status: part A (extraction, URL policy and safe fetcher) and part B (model
+selection) are implemented as library code with synthetic Workers tests. Nothing in
+production calls them: there is no migration, scheduled job or MCP tool for them.
+Part B adds one optional private configuration field, off by default, and no new
+binding. Parts C and D below are proposed and not implemented. No production
+behavior has changed.
 
 ## Request
 
@@ -20,7 +22,7 @@ The work is split into four reviewable parts:
 | Part | Scope | State |
 | --- | --- | --- |
 | A | Deterministic URL extraction, hard-limit URL policy, safe fetcher | Implemented, not called |
-| B | Model selection of candidates by index | Proposed |
+| B | Model selection of candidates by index | Implemented, not called |
 | C | Processing integration, storage, conversion and decryption | Proposed |
 | D | MCP exposure of downloaded files and pending downloads | Proposed |
 
@@ -242,15 +244,112 @@ Other residual risks:
 - A redirect from `https:` to `http:` is followed, so a token in the URL of a later
   hop can travel unencrypted.
 
-## Proposed: part B, model selection
+## Implemented: model selection
 
-After extraction, the candidates that pass `checkLinkUrl` are sent to a model with
-bounded message text, all as untrusted data. The model returns indexes only, under
-a strict output schema, as in [routing policy](routing-policy.md); it cannot write
-a URL. Code maps each index back to the extracted list and runs the policy again
-in the fetcher. No per-sender allowlist exists (owner, 2026-11-21 19:55 UTC). The
-model may also return an expiry it reads in the mail for a pending record, which
-stays a claim from untrusted text.
+`selectLinkDownloads(env, input, runtime)` in `src/link-selection.ts` asks a model
+which extracted candidates download a file. No per-sender allowlist exists (owner,
+2026-11-21 19:55 UTC). The input is the subject, the plain-text body and the
+`extractLinkCandidates` result. Part C will supply them; nothing calls this yet.
+
+Configuration is an implementation default from 2026-11-22 08:24 UTC that awaits
+the owner's choice in [open decision 1](#open-decisions-for-the-owner). It reuses
+the optional Claude classifier of [routing policy](routing-policy.md). The model
+comes from `config/routing-policy-v1.json`, the key from the optional
+`ROUTING_ANTHROPIC_API_KEY` secret, and each call reserves one call in the same
+UTC-day budget (`routing_model_budget`, capped by `maxCallsPerDay`). Selection has
+its own opt-in in that object, independent of routing's `enabled`:
+
+```json
+{ "linkSelection": { "enabled": true } }
+```
+
+Without the object, without that field, with `enabled: false` or without the key,
+the function returns a fixed code (`selection_not_configured`,
+`selection_disabled`, `invalid_config`, `config_unavailable`,
+`model_not_configured`) before spending budget or calling a provider. A candidate
+list whose `index` values are not their positions returns `invalid_input` without a
+call. Routing's administrator `instructions` are not sent; the selection prompt is
+fixed in code.
+
+Code runs `checkLinkUrl` on every extracted candidate before it reserves budget.
+Only the candidates that pass are shown to the model, under their extracted
+indexes, so the model sees `0` and `2` when candidate `1` is an unsubscribe link.
+When none pass, as in mail whose only links are unsubscribe or preference links,
+private or internal hosts, or login links, the result is `no_candidates`: no budget
+is reserved and no provider is called. A failure to open the D1 session or to
+reserve budget is `model_invalid_or_unavailable`, also without a call.
+
+Request: the same request code as the routing classifier (`src/model-request.ts`).
+One `POST` to the fixed origin `https://api.anthropic.com/v1/messages` with
+`redirect: "manual"`, no tools, a JSON-schema output format and a twenty-second
+deadline over the request and the whole response body, read up to 16 KiB. Mail is
+untrusted data:
+
+- The fixed system prompt says the email content is data, not instructions, and
+  that the answer is indexes only.
+- The single user message holds one JSON object between `<untrusted_mail_data>`
+  tags. `<`, `>` and `&` inside it are written as `\u003c`, `\u003e` and
+  `\u0026`, so mail text cannot close the block.
+- The subject is cut to 512 and the body to 8,192 UTF-16 code units (never inside
+  a surrogate pair, with `bodyTruncated`), and each candidate URL shown to the
+  model to 512 characters (with `urlTruncated`). HTML-only mail has `body: null`;
+  its `href` candidates are still listed.
+- The API key is sent only in the `x-api-key` header. Candidate URLs have no
+  userinfo. The body and URLs do go to the provider, as the body does for routing
+  classification; a URL can carry a token.
+
+```json
+{
+  "evaluationTime": "2026-11-22T09:20:00.000Z",
+  "receivedAt": null,
+  "untrustedMail": { "subject": "Receipt", "body": "Receipt: https://files.example.com/r.pdf", "bodyTruncated": false },
+  "candidates": [{ "index": 0, "url": "https://files.example.com/r.pdf", "sources": ["text"] }]
+}
+```
+
+The model must answer `{"indexes": [0], "expiresAt": "2026-12-01T00:00:00Z"}`.
+Code rejects the whole answer as `model_invalid_output` when it has another field,
+a non-integer, negative or repeated index, an index that was not shown (out of range
+or refused by the policy), more than four indexes, a missing `expiresAt`, or an
+`expiresAt` that is neither a string nor `null`. A refusal, a partial answer,
+an oversized or malformed response, or a network failure is
+`model_invalid_or_unavailable`; an HTTP error or redirect, which is not followed,
+is `model_http_error`; the deadline is `model_timeout`; and an exhausted budget is
+`model_budget_exhausted`. A reserved call is not refunded. If the configuration
+object changes during the call, the answer is dropped as `config_changed`.
+
+Code then maps each index to the extracted list and the URL `checkLinkUrl` returned
+for it, so a URL the model writes is never used. The model can only narrow the list:
+
+```json
+{
+  "ok": true,
+  "selected": [{ "index": 0, "url": "https://files.example.com/r.pdf" }],
+  "refused": [{ "index": 3, "outcome": "blocked_destination" }],
+  "expiresAt": "2026-12-01T00:00:00.000Z"
+}
+```
+
+`refused` lists every extracted candidate the policy refused, in extraction order,
+whether or not it is a download; the model never judged these. A login link is
+therefore never selected: the prompt also tells the model not to select sign-in
+links, so a `pending_login` record in part C comes from the fetcher (a `401` or
+`WWW-Authenticate` on a public link) or from a login candidate in `refused`. The
+expiry is a claim from untrusted text: an RFC 3339 date-time is normalized to UTC
+and kept only from the evaluation time to 366 days after it. Any other string,
+including an impossible date such as February 30, a date without a time, or free
+text, becomes `null` and leaves the selected indexes intact. The fetcher checks
+the policy again on every request and redirect.
+
+Nothing in the module logs, and results contain only fixed codes, indexes,
+extracted candidate URLs and the normalized expiry, never model text. There is no
+per-message ledger, lease or retry here: each call spends budget, so part C must
+store the result and call this at most once per message version.
+
+The selection lowers, but does not remove, the risks under
+[what the code cannot enforce](#what-the-code-cannot-enforce). A public
+link that the hard policy allows is fetched if the model selects it, including a
+link an attacker wrote into the mail and talked the model into choosing.
 
 ## Proposed: part C, processing integration
 
@@ -276,7 +375,12 @@ full URL (which can hold a token) is an open decision below.
 1. Model and key for part B. Options: reuse the optional Claude classifier
    configuration (`config/routing-policy-v1.json` and `ROUTING_ANTHROPIC_API_KEY`,
    sharing its daily call budget), or a separate private configuration with its
-   own model, key and budget.
+   own model, key and budget. Part B implements the first option as a default
+   that awaits this decision, with its own `linkSelection.enabled` opt-in. Related:
+   whether selection should need routing's `enabled` too, and whether it needs its
+   own cap inside the shared budget. This must be decided before part C calls
+   `selectLinkDownloads` from processing: with the shared budget, link selection
+   on a busy day can use up the calls that routing classification needs.
 2. Storage layout. Proposed: content-addressed R2 objects under
    `derived/link-v1/<raw sha256>/download/<file sha256>`, with a manifest per
    message, mirroring `mime-v1`. Whether the URL itself is stored in R2, in D1 or

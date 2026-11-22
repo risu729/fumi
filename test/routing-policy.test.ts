@@ -192,6 +192,28 @@ describe("bounded private routing policy in workerd", () => {
     expect(row?.result_json).not.toContain("Synthetic request");
     expect(row?.result_json).not.toContain("synthetic-test-key");
   });
+  it("classifies the same way when the configuration carries the link selection opt-in", async () => {
+    await configure({ linkSelection: { enabled: true } });
+    const input = await source();
+    const result = await resolveRoutingPolicy(modelEnv(), input, {
+      fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(output()),
+      now: () => now,
+    });
+    expect(result).toEqual({
+      outcome: "review",
+      category: "action",
+      urgent: false,
+      evidenceCode: "model_action_required",
+    });
+    await configure({ linkSelection: { enabled: true, model: "claude-other" } });
+    const other = await source("strict-link-selection");
+    const fetcher = vi.fn<typeof fetch>();
+    expect(
+      (await resolveRoutingPolicy(modelEnv(), other, { fetch: fetcher, now: () => now }))
+        .evidenceCode,
+    ).toBe("invalid_policy");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("rechecks policy revocation before returning a cached decision", async () => {
     await configure();
     const input = await source();

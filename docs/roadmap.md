@@ -288,8 +288,9 @@ the low-priority web client is not a prerequisite for retirement.
       owner decisions. Parts, each its own PR:
   - [ ] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
         as library code that production does not call.
-  - [ ] B: model selection of candidates by index, after the owner picks the model
-        and key.
+  - [x] B: model selection of candidates by index, as library code that production
+        does not call. It reuses the routing classifier's model, key and daily
+        budget behind its own opt-in until the owner picks the model and key.
   - [ ] C: processing integration, storage, conversion and decryption, after the
         owner decides the storage layout, migration and limits.
   - [ ] D: downloaded files through the attachment MCP tools, and a pending
