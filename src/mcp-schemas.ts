@@ -2,6 +2,7 @@ import * as v from "valibot";
 import { toStandardJsonSchema } from "@valibot/to-json-schema";
 import { INLINE_ATTACHMENT_BASE64_CHARACTERS } from "./outbound.ts";
 import { ROUTING_USAGE_LIMITS } from "./routing-rules.ts";
+import { routingRuleSchema } from "./routing.ts";
 
 export const identifier = v.pipe(v.string(), v.minLength(1), v.maxLength(200));
 const shortText = v.pipe(v.string(), v.maxLength(1000));
@@ -51,6 +52,7 @@ export const mailInputEntries = {
 };
 export const mailInputSchema = v.strictObject(mailInputEntries);
 const { quote: _quote, ...forwardInputEntries } = mailInputEntries;
+const expectedSha256 = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
 export const toolSchemas = {
   get_mail_health: v.strictObject({}),
   search_mail_semantic: v.strictObject({
@@ -159,6 +161,20 @@ export const toolSchemas = {
   explain_routing: v.strictObject({
     message_id: v.pipe(v.string(), v.regex(/^mail_[a-zA-Z0-9-]{1,128}$/)),
   }),
+  // The rule shape is the configuration validator's own schema.
+  propose_routing_rule: v.strictObject({
+    expected_configuration_sha256: expectedSha256,
+    rule: routingRuleSchema,
+  }),
+  update_routing_rule: v.strictObject({
+    expected_configuration_sha256: expectedSha256,
+    rule_id: routingRuleSchema.entries.id,
+    rule: v.omit(routingRuleSchema, ["id"]),
+  }),
+  retire_routing_rule: v.strictObject({
+    expected_configuration_sha256: expectedSha256,
+    rule_id: routingRuleSchema.entries.id,
+  }),
 };
 
 const attachmentOutput = v.looseObject({
@@ -241,8 +257,8 @@ const ruleSetOutput = {
       outcome: ruleOutcome,
       category: routingCategory,
       urgent: v.nullable(v.boolean()),
-      added_at: v.null(),
-      changed_at: v.null(),
+      added_at: v.nullable(isoTime),
+      changed_at: v.nullable(isoTime),
       compared_to_other: v.nullable(v.picklist(["same", "changed", "only_here"])),
     }),
   ),
@@ -257,8 +273,25 @@ const ruleSetOutput = {
     }),
   ),
 };
+const ruleOperation = v.picklist(["propose", "update", "retire"]);
+const ruleChangeOutput = v.strictObject({
+  configuration: v.literal("candidate"),
+  operation: ruleOperation,
+  rule_id: routingId,
+  previous_configuration_sha256: sha256,
+  configuration_sha256: sha256,
+  revision_id: v.string(),
+  previous_revision_id: v.nullable(v.string()),
+  changed_by: v.string(),
+  changed_at: isoTime,
+  rule_count: count,
+  activated: v.literal(false),
+});
 const configurationLabel = v.picklist(["candidate_and_active", "candidate", "active", "other"]);
 const routingOutputs = {
+  propose_routing_rule: ruleChangeOutput,
+  update_routing_rule: ruleChangeOutput,
+  retire_routing_rule: ruleChangeOutput,
   list_routing_rules: v.strictObject({
     candidate: v.strictObject(ruleSetOutput),
     active: v.strictObject({
@@ -269,7 +302,17 @@ const routingOutputs = {
       activated: v.nullable(v.boolean()),
     }),
     same_configuration: v.boolean(),
-    history: v.strictObject({ available: v.literal(false), reason: v.string() }),
+    history: v.strictObject({
+      available: v.boolean(),
+      revision_id: v.nullable(v.string()),
+      previous_revision_id: v.nullable(v.string()),
+      previous_configuration_sha256: v.nullable(sha256),
+      operation: v.nullable(ruleOperation),
+      rule_id: v.nullable(routingId),
+      changed_by: v.nullable(v.string()),
+      changed_at: v.nullable(isoTime),
+      note: v.string(),
+    }),
   }),
   routing_rule_usage: v.strictObject({
     configuration: v.picklist(["candidate", "active"]),
@@ -537,14 +580,17 @@ export const toolOutputSchemas = {
   copy_attachment: attachmentOutput,
 };
 
-/** Standard Schema validation and Standard JSON Schema share the same Valibot source. */
-export function bridge<T extends v.GenericSchema>(schema: T) {
+/** Standard Schema validation and Standard JSON Schema share the same Valibot source.
+ * With `inHandler`, the tool handler validates the same schema itself so that its
+ * error can carry a structured input path; the advertised JSON Schema is unchanged. */
+export function bridge<T extends v.GenericSchema>(schema: T, inHandler = false) {
   const json = toStandardJsonSchema(schema);
   return {
     ...json,
     "~standard": {
       ...json["~standard"],
       validate: (input: unknown) => {
+        if (inHandler) return { value: input as v.InferOutput<T> };
         const result = v.safeParse(schema, input);
         return result.success
           ? { value: result.output }

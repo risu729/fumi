@@ -9,6 +9,7 @@ import {
   loadDispatchConfiguration,
 } from "./routing-dispatch-config.ts";
 import { MailReadError } from "./mail-read.ts";
+import { readRuleRevision, RuleChangeError, type RuleRevision } from "./routing-rule-changes.ts";
 
 /**
  * Authorized read layer for private routing rules and their recorded decisions.
@@ -44,6 +45,8 @@ interface RuleSet {
   configurationSha256: string | null;
   uploadedAt: string | null;
   config: RoutingConfig | null;
+  /** The committed revision record behind the candidate; always null for active. */
+  history: RuleRevision | null;
 }
 interface ActiveRuleSet extends RuleSet {
   revision: number | null;
@@ -60,6 +63,7 @@ const empty = (status: RuleSet["status"]): RuleSet => ({
   configurationSha256: null,
   uploadedAt: null,
   config: null,
+  history: null,
 });
 
 /** Read both private artifacts. Unreadable or unavailable configuration is reported,
@@ -74,11 +78,20 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
           configurationSha256: loaded.router.configurationSha256,
           uploadedAt: loaded.uploaded.toISOString(),
           config: readRoutingConfig(loaded.artifact.configJson),
+          history: await readRuleRevision(
+            env.MAIL_ARCHIVE,
+            loaded.customMetadata,
+            loaded.router.configurationSha256,
+          ),
         }
       : empty("absent");
   } catch (error) {
+    // The revision record behind the candidate is storage too.
     candidate = empty(
-      error instanceof ShadowConfigurationUnavailableError ? "unavailable" : "unreadable",
+      error instanceof ShadowConfigurationUnavailableError ||
+        (error instanceof RuleChangeError && error.code === "configuration_unavailable")
+        ? "unavailable"
+        : "unreadable",
     );
   }
   const inactive = { revision: null, generation: null, enabled: null, activated: null };
@@ -106,6 +119,7 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
         configurationSha256: loaded.router.configurationSha256,
         uploadedAt: loaded.uploaded.toISOString(),
         config: readRoutingConfig(artifact.routing.configJson),
+        history: null,
         revision: artifact.revision,
         generation: artifact.generation,
         enabled: artifact.enabled,
@@ -140,6 +154,7 @@ function ruleKey(rule: RoutingConfig["rules"][number]) {
 
 function publicRuleSet(set: RuleSet, other: RuleSet) {
   const others = new Map((other.config?.rules ?? []).map((rule) => [rule.id, ruleKey(rule)]));
+  const times = new Map((set.history?.ruleTimes ?? []).map((entry) => [entry.id, entry]));
   return {
     status: set.status,
     configuration_sha256: set.configurationSha256,
@@ -152,9 +167,10 @@ function publicRuleSet(set: RuleSet, other: RuleSet) {
       outcome: rule.outcome,
       category: rule.category ?? null,
       urgent: rule.urgent ?? null,
-      // Previous revisions are not retained, so no per-rule time is known.
-      added_at: null,
-      changed_at: null,
+      // Known only from a committed revision record; null when the rule was last
+      // changed outside the MCP rule tools.
+      added_at: times.get(rule.id)?.addedAt ?? null,
+      changed_at: times.get(rule.id)?.changedAt ?? null,
       compared_to_other:
         other.status !== "configured"
           ? null
@@ -191,12 +207,34 @@ export async function listRoutingRules(env: RoutingRulesEnvironment) {
     same_configuration:
       sets.candidate.configurationSha256 !== null &&
       sets.candidate.configurationSha256 === active.configurationSha256,
-    history: {
-      available: false,
-      reason:
-        "Only the current object under each fixed R2 key is stored; earlier revisions and per-rule change times are not retained.",
-    },
+    history: candidateHistory(sets.candidate.history),
   };
+}
+
+function candidateHistory(record: RuleRevision | null) {
+  return record
+    ? {
+        available: true,
+        revision_id: record.revisionId,
+        previous_revision_id: record.previousRevisionId,
+        previous_configuration_sha256: record.previousConfigurationSha256,
+        operation: record.operation,
+        rule_id: record.ruleId,
+        changed_by: record.principalId,
+        changed_at: record.createdAt,
+        note: "The candidate was last written by the MCP rule tools. Per-rule added_at and changed_at come from its revision record; a time is null when the rule was last changed outside these tools. The active configuration keeps no per-rule history.",
+      }
+    : {
+        available: false,
+        revision_id: null,
+        previous_revision_id: null,
+        previous_configuration_sha256: null,
+        operation: null,
+        rule_id: null,
+        changed_by: null,
+        changed_at: null,
+        note: "The current candidate has no revision record from the MCP rule tools, so per-rule change times are unknown. The active configuration keeps no per-rule history.",
+      };
 }
 
 const ruleIdSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,63}$/));
