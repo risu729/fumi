@@ -262,6 +262,18 @@ the low-priority web client is not a prerequisite for retirement.
       on actual local workerd. Unsupported or oversized formats retain explicit
       coverage. Controlled production PDF decryption is verified; hostile-input
       CPU/memory limit enforcement remains a separate acceptance.
+- [ ] Download files from links in mail and process them like attachments
+      ([#146](https://github.com/risu729/fumi/issues/146), owner, 2026-11-21 19:44
+      UTC). See [link downloads](link-downloads.md) for the design and the open
+      owner decisions. Parts, each its own PR:
+  - [ ] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
+        as library code that production does not call.
+  - [ ] B: model selection of candidates by index, after the owner picks the model
+        and key.
+  - [ ] C: processing integration, storage, conversion and decryption, after the
+        owner decides the storage layout, migration and limits.
+  - [ ] D: downloaded files through the attachment MCP tools, and a pending
+        download listing.
 
 ## Phase 4: optional web client (low priority)
 
@@ -277,11 +289,12 @@ the low-priority web client is not a prerequisite for retirement.
 ## Decisions still open
 
 Broader CEL language support, DecisionRAG quality comparison, additional attachment
-formats, actual classifier model/key, plugin distribution and the production webhook
-receiver remain open. Bounded CEL adoption, durable owner offers, generic dispatch,
-optional Claude classification, local ZIP/PDF decryption and managed OCR/hybrid
-retrieval are implemented with private opt-in configuration. Code/tests alone do
-not establish a complete corpus, real model quality or downstream delivery.
-The API target `fumi.takuk.me`, lexical retrieval and outbound send/reply paths have
-separate recorded production acceptance. Gmail backfill remains in progress;
+formats, actual classifier model/key, the link-download decisions listed in
+[link downloads](link-downloads.md#open-decisions-for-the-owner), plugin distribution
+and the production webhook receiver remain open. Bounded CEL adoption, durable owner
+offers, generic dispatch, optional Claude classification, local ZIP/PDF decryption and
+managed OCR/hybrid retrieval are implemented with private opt-in configuration.
+Code/tests alone do not establish a complete corpus, real model quality or downstream
+delivery. The API target `fumi.takuk.me`, lexical retrieval and outbound send/reply
+paths have separate recorded production acceptance. Gmail backfill remains in progress;
 forwarding retirement and deletion are not implied by implementation completion.

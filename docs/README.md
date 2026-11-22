@@ -75,6 +75,7 @@ Attachments and retrieval:
 
 - [Attachment conversion and local ZIP extraction](attachment-conversion.md)
 - [Attachment retrieval representations](attachment-retrieval.md)
+- [Link downloads](link-downloads.md)
 - [Content search](content-search.md)
 - [Managed semantic retrieval](managed-mail-search.md)
 

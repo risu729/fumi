@@ -1,0 +1,253 @@
+# Link downloads
+
+Status: part A (extraction, URL policy and safe fetcher) is implemented as library
+code with synthetic Workers tests. Nothing in production calls it: there is no
+configuration flag, binding, migration, scheduled job or MCP tool for it. Parts B
+to D below are proposed and not implemented. No production behavior has changed.
+
+## Request
+
+Some mail delivers a file as a download link instead of an attachment, often with
+an expiry. The owner asked fumi to fetch such files and treat them like
+attachments, including password-protected ZIP/PDF files
+([#146](https://github.com/risu729/fumi/issues/146), owner, 2026-11-21 19:44 UTC).
+A model, not a per-sender allowlist, judges which links are file downloads
+(owner, 2026-11-21 19:55 UTC). For a first version, the password is assumed to be
+in the same message as the link. This page was written on 2026-11-22 07:47 UTC.
+
+The work is split into four reviewable parts:
+
+| Part | Scope | State |
+| --- | --- | --- |
+| A | Deterministic URL extraction, hard-limit URL policy, safe fetcher | Implemented, not called |
+| B | Model selection of candidates by index | Proposed |
+| C | Processing integration, storage, conversion and decryption | Proposed |
+| D | MCP exposure of downloaded files and pending downloads | Proposed |
+
+## Implemented: candidate extraction
+
+`extractLinkCandidates({ text, html })` in `src/link-extraction.ts` takes the
+parsed body derivative that [MIME extraction](mime-extraction.md) stores as
+`body-json` and that `readMail` already reads. It is a pure function: it parses
+strings, and never renders HTML, runs scripts, resolves names or fetches.
+
+- Text bodies: each run that starts with `http://` or `https://` (any case, not
+  preceded by a letter, digit, `+`, `.` or `-`) and continues with RFC 3986 URL
+  characters. Any other character ends it, including whitespace, `<`, `>`, quotes
+  and non-ASCII text such as Japanese written directly after the URL. Trailing
+  `.,:;!?'"*` and unbalanced `)` or `]` are removed.
+- HTML: the `href` of `<a>` and `<area>` start tags only. A small tokenizer follows
+  the HTML tag and attribute syntax: comments and raw-text elements (`script`,
+  `style`, `textarea`, `title` and similar) are skipped, values may be quoted or
+  unquoted, the first duplicate attribute wins, and a tag cut off by the end of
+  input is dropped. Forms, buttons, `<base>`, `<link>`, images and other resource
+  URLs are ignored. Numeric character references and a fixed set of named ones
+  (such as `&amp;`, `&sol;`, `&colon;`) are decoded; other named references stay
+  literal. HTML text content is not scanned for URLs.
+- Each URL is parsed with the WHATWG URL parser without a base, so relative and
+  protocol-relative references are dropped. Only `http:` and `https:` remain.
+  Userinfo and the fragment are removed, and the serialized URL is the
+  deduplication key.
+- At most 64 distinct candidates are kept (`truncated` reports more) and URLs over
+  2,048 characters are dropped (`tooLong` counts them).
+
+The output is an indexed list, text URLs first, then HTML ones, each in document
+order:
+
+```json
+{
+  "candidates": [
+    { "index": 0, "url": "https://files.example.com/r.pdf", "sources": ["text", "html"] }
+  ],
+  "truncated": false,
+  "tooLong": 0
+}
+```
+
+## Implemented: URL policy
+
+`checkLinkUrl(url)` in `src/link-policy.ts` runs on every URL that would be
+requested, including each redirect `Location`. It returns the URL to request or
+one outcome code. A model choice cannot change it.
+
+Destination rule, giving `blocked_destination`:
+
+- Only `http:` and `https:`, and only the scheme's default port. An explicit other
+  port (for example `:8443`, or `:443` on `http:`) is refused.
+- Userinfo and the fragment are removed before the request. A URL longer than
+  8,192 characters, before or after normalization, is refused. This is longer than
+  the 2,048-character candidate cap because redirect targets such as signed
+  storage URLs can be long.
+- IPv4 literals are refused in `0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`,
+  `169.254/16` (link-local and cloud metadata), `172.16/12`, `192.0.0/24`,
+  `192.0.2/24`, `192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`,
+  `203.0.113/24`, `224/4` (multicast) and `240/4`. The URL parser first
+  canonicalizes decimal (`2130706433`), octal (`0177.0.0.1`), hexadecimal
+  (`0x7f000001`), short (`127.1`) and trailing-dot forms.
+- IPv6 literals are allowed only in global unicast `2000::/3`, minus
+  `2001::/23` (including Teredo), `2001:db8::/32`, `2002::/16` (6to4) and
+  `3fff::/20`. So `::`, `::1`, IPv4-mapped `::ffff:0:0/96` (whatever address it
+  embeds), IPv4-compatible forms, NAT64 `64:ff9b::/96`, ULA `fc00::/7`, link-local
+  `fe80::/10`, site-local `fec0::/10` and multicast `ff00::/8` are refused.
+- Hostnames, after trailing dots are removed: single-label names (`localhost`,
+  `metadata`), names that are numeric but not canonical IPv4, names with a label
+  run that spells a dotted or dashed IPv4 address (`10.0.0.1.nip.example`,
+  `10-0-0-1.sslip.example`), and names that are or end in `localhost`, `local`,
+  `localdomain`, `internal`, `intranet`, `private`, `corp`, `home`, `lan`, `arpa`,
+  `test`, `invalid`, `onion` or `alt`. Full-width forms are mapped by the URL
+  parser's IDNA processing first.
+
+Action rule, giving `blocked_action_url` or `pending_login`. The path and query
+(not the host or fragment) are compacted: `+` becomes a space, the text is
+percent-decoded up to four times until it stops changing (bytes read as UTF-8 with
+replacement characters), NFKC-normalized, lowercased, and every character other
+than `a-z` and `0-9` is removed. The result is then searched for these substrings:
+
+| Stem | Covers | Outcome |
+| --- | --- | --- |
+| `unsub` | unsubscribe | `blocked_action_url` |
+| `optout` | opt-out, opt_out, optout | `blocked_action_url` |
+| `confirm` | confirm, confirmation | `blocked_action_url` |
+| `verif` | verify, verification | `blocked_action_url` |
+| `activat` | activate, activation | `blocked_action_url` |
+| `accept` | accept, acceptance | `blocked_action_url` |
+| `declin` | decline, declined | `blocked_action_url` |
+| `reset` | reset | `blocked_action_url` |
+| `login`, `logon` | login, log-in, logon | `pending_login` |
+
+An action stem wins over a login stem. Because separators are removed after
+decoding, `un-subscribe`, `un%2Dsubscribe`, `un%252Dsubscribe`, `un%00subscribe`,
+`un%C2%ADsubscribe` and full-width `ｕｎｓｕｂｓｃｒｉｂｅ` all match. The rule
+deliberately over-blocks: `/designs/preset.pdf` contains `reset` and
+`/acceptance-letter.pdf` contains `accept`. A login link is never requested,
+because a GET can consume a one-time login token.
+
+## Implemented: safe fetcher
+
+`fetchLinkFile(url, options)` in `src/link-fetch.ts` checks the URL, then sends
+`GET` with an empty `Headers` object, no body and `redirect: "manual"` (workerd
+rejects `redirect: "error"`). It sets no cookie or authorization header; Workers
+fetch has no cookie jar. One `AbortSignal.timeout` covers the whole redirect chain
+and the body read.
+
+- A 301, 302, 303, 307 or 308 with `Location` is resolved against the current URL
+  and checked again before it is requested, so a refused hop is never contacted.
+  At most five redirects are followed. Response bodies of hops are cancelled unread.
+- A 401, or any response with `WWW-Authenticate`, is `pending_login`.
+- Any status other than 200 is `http_<status>`, including a 3xx without `Location`.
+- `text/html` and `application/xhtml+xml` are `pending_html`. So is a body whose
+  first bytes, after a BOM and whitespace, are `<!doctype html` or `<html`,
+  whatever its declared type. Links or forms on the page are never followed.
+- A `Content-Length` over the cap, or a streamed body that passes it, is
+  `too_large`. The stream is read chunk by chunk and cancelled at the cap.
+
+Default limits are 4 MiB (the decoded MIME part cap), 30 seconds and five
+redirects; callers can lower or raise them per call. The outcome codes are
+`pending_login`, `pending_html`, `blocked_action_url`, `blocked_destination`,
+`too_large`, `timeout`, `redirect_limit`, `http_<status>` and `network_error`. The
+last one covers a fetch rejection, such as a DNS failure or a connection the
+platform refuses; its cause can contain the URL, so it is dropped. A `Location`
+that does not parse is `blocked_destination`.
+
+A success returns the bytes and this provenance:
+
+```json
+{
+  "finalUrl": "https://cdn.example.com/b?sig=1",
+  "redirects": 2,
+  "fetchedAt": "2026-11-22T09:20:00.000Z",
+  "status": 200,
+  "size": 3,
+  "mimeType": "application/zip",
+  "sha256": "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
+}
+```
+
+`mimeType` is the declared media type essence or `null`. URLs can carry access
+tokens, so they are secrets in logs: part A never logs, and no outcome or error
+contains a URL, header or body.
+
+## What the code cannot enforce
+
+A Worker cannot resolve a name before `fetch`, and `fetch` resolves it inside the
+runtime. The policy therefore checks only the URL text. A public name whose DNS
+answer is a private address, including a name that changes its answer between
+requests, is not caught by this code.
+
+What the runtime itself does was checked only in local sources on 2026-11-22:
+
+- The pinned workerd `workerd.capnp` documents that a `Network` service allows
+  `["public"]` by default "to prevent SSRF attacks", and that for a hostname the
+  rule filters the addresses DNS returns. This describes self-hosted workerd.
+- The pinned Miniflare configures its `internet` service with
+  `allow: ["public", "private", "240.0.0.0/4"]`, so local tests and
+  `vitest-pool-workers` can reach private addresses. Synthetic tests here use a mock
+  `fetch` and prove nothing about the platform.
+- No local source states what production Cloudflare Workers `fetch` guarantees for
+  private, loopback or internal destinations. That behavior is unverified here and
+  has not been tested in production.
+
+Other residual risks:
+
+- An opaque link, such as a click-tracking redirector, can perform an action on
+  `GET` before it redirects. The action rule sees only the URL text; part B's
+  selection lowers but does not remove this risk.
+- The hostname rule is a list. Wildcard DNS names that encode an address another
+  way (hexadecimal labels, for example) are not recognized.
+- The action rule over-blocks words that contain a stem; such links stay unfetched.
+
+## Proposed: part B, model selection
+
+After extraction, the candidates that pass `checkLinkUrl` are sent to a model with
+bounded message text, all as untrusted data. The model returns indexes only, under
+a strict output schema, as in [routing policy](routing-policy.md); it cannot write
+a URL. Code maps each index back to the extracted list and runs the policy again
+in the fetcher. No per-sender allowlist exists (owner, 2026-11-21 19:55 UTC). The
+model may also return an expiry it reads in the mail for a pending record, which
+stays a claim from untrusted text.
+
+## Proposed: part C, processing integration
+
+A separately leased, opt-in scheduled repair (like attachment conversion) would
+fetch each selected index once and store the bytes as a derivative of the message,
+with the provenance above. Downloaded files then enter the existing
+[attachment conversion](attachment-conversion.md) and search pipeline. For a
+password-protected ZIP or PDF, password candidates from the same message come
+first, then the existing related-message search and bounded decryption. The
+encrypted original and the verified decrypted file stay separate derivatives.
+`pending_login` and `pending_html` become "download pending" records with the
+stated expiry, for an agent to fetch with a browser. Passwords stay out of logs,
+MCP results and search indexes.
+
+## Proposed: part D, MCP exposure
+
+The existing attachment read and copy tools would also serve downloaded files,
+and a new tool would list pending downloads. Whether a pending record returns the
+full URL (which can hold a token) is an open decision below.
+
+## Open decisions for the owner
+
+1. Model and key for part B. Options: reuse the optional Claude classifier
+   configuration (`config/routing-policy-v1.json` and `ROUTING_ANTHROPIC_API_KEY`,
+   sharing its daily call budget), or a separate private configuration with its
+   own model, key and budget.
+2. Storage layout. Proposed: content-addressed R2 objects under
+   `derived/link-v1/<raw sha256>/download/<file sha256>`, with a manifest per
+   message, mirroring `mime-v1`. Whether the URL itself is stored in R2, in D1 or
+   only as a hash, given that it can hold a token.
+3. Whether this needs a migration. A D1 ledger (like `attachment_conversions`)
+   would give leases, states (`selected`, `fetched`, `pending_login`,
+   `pending_html`, `blocked`), retry fences and a pending-download listing for
+   part D. An R2-manifest-only design avoids a migration but cannot list pending
+   downloads cheaply.
+4. Default limits: candidates per message (64), URL length (2,048 for a candidate,
+   8,192 for any requested URL), file size
+   (4 MiB; conversion currently accepts sources up to 2 MiB), total time (30 s),
+   redirects (5), downloads per message and a daily download cap.
+5. Whether `http:` links are fetched or only `https:`, and whether non-default
+   ports stay refused.
+6. Whether imported historical mail is in scope; its links have usually expired,
+   and historical notifications are suppressed.
+7. Whether MCP results for a pending download return the full URL or only its
+   host and candidate index.
+8. Retention of downloaded files and pending records.
