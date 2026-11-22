@@ -71,6 +71,7 @@ Historical import:
 - [Historical Gmail import](gmail-import.md)
 - [Import from a connected Gmail account](gmail-connector-import.md)
 - [Native staging for connected Gmail originals](gmail-connector-stage.md)
+- [Copies of one message](copy-grouping.md)
 
 Attachments and retrieval:
 

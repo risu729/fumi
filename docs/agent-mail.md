@@ -66,10 +66,10 @@ replying never infers reply-all or adds an archive CC/BCC.
 | Tools | Contract |
 | --- | --- |
 | `get_profile` | Scopes, sender addresses/domains, limits and coverage |
-| `search_emails`, `search_email_ids` | Bounded pages, opaque continuation token |
+| `search_emails`, `search_email_ids` | Bounded pages, opaque continuation token, one result per [copy group](copy-grouping.md) unless `expand_copies` |
 | `search_mail_content` | Bounded literal body/text-attachment search with source citations |
 | `read_email`, `batch_read_email` | Full, metadata, minimal or raw; per-item batch errors |
-| `read_email_thread` | Account-scoped Gmail threads or direct live header links, explicit truncation |
+| `read_email_thread` | Account-scoped Gmail threads or direct live header links, explicit truncation, copies collapsed unless `expand_copies` |
 | `read_attachment` | Parent message plus attachment ID; authenticated download |
 | `preview_email` | Validate without sending |
 | `upload_attachment`, `copy_attachment` | Stage new bytes or copy a verified archived part |

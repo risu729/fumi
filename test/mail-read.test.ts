@@ -302,9 +302,10 @@ describe("bounded private mail reads", () => {
         ...new TextEncoder().encode(
           JSON.stringify({
             snapshot: Number.MAX_SAFE_INTEGER,
+            groups: Number.MAX_SAFE_INTEGER,
             beforeTime: "9999-12-31T00:00:00.000Z",
             beforeId: "~",
-            query: JSON.stringify([most, "email_routing", labels]),
+            query: JSON.stringify([most, "email_routing", labels, false]),
           }),
         ),
       ),

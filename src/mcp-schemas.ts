@@ -22,6 +22,7 @@ const archiveSearch = {
       v.pipe(v.array(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/))), v.maxLength(10)),
     ),
   ),
+  expand_copies: v.optional(v.boolean()),
 };
 export const payloadSchema = v.strictObject({
   text: v.optional(boundedBody),
@@ -62,11 +63,13 @@ export const toolSchemas = {
     filters: v.optional(shortText),
     archive_source: archiveSearch.archive_source,
     label_ids: archiveSearch.label_ids,
+    expand_copies: archiveSearch.expand_copies,
   }),
   search_mail_content: v.strictObject({
     ...page,
     query: v.pipe(v.string(), v.minLength(3), v.maxLength(200)),
     filters: v.optional(shortText),
+    expand_copies: archiveSearch.expand_copies,
   }),
   get_profile: v.strictObject({}),
   read_email: v.strictObject({
@@ -81,6 +84,7 @@ export const toolSchemas = {
     message_id: v.optional(v.nullable(identifier)),
     thread_id: v.optional(v.nullable(identifier)),
     max_messages: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(20)), 20),
+    expand_copies: archiveSearch.expand_copies,
   }),
   read_attachment: v.strictObject({
     message_id: identifier,
