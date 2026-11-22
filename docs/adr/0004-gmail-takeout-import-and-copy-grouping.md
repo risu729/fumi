@@ -3,9 +3,10 @@
 Status: accepted by the owner on 2026-11-22 at 20:31 UTC ("yes work on it, you may
 create a r2 bucket and upload the takeout from gdrive"). Grouping copies of one message
 is implemented ([copies of one message](../copy-grouping.md)), with the agent
-refinements in the 2026-11-22 amendment below; the Takeout import is not implemented. It
-replaces the connector transport as the way to finish the historical Gmail backfill in
-[historical Gmail import](../gmail-import.md) and
+refinements in the 2026-11-22 amendment below. The Takeout transport is implemented
+([historical Gmail import](../gmail-import.md#google-takeout-transport)), and no run
+has been configured. It replaces the connector transport as the way to finish the
+historical Gmail backfill in [historical Gmail import](../gmail-import.md) and
 [connector import](../gmail-connector-import.md); both transports stay in the code until
 this import is accepted.
 

@@ -79,6 +79,25 @@ describe("Takeout mbox splitter", () => {
     expect(items[2]).toMatchObject({ messageId: "ffffffffffffffff", labels: "" });
   });
 
+  it("reports where each entry ends and resumes from a checkpoint", () => {
+    const items = split(mbox);
+    expect(items.map((item) => item.end)).toEqual([
+      items[1]!.offset,
+      items[2]!.offset,
+      encoder.encode(mbox).length,
+    ]);
+    const resumed = new TakeoutMboxSplitter(undefined, items[1]!.offset);
+    const rest = [
+      ...resumed.push(encoder.encode(mbox).subarray(items[1]!.offset)),
+      ...resumed.end(),
+    ];
+    expect(rest).toEqual(items.slice(1));
+  });
+
+  it("does not pad message IDs, like the Gmail API", () => {
+    expect(split(entry({ id: "255", message: first }))[0]).toMatchObject({ messageId: "ff" });
+  });
+
   it("returns the same entries for every chunk size", () => {
     const whole = split(mbox);
     for (const size of [1, 2, 3, 5, 7, 9, 13, 64, 127])
@@ -121,13 +140,14 @@ describe("Takeout mbox splitter", () => {
       expect(items[0]).toEqual({
         kind: "oversize",
         offset: 0,
-        messageId: "000000000000000a",
+        messageId: "a",
         size: encoder.encode(big).length,
+        end: entry({ id: "10", message: big }).length,
       });
       expect(items[1]).toMatchObject({
         kind: "entry",
         offset: entry({ id: "10", message: big }).length,
-        messageId: "000000000000000b",
+        messageId: "b",
       });
       expect(decoder.decode((items[1] as TakeoutEntry).raw)).toBe(small);
     }

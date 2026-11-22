@@ -1,8 +1,30 @@
 import { archiveCandidate, validArchiveTime } from "./archive-key.ts";
 import { MAX_RAW_BYTES } from "./limits.ts";
 
+/** Where a Takeout-imported message came from (ADR 0004). */
+export interface GmailTakeoutSource {
+  runId: string;
+  /** Object key in the Takeout bucket that holds the entry's From_ line. */
+  objectKey: string;
+  /** Stream offset of the entry's From_ line across the run's ordered objects. */
+  entryOffset: number;
+  /** X-Gmail-Labels as stored: localized names, not API label IDs. */
+  labels: string;
+}
+
+/** UTF-8 bytes of X-Gmail-Labels kept in a receipt, which must stay under 16 KiB. */
+export const TAKEOUT_LABELS_LIMIT = 8 * 1024;
+const utf8 = new TextEncoder();
+export const takeoutLabelsFit = (labels: string) =>
+  labels.length <= TAKEOUT_LABELS_LIMIT && utf8.encode(labels).length <= TAKEOUT_LABELS_LIMIT;
+
+/**
+ * `gmail-import-v1` comes from the Gmail API (OAuth or connector). `gmail-takeout-v1`
+ * comes from a Google Takeout mbox: its `internalDate` is the From_ date (second
+ * precision), `labelIds` is empty, and `takeout` says where the entry was.
+ */
 export interface GmailProvenance {
-  schemaVersion: "gmail-import-v1";
+  schemaVersion: "gmail-import-v1" | "gmail-takeout-v1";
   accountNamespace: string;
   messageId: string;
   threadId: string;
@@ -12,6 +34,33 @@ export interface GmailProvenance {
   rawKey: string;
   rawSize: number;
   rawSha256: string;
+  takeout?: GmailTakeoutSource;
+}
+
+export const takeoutObjectKey = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= 256 &&
+  /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(value) &&
+  !value.split("/").some((part) => part === "." || part === "..");
+
+function validTakeout(p: Partial<GmailProvenance>): boolean {
+  if (p.schemaVersion === "gmail-import-v1") return p.takeout === undefined;
+  const t = p.takeout as Partial<GmailTakeoutSource> | undefined;
+  return (
+    p.schemaVersion === "gmail-takeout-v1" &&
+    !!t &&
+    typeof t === "object" &&
+    Object.keys(t).length === 4 &&
+    gmailNamespace(t.runId) &&
+    takeoutObjectKey(t.objectKey) &&
+    Number.isSafeInteger(t.entryOffset) &&
+    (t.entryOffset ?? -1) >= 0 &&
+    typeof t.labels === "string" &&
+    takeoutLabelsFit(t.labels) &&
+    Array.isArray(p.labelIds) &&
+    p.labelIds.length === 0 &&
+    Number(p.internalDate) % 1000 === 0
+  );
 }
 
 export const gmailId = (value: unknown): value is string =>
@@ -24,7 +73,7 @@ export function parseGmailProvenance(value: unknown): GmailProvenance | null {
   const p = value as Partial<GmailProvenance>;
   const candidate = typeof p.rawKey === "string" ? archiveCandidate(p.rawKey) : null;
   if (
-    p.schemaVersion !== "gmail-import-v1" ||
+    !validTakeout(p) ||
     !gmailNamespace(p.accountNamespace) ||
     !gmailId(p.messageId) ||
     !gmailId(p.threadId) ||
