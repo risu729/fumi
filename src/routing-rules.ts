@@ -2,7 +2,7 @@ import * as v from "valibot";
 import { readRoutingConfig, type RoutingConfig } from "./routing.ts";
 import { loadShadowConfiguration } from "./routing-shadow-runtime.ts";
 import { loadDispatchConfiguration } from "./routing-dispatch-config.ts";
-import { MailReadError } from "./mail-read.ts";
+import { CURRENT_EXTRACTION_SQL, MailReadError } from "./mail-read.ts";
 
 /**
  * Authorized read layer for private routing rules and their recorded decisions.
@@ -245,8 +245,9 @@ function counter<K>(key: (value: K) => string) {
 }
 
 /** Each scan is a descending range over a primary-key or unique index that starts
- * with raw_key, so the newest receipt days come first without a sort, and the row
- * cap bounds what is read. Exported for the query-plan test. */
+ * with raw_key, so the newest receipt days come first without a sort. The row cap
+ * bounds what is returned; the decision scan also reads and skips the window's rows
+ * of other configurations and sources. Exported for the query-plan test. */
 export const USAGE_SQL = {
   decisions: `SELECT d.raw_key,d.state,d.failure_code,d.decision_json,s.external_id,s.received_at
     FROM routing_shadow_decisions d JOIN archive_sources s ON s.raw_key=d.raw_key
@@ -482,13 +483,16 @@ interface JobEvidence {
 /** `explain_routing`: stored evidence for one message, newest first. */
 export async function explainRouting(env: RoutingRulesEnvironment, messageId: string) {
   const db = env.MAIL_CATALOG;
-  // The same lookup and conflict rule as read_email.
+  // The same lookup, conflict rule and current-extraction rule as read_email. A
+  // decision is current only when it was made for this extraction and catalog state,
+  // the same fence the shadow repair uses to re-evaluate a row.
   const sources = (
     await db
       .prepare(`SELECT s.raw_key,s.external_id,s.received_at,s.source_kind,s.notify_events,
+        s.raw_sha256 AS catalog_sha256,
         e.raw_sha256 AS extraction_sha256,e.updated_at AS extraction_updated_at
         FROM archive_sources s LEFT JOIN mail_extractions e
-        ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1' AND e.status='complete'
+        ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL}
         WHERE s.external_id=? LIMIT 2`)
       .bind(messageId.slice("mail_".length))
       .all<{
@@ -497,6 +501,7 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
         received_at: string | null;
         source_kind: string;
         notify_events: number;
+        catalog_sha256: string | null;
         extraction_sha256: string | null;
         extraction_updated_at: number | null;
       }>()
@@ -508,14 +513,18 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
   const [sets, shadowRows, job, offerRows, classificationRows] = await Promise.all([
     loadRoutingRuleSets(env),
     db
-      .prepare(`SELECT configuration_sha256,source_sha256,extraction_updated_at,state,failure_code,
-        decision_json,updated_at FROM routing_shadow_decisions WHERE raw_key=?
+      .prepare(`SELECT configuration_sha256,source_sha256,catalog_sha256,extraction_updated_at,
+        source_kind,notify_events,state,failure_code,decision_json,updated_at
+        FROM routing_shadow_decisions WHERE raw_key=?
         ORDER BY updated_at DESC,configuration_sha256 LIMIT ?`)
       .bind(source.raw_key, limit + 1)
       .all<{
         configuration_sha256: string;
         source_sha256: string;
+        catalog_sha256: string | null;
         extraction_updated_at: number;
+        source_kind: string;
+        notify_events: number;
         state: string;
         failure_code: string | null;
         decision_json: string | null;
@@ -523,11 +532,12 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       }>()
       .then((rows) => rows.results),
     db
-      .prepare(
-        "SELECT state,failure_code,revision,updated_at FROM routing_dispatch_jobs WHERE raw_key=?",
-      )
+      .prepare(`SELECT source_sha256,extraction_updated_at,state,failure_code,revision,updated_at
+        FROM routing_dispatch_jobs WHERE raw_key=?`)
       .bind(source.raw_key)
       .first<{
+        source_sha256: string;
+        extraction_updated_at: number;
         state: string;
         failure_code: string | null;
         revision: number;
@@ -575,7 +585,8 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       : hash === sets.active.configurationSha256
         ? "active"
         : "other";
-  const shadow = shadowRows.slice(0, limit).map((row): ShadowEvidence => {
+  const shadowKept = shadowRows.slice(0, limit);
+  const shadow = shadowKept.map((row): ShadowEvidence => {
     const decision = row.state === "complete" ? parsed(decisionSchema, row.decision_json) : null;
     return {
       configuration_sha256: row.configuration_sha256,
@@ -594,10 +605,16 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       })),
       evaluated_at: new Date(row.updated_at).toISOString(),
       current:
+        source.extraction_sha256 !== null &&
         row.source_sha256 === source.extraction_sha256 &&
-        row.extraction_updated_at === source.extraction_updated_at,
+        row.extraction_updated_at === source.extraction_updated_at &&
+        row.catalog_sha256 === source.catalog_sha256 &&
+        row.source_kind === source.source_kind &&
+        row.notify_events === source.notify_events,
     };
   });
+  // The extraction each kept shadow row was evaluated on, for attribution only.
+  const evaluatedOn = shadowKept.map((row) => [row.source_sha256, row.extraction_updated_at]);
   const offers = offerRows.slice(0, limit).map((row): OfferEvidence => ({
     lane: row.lane,
     state: row.state,
@@ -638,7 +655,20 @@ export async function explainRouting(env: RoutingRulesEnvironment, messageId: st
       source.source_kind === "email_routing" && source.notify_events === 1
         ? ("live" as const)
         : ("historical" as const),
-    decided_by: decidedBy(sets, shadow, dispatchJob, offers, classifications),
+    decided_by: decidedBy(
+      sets,
+      shadow,
+      job
+        ? shadow.filter(
+            (_, index) =>
+              evaluatedOn[index]![0] === job.source_sha256 &&
+              evaluatedOn[index]![1] === job.extraction_updated_at,
+          )
+        : [],
+      dispatchJob,
+      offers,
+      classifications,
+    ),
     shadow,
     shadow_truncated: shadowRows.length > limit,
     dispatch: { job: dispatchJob, offers, offers_truncated: offerRows.length > limit },
@@ -671,9 +701,12 @@ export interface DecidedBy {
   revision: number | null;
 }
 
+/** `jobShadow` holds the shadow rows evaluated on the same extraction as the dispatch
+ * job, so a rule is attributed only to the metadata that job decided on. */
 function decidedBy(
   sets: RoutingRuleSets,
   shadow: ShadowEvidence[],
+  jobShadow: ShadowEvidence[],
   job: JobEvidence | null,
   offers: OfferEvidence[],
   classifications: ClassificationEvidence[],
@@ -708,7 +741,7 @@ function decidedBy(
       const active = sets.active;
       const match =
         active.revision === job.revision
-          ? shadow.find(
+          ? jobShadow.find(
               (row) =>
                 row.current &&
                 row.state === "complete" &&

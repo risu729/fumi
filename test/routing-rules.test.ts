@@ -663,6 +663,34 @@ describe("explain_routing", () => {
     expect(stale.decided_by.kind).toBe("not_evaluated");
   });
 
+  it("does not treat a decision as current once the catalog no longer matches its extraction", async () => {
+    await configureCandidate();
+    const replaced = await source(day(0), "beta replaced");
+    const missing = await source(day(0), "beta missing");
+    await evaluateAll();
+    for (const message of [replaced, missing])
+      // oxlint-disable-next-line no-await-in-loop -- Each message is checked independently.
+      expect((await explainRouting(env, message.messageId)).decided_by.kind).toBe("rule");
+    // A replaced raw object or a missing one leaves the old extraction behind; it is
+    // no longer the current extraction, as for read_email.
+    await env.MAIL_CATALOG.batch([
+      env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?").bind(
+        "e".repeat(64),
+        replaced.rawKey,
+      ),
+      env.MAIL_CATALOG.prepare(
+        "UPDATE archive_sources SET raw_state='missing' WHERE raw_key=?",
+      ).bind(missing.rawKey),
+    ]);
+    for (const message of [replaced, missing]) {
+      // oxlint-disable-next-line no-await-in-loop -- Each message is checked independently.
+      const explained = await explainRouting(env, message.messageId);
+      expect(v.is(toolOutputSchemas.explain_routing, explained)).toBe(true);
+      expect(explained.shadow[0]?.current).toBe(false);
+      expect(explained.decided_by).toMatchObject({ kind: "not_evaluated", rule_id: null });
+    }
+  });
+
   it("attributes a live static-rule decision to a rule only under the active configuration", async () => {
     await configureActive();
     // The shadow evaluates the same configuration as dispatch, so hashes agree.
@@ -708,6 +736,28 @@ describe("explain_routing", () => {
         urgent: false,
       }),
     ]);
+
+    // A re-extracted source is re-evaluated by the shadow before dispatch re-runs:
+    // the current shadow row then describes other metadata than the job decided on.
+    await env.MAIL_CATALOG.prepare("UPDATE mail_extractions SET updated_at=2 WHERE raw_key=?")
+      .bind(message.rawKey)
+      .run();
+    await evaluateAll();
+    const pending = await explainRouting(env, message.messageId);
+    expect(pending.shadow[0]).toMatchObject({ current: true, rule_id: "synthetic-alpha" });
+    expect(pending.decided_by).toMatchObject({
+      kind: "rule_or_default",
+      rule_id: null,
+      configuration_sha256: null,
+      revision: 3,
+    });
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE routing_dispatch_jobs SET extraction_updated_at=2",
+    ).run();
+    expect((await explainRouting(env, message.messageId)).decided_by).toMatchObject({
+      kind: "rule",
+      rule_id: "synthetic-alpha",
+    });
 
     // A job decided under another revision gets no rule attribution.
     await env.MAIL_CATALOG.prepare("UPDATE routing_dispatch_jobs SET revision=2").run();
