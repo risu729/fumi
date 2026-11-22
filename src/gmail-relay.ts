@@ -11,8 +11,8 @@ export const RELAY_LOOKUP_TIMEOUT_MS = 5_000;
 export const MAX_RELAY_INGEST_IDS = 4;
 
 const GMAIL_ADDRESS = /^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+)@(?:gmail\.com|googlemail\.com)$/i;
-// Gmail forwards with `<user>+calf_=<destination with @ replaced by =>@gmail.com`.
-const RELAY_SENDER = /^([^@+]+)\+calf_=[^@]+=[^@=]+@(?:gmail\.com|googlemail\.com)$/i;
+// Gmail forwards with `<user>+caf_=<destination with @ replaced by =>@gmail.com`.
+const RELAY_SENDER = /^([^@+]+)\+caf_=[^@]+=[^@=]+@(?:gmail\.com|googlemail\.com)$/i;
 const INGEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 /** Gmail ignores dots and anything after "+" in the local part of its addresses. */

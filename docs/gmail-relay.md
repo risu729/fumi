@@ -13,7 +13,7 @@ fumi itself forwarded to Gmail, so fumi drops the copies it already holds.
 ## Recognizing a relayed delivery
 
 Gmail forwards with the SMTP envelope sender
-`<user>+calf_=<destination with @ replaced by =>@gmail.com`, for example
+`<user>+caf_=<destination with @ replaced by =>@gmail.com`, for example
 `owner+caf_=relay=example.com@gmail.com`. A delivery is a relay when its envelope
 sender has that form, on `gmail.com` or `googlemail.com`, and `<user>` is the Gmail
 account of `FORWARD_TO`. Case, dots and a `+tag` in either local part are ignored, as
@@ -40,10 +40,12 @@ a stored live ingest whose Message-ID is the same:
    the previous date. Its metadata must carry the same ingest ID and no Gmail import
    `sourceKind`.
 
-The header is not DKIM-signed, so the Message-ID must match too. A copy without a
-usable Message-ID, an unknown or mismatched ID, a lookup error and a lookup slower than
-five seconds all archive the copy (fail open: no mail is lost). [Copy
-grouping](copy-grouping.md) links a duplicate that slips through.
+IDs are checked in header order; Cloudflare's header is expected above any
+`X-Fumi-Ingest-ID` the original itself carried. The header is not DKIM-signed, so the
+Message-ID must match too. A copy without a usable Message-ID, a copy whose original had
+no Message-ID (Gmail adds one), an unknown or mismatched ID, a lookup error and a lookup
+slower than five seconds all archive the copy (fail open: no mail is lost).
+[Copy grouping](copy-grouping.md) links a duplicate that slips through.
 
 A dropped copy stores no R2 object. It keeps one `gmail_relay_deliveries` row with the
 outcome `duplicate_of_live` and the raw key of the original. When that row cannot be
@@ -70,6 +72,11 @@ Everything else is stored as live mail:
   without one shows no `via`.
 - A reply has no default sender, because the envelope recipient is fumi's forwarding
   address: `from_address` is required (`reply_sender_unavailable` otherwise).
+- When the original cannot be captured or stored, forwarding mode throws after the
+  receipt is written, as for a failed forward, so Email Routing reports a failure to
+  Gmail; whether Gmail retries is not established. Archive-only mode rejects it
+  permanently, and repeated bounces may make Gmail warn about or turn off forwarding.
+  Gmail keeps its copy either way.
 - The `ingest` log line adds `"relay": "gmail"`. A dropped copy logs
   `"archive": "duplicate_of_live"`.
 
@@ -111,3 +118,10 @@ observations for health, not archive evidence, and are not rebuilt from R2.
   dropped).
 - Retiring Gmail forwarding removes `FORWARD_TO`; relay recognition then needs its own
   setting for the Gmail account.
+- Recognizing the envelope sender is the only thing that keeps a relay from being
+  forwarded back. A Worker version without it forwards every relay to Gmail, which
+  forwards it to fumi again with one more `X-Fumi-Ingest-ID`, until a hop limit stops
+  the loop. Turn Gmail forwarding off before rolling back below this version.
+- Mail that other Gmail accounts forward to an Email Routing address also has a
+  `+caf_=` envelope sender, of another account. It is not a relay and is forwarded to
+  `FORWARD_TO` as usual.

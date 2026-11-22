@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
-import { isGmailRelay, relayedCopyOf } from "../src/gmail-relay.ts";
+import { isGmailRelay, RELAY_LOOKUP_TIMEOUT_MS, relayedCopyOf } from "../src/gmail-relay.ts";
 import { getMailHealth } from "../src/mail-health.ts";
 import { readMail, searchMail } from "../src/mail-read.ts";
 import { indexArchiveSource } from "../src/reconcile.ts";
@@ -143,11 +143,14 @@ beforeEach(async () => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("Gmail relay recognition", () => {
   it.each([
     [RELAY_FROM, "synthetic-forward@gmail.com", true],
+    // The exact form Gmail uses, written out in full against the pattern's literal.
+    ["owner+caf_=fumi-relay=mail.example.invalid@gmail.com", "owner@gmail.com", true],
     // Gmail ignores dots and plus tags in its own addresses.
     ["syntheticforward+caf_=relay=example.invalid@gmail.com", "synthetic.forward@gmail.com", true],
     [RELAY_FROM, "Synthetic-Forward+fumi@googlemail.com", true],
@@ -406,13 +409,34 @@ describe("Gmail relay ingress in workerd", () => {
   it("records a relayed delivery whose capture failed", async () => {
     const incoming = message(mime("short@example.invalid"));
     const short = { ...incoming, rawSize: incoming.rawSize + 1 };
-    await run(short);
+    await expect(run(short)).rejects.toThrow("Relayed mail was not stored");
     expect(incoming.forward).not.toHaveBeenCalled();
     expect((await receipts())[0]).toMatchObject({
       schemaVersion: 4,
       archive: { status: "failed", code: "size_mismatch" },
     });
     expect(await relayRows()).toEqual([expect.objectContaining({ outcome: "archive_failed" })]);
+  });
+
+  it("archives the copy when the duplicate check outlasts its deadline", async () => {
+    vi.useFakeTimers();
+    const stalled = {
+      prepare: () => ({ bind: () => ({ all: () => new Promise(() => undefined) }) }),
+    };
+    vi.spyOn(env.MAIL_CATALOG, "withSession").mockReturnValue(
+      stalled as unknown as D1DatabaseSession,
+    );
+    const original = mime("stalled@example.invalid");
+    const copy = message(relayed(original, [crypto.randomUUID()]));
+    const completed = run(copy);
+    await vi.advanceTimersByTimeAsync(RELAY_LOOKUP_TIMEOUT_MS + 1);
+    await completed;
+    vi.useRealTimers();
+    expect(copy.forward).not.toHaveBeenCalled();
+    expect((await receipts()).map((receipt) => receipt.forward)).toEqual([
+      { status: "skipped", reason: "gmail_relay" },
+    ]);
+    expect(await relayRows()).toEqual([expect.objectContaining({ outcome: "archived" })]);
   });
 
   it("looks up nothing for a copy without a Message-ID", async () => {

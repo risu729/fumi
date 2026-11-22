@@ -31,7 +31,7 @@ Date: 2026-11-22
 1. Gmail forwards every incoming message ("Forward a copy of incoming mail", keeping
    Gmail's copy, no filter) to an address whose Email Routing rule reaches fumi.
 2. fumi recognizes such a delivery by its envelope sender
-   `<user>+calf_=<destination with @ replaced by =>@gmail.com`, where `<user>` is the
+   `<user>+caf_=<destination with @ replaced by =>@gmail.com`, where `<user>` is the
    account of `FORWARD_TO`, and never forwards it back to Gmail.
 3. fumi drops a delivery that copies mail it already holds: any `X-Fumi-Ingest-ID`
    value names a stored live ingest whose Message-ID equals this message's Message-ID.

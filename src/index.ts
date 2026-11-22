@@ -483,5 +483,10 @@ export default {
     // Preserve successful forwarding across R2 failures. Surface forwarding failure
     // to Email Routing only after saving whatever recovery evidence was possible.
     if (forwarding?.status === "failed") throw new Error("Forwarding did not complete");
+    // Gmail keeps its copy, but fumi sees relayed mail nowhere else: ask for a retry like a
+    // failed forward. Archive-only mode has already rejected it above.
+    if (relay && mode === "forward" && archive.status === "failed") {
+      throw new Error("Relayed mail was not stored");
+    }
   },
 } satisfies ExportedHandler<Env>;
