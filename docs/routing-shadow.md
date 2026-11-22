@@ -168,8 +168,9 @@ Status: implements the read-only part of
 [#145](https://github.com/risu729/fumi/issues/145) (items 1, 3 and 4) on 2026-11-22
 07:47 UTC, with synthetic workerd tests. Changing rules over MCP (item 2) is
 described in [changing candidate rules over MCP](#changing-candidate-rules-over-mcp).
-The tool names, the reuse of `mail:routing` and the output schemas are proposed and
-await the owner's approval.
+The tool names, the reuse of `mail:routing` and the output schemas were approved by
+the owner on 2026-11-22, including returning rule `match` expressions to
+`mail:routing` principals.
 
 Three MCP tools read the private configuration and the stored decisions. They
 need the `mail:routing` grant, the operator scope of the `/api/admin/routing/*`
@@ -288,8 +289,10 @@ them is reported as unreadable rather than passed through.
 
 Status: implements [#145](https://github.com/risu729/fumi/issues/145) item 2 on
 2026-11-22 08:05 UTC, with synthetic workerd tests. The tool names, the
-`mail:routing:write` scope, the revision record layout and the output schemas are
-proposed and await the owner's approval.
+`mail:routing:write` scope, the revision record layout and the output schemas were
+approved by the owner on 2026-11-22. The owner's production principal was granted
+`mail:routing:write` in `MAIL_GRANTS` on 2026-11-22 14:31 UTC, after the release that
+knows the scope was deployed.
 
 | Tool | Change |
 | --- | --- |
