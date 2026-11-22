@@ -144,7 +144,8 @@ and the body read.
   type: `<!--`, `<!doctype html` (any whitespace between the words), or one of the
   tags `html`, `head`, `body`, `script`, `iframe`, `style`, `title`, `table`,
   `font`, `div`, `h1`, `a`, `b`, `br` or `p` followed by whitespace, `/` or `>`.
-  These are the HTML patterns of the
+  Letters match ASCII case-insensitively (`<SCRIPT`, `<!DocType Html`), and no
+  other character folds to them. These are the HTML patterns of the
   [WHATWG MIME Sniffing](https://mimesniff.spec.whatwg.org/#identifying-a-resource-with-an-unknown-mime-type)
   rules, slightly relaxed. Links or forms on the page are never followed.
 - A `Content-Length` over the cap, or a streamed body that passes it, is

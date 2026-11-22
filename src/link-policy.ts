@@ -196,7 +196,11 @@ const embeddedIpv4 = /(?:^|[.-])(?:\d{1,3}[.-]){3}\d{1,3}(?:[.-]|$)/u;
  * octal, hexadecimal and short forms, mapped full-width characters and applied IDNA. */
 export function isBlockedHostname(hostname: string): boolean {
   if (hostname.startsWith("[")) return isBlockedIpv6(hostname);
-  const name = hostname.replace(/\.+$/u, "");
+  // Trailing dots are trimmed with a loop: `/\.+$/` backtracks quadratically on a
+  // long run of dots that is followed by another character.
+  let end = hostname.length;
+  while (end > 0 && hostname[end - 1] === ".") end--;
+  const name = hostname.slice(0, end);
   if (ipv4Value(name) !== null) return isBlockedIpv4(name);
   if (!name.includes(".")) return true; // single label, for example `metadata`
   if (!/^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$/u.test(name)) return true;

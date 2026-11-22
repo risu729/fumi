@@ -194,4 +194,13 @@ describe("destination rule", () => {
     expect(isBlockedIpv6("[not:an:address]")).toBe(true);
     expect(isBlockedHostname("files.example.com")).toBe(false);
   });
+
+  it("ignores any number of trailing dots in a hostname", () => {
+    expect(isBlockedHostname("files.example.com.")).toBe(false);
+    expect(isBlockedHostname("files.example.com...")).toBe(false);
+    expect(isBlockedHostname("10.0.0.1..")).toBe(true);
+    expect(isBlockedHostname("localhost..")).toBe(true);
+    expect(isBlockedHostname("...")).toBe(true);
+    expect(isBlockedHostname("...files.example.com")).toBe(true);
+  });
 });

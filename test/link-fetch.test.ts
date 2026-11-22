@@ -182,6 +182,19 @@ describe("link fetch", () => {
     "<p>Click",
     "<a href=/f>",
     "<br>",
+    // Tag names and the doctype match ASCII case-insensitively, after any leading
+    // whitespace and byte order mark.
+    "<SCRIPT>location.href='/'</SCRIPT>",
+    "<ScRiPt src=/x>",
+    "<Html lang=en>",
+    "<!DOCTYPE HTML>",
+    "<!DocType Html>",
+    "<!--",
+    "<BODY>",
+    "<IFRAME/>",
+    "\ufeff<SCRIPT>",
+    "\ufeff \t\r\n<Html>",
+    " \n\t<!DOCTYPE HTML PUBLIC>",
   ])("sniffs %j as an HTML page whatever its declared type", async (page) => {
     const { send } = mockFetch({
       "https://files.example.com/page": file(page, "application/octet-stream"),
@@ -197,6 +210,10 @@ describe("link fetch", () => {
     ["<abbr>", "text/plain"],
     ["<pre>", "text/plain"],
     ["%PDF-1.7 <html>", "application/pdf"],
+    // Only ASCII letters fold: U+017F (long s) is not "s", nor U+0130 "i".
+    ["<\u017fcript>", "text/plain"],
+    ["<\u0130frame>", "text/plain"],
+    ["\ufeff<SCRIPTS>", "text/plain"],
   ])("keeps %j, which is not an HTML start", async (content, type) => {
     const { send } = mockFetch({ "https://files.example.com/f": file(content, type) });
     const result = await fetchLinkFile("https://files.example.com/f", { fetch: send });
