@@ -23,8 +23,11 @@ const archive = v.variant("status", [
   }),
 ]);
 
-/** An RFC 3463 enhanced status code, the only provider detail a receipt keeps. */
-export const SMTP_ENHANCED_STATUS = /^[245]\.\d{1,3}\.\d{1,3}$/;
+/**
+ * An RFC 3463 enhanced status code of a rejection class, the only provider detail a
+ * receipt keeps. A success class never explains a failed forward.
+ */
+export const SMTP_ENHANCED_STATUS = /^[45]\.\d{1,3}\.\d{1,3}$/;
 /**
  * Codes for a `message.forward()` call that threw. `forward_failed` is an error with no
  * recognizable class; it stays the v1 code. The others need receipt v3.

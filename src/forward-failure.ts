@@ -11,7 +11,9 @@ const INSPECTED_CHARACTERS = 512;
 const PAIRED_REPLY = /(?<![\w.])([45])[0-5]\d[ -](\1\.\d{1,3}\.\d{1,3})(?!\w|\.\d)/;
 // A reply code alone counts only at the very start, where a raw SMTP reply begins.
 const LEADING_REPLY = /^([45])[0-5]\d(?=[ -])/;
-const ENHANCED_STATUS = /(?<![\w.])([245])\.\d{1,3}\.\d{1,3}(?!\w|\.\d)/;
+// Only a rejection class: a success-class 2.x.x cannot explain a failure, and the same
+// shape is a version number, which must not turn an unclassified error into receipt v3.
+const ENHANCED_STATUS = /(?<![\w.])([45])\.\d{1,3}\.\d{1,3}(?!\w|\.\d)/;
 // "timeout", "timed out", "time-out"; a fixed word, never kept.
 const TIMEOUT_TEXT = /\btimed?[ -]?out\b/i;
 
@@ -50,13 +52,7 @@ export function classifyForwardError(error: unknown): ForwardErrorReason {
       ...(enhanced?.[1] === leading[1] ? { smtpStatus: enhanced![0] } : {}),
     };
   }
-  if (enhanced) {
-    const digit = enhanced[1]!;
-    return {
-      code: digit === "2" ? "forward_failed" : replyClass(digit),
-      smtpStatus: enhanced[0],
-    };
-  }
+  if (enhanced) return { code: replyClass(enhanced[1]!), smtpStatus: enhanced[0] };
   if (name === "TimeoutError" || TIMEOUT_TEXT.test(text)) return { code: "timeout" };
   return { code: "forward_failed" };
 }

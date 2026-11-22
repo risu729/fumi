@@ -326,6 +326,54 @@ describe("archive and forward ingress in workerd", () => {
     expect(receipt?.forward).toEqual({ status: "failed", code: "forward_failed" });
   });
 
+  it.each([
+    ["a forwarded message", null, { status: "forwarded" }],
+    ["a missing destination", "no-target", { status: "failed", code: "invalid_target" }],
+    [
+      "an unclassified error",
+      new Error("private SMTP diagnostic"),
+      { status: "failed", code: "forward_failed" },
+    ],
+    [
+      "a success-class status in an error",
+      new Error("runtime 2.1.3 failed"),
+      { status: "failed", code: "forward_failed" },
+    ],
+  ] as const)(
+    "writes the v1 receipt bytes v1-only readers accept for %s",
+    async (_, error, forward) => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const incoming = message();
+      const bindings: Env = { ...env };
+      if (error === "no-target") delete bindings.FORWARD_TO;
+      else if (error) incoming.forward.mockRejectedValue(error);
+      const ran = run(incoming, bindings);
+      if (error) await expect(ran).rejects.toThrow("Forwarding did not complete");
+      else await ran;
+      const [stored] = (await objects()).filter((object) => object.key.endsWith("/receipt.json"));
+      const text = await (await env.MAIL_ARCHIVE.get(stored!.key))!.text();
+      const receipt = JSON.parse(text) as Receipt;
+      if (receipt.archive.status !== "stored") throw new Error("Missing synthetic raw");
+      // The key order and fields are those of the receipt written before forward reasons existed.
+      expect(text).toBe(
+        JSON.stringify({
+          ingestId: receipt.ingestId,
+          receivedAt: receipt.receivedAt,
+          envelope: { from: incoming.from, to: incoming.to },
+          reportedRawSize: mime.byteLength,
+          archive: {
+            status: "stored",
+            key: receipt.archive.key,
+            size: mime.byteLength,
+            sha256: receipt.archive.sha256,
+          },
+          schemaVersion: 1,
+          forward,
+        }),
+      );
+    },
+  );
+
   it("records a bounded rejection reason without provider text in the receipt or log", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const incoming = message();
