@@ -104,9 +104,15 @@ narrow:
   and subject were not used: two distinct mails can share them.
 - A forwarded copy received before the failure, or at the same instant, is not a
   recovery.
+- The parsed header values are compared exactly, angle brackets and letter case
+  included; a genuine retry carries the same bytes.
 - Message-ID is an untrusted header. A recovery is a hint that the destination
-  accepted an attempt of the same message, not proof of Gmail inbox placement.
-- A retry outside the window, or not yet cataloged, is not seen.
+  accepted an attempt of the same message, not proof of Gmail inbox placement. Any
+  sender who knows a failed message's Message-ID, including its own sender, can make
+  that failure read as `recovered` by getting a later message with the same header
+  forwarded. Check the `recovered_by` message before relying on a recovery.
+- A retry outside the window, not yet cataloged, or without a current extraction is
+  not seen, so the failure stays `unrecovered` until that retry is extracted.
 
 Treat `receipt_forward_failures_unrecovered` and `recovery_unknown` as the messages
 to check in Gmail.
