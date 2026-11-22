@@ -3,6 +3,7 @@
  * would be fetched, including each redirect `Location`, whatever a model chose.
  * No function here resolves names, contacts a host or logs anything.
  */
+import { workerZone } from "../worker-domain.ts";
 import { normalizeLinkUrl } from "./link-extraction.ts";
 
 export type LinkPolicyRefusal = "blocked_action_url" | "blocked_destination" | "pending_login";
@@ -109,8 +110,11 @@ const blockedIpv4: [number, number][] = [
   ["172.16.0.0", 12], // private
   ["192.0.0.0", 24], // IETF protocol assignments
   ["192.0.2.0", 24], // documentation
+  ["192.31.196.0", 24], // AS112-v4
+  ["192.52.193.0", 24], // AMT
   ["192.88.99.0", 24], // deprecated 6to4 relay anycast
   ["192.168.0.0", 16], // private
+  ["192.175.48.0", 24], // direct delegation AS112 service
   ["198.18.0.0", 15], // benchmarking
   ["198.51.100.0", 24], // documentation
   ["203.0.113.0", 24], // documentation
@@ -170,7 +174,8 @@ export function isBlockedIpv6(hostname: string): boolean {
   return false;
 }
 
-// Names that resolve only on a local machine or private network, or are reserved.
+// Names that resolve only on a local machine or private network, are reserved, or
+// are Cloudflare hosts in front of this Worker (its own zone and `workers.dev`).
 const blockedSuffixes = [
   "localhost",
   "local",
@@ -186,6 +191,14 @@ const blockedSuffixes = [
   "invalid",
   "onion",
   "alt",
+  // The Worker's own zone (see worker-domain.ts). Without the
+  // `global_fetch_strictly_public` compatibility flag, a Worker's fetch to a host
+  // in its own zone can go straight to the origin and skip the zone's Access and
+  // WAF rules, so the whole zone is refused, not only the Worker's domain.
+  workerZone,
+  // Workers' `workers.dev` hostnames, including this account's subdomain, which
+  // have no zone Access or WAF rules in front of them.
+  "workers.dev",
 ];
 // Four dotted or dashed numbers between dots, dashes or the ends of the name, as
 // used by wildcard DNS services that resolve `10.0.0.1.example`, `10-0-0-1.example`

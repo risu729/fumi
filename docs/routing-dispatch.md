@@ -113,6 +113,10 @@ optional `ROUTING_DISPATCH_AUTH` secret map. Bound HTTP/RPC services use trusted
 capability mappings, never mail-selected bindings. A default optional
 `ROUTING_DISPATCH_SERVICE` or `ROUTING_DISPATCH_RPC` binding maps to `serviceRef`
 `default`; injected trusted transports can map separately configured bindings.
+A reference resolves only to an entry that the secret map or capability mapping
+defines itself. Any other name, including an inherited object member such as
+`constructor`, is unmapped: a new operation is held before an outbox row or offer
+exists, as for a missing reference.
 No optional secret/service is declared required by deployment.
 
 Native deployment can opt into that RPC capability with the paired production

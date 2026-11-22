@@ -480,15 +480,17 @@ export function parseMailSearch(query: string) {
       const path = operator === "from" ? "$.from" : operator === "to" ? "$.to" : "$.subject";
       // SQLite LOWER() folds ASCII only, so match non-ASCII as written and, when that
       // differs, also in lowercase (the form earlier versions matched).
-      const patterns = [
+      const needles = [
         ...new Set([
           value.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
           value.toLowerCase(),
         ]),
-      ].map((pattern) => `%${pattern.replace(/[\\%_]/g, "\\$&")}%`);
+      ];
       const column = `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),''))`;
-      clauses.push(`(${patterns.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" OR ")})`);
-      values.push(...patterns);
+      // instr() rather than LIKE: D1 rejects LIKE patterns over 50 bytes, and a value has
+      // no wildcards to escape. Both needles have no ASCII uppercase, as the column has none.
+      clauses.push(`(${needles.map(() => `instr(${column},?)>0`).join(" OR ")})`);
+      values.push(...needles);
     }
   }
   return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };

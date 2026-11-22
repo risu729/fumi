@@ -393,6 +393,17 @@ describe("private bounded attachment conversion", () => {
     );
     expect(upload).not.toHaveBeenCalled();
   });
+  it("treats an untrusted MIME type naming an Object.prototype member as unsupported", async () => {
+    const upload = vi.fn();
+    const ocr = { info: vi.fn(), items: { upload, get: vi.fn() } };
+    const toMarkdown = vi.fn();
+    await source("constructor", encode("unsupported"));
+    await repairAttachmentConversions(runtime({ ATTACHMENT_OCR: ocr, AI: { toMarkdown } }), now);
+    expect(await row()).toMatchObject({ state: "blocked", failure_code: "unsupported_format" });
+    expect(ocr.info).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(toMarkdown).not.toHaveBeenCalled();
+  });
   it("reserves finite call budget and preserves uncertain outcomes without automatic resubmission", async () => {
     await source();
     const toMarkdown = vi.fn(async () => {

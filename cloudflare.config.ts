@@ -2,6 +2,7 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
 import { loadEnv } from "vite";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 import { compatibilityDate } from "./worker-runtime.ts";
+import { workerDomain } from "./worker-domain.ts";
 import { routingRpcOptions } from "./routing-rpc-options.ts";
 import { ingressMode } from "./ingress-options.ts";
 
@@ -25,7 +26,7 @@ export default defineConfig({
     name: "fumi",
     entrypoint,
     compatibilityDate,
-    domains: ["fumi.takuk.me"],
+    domains: [workerDomain],
     exports: {
       MailProcessing: exports.workflow({
         name: "fumi-mail-processing",

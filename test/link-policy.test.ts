@@ -7,6 +7,7 @@ import {
   isBlockedIpv4,
   isBlockedIpv6,
 } from "../src/link-policy.ts";
+import { workerDomain, workerZone } from "../worker-domain.ts";
 
 const outcome = (url: string) => {
   const result = checkLinkUrl(url);
@@ -139,6 +140,17 @@ describe("destination rule", () => {
     "http://app-10-0-0-1.nip.example/a",
     "http://app-169-254-169-254-x.nip.example/a",
     "http://customer-10.0.0.1.nip.example/a",
+    "http://192.31.196.1/a",
+    "http://192.52.193.1/a",
+    "http://192.175.48.1/a",
+    "https://takuk.me/a",
+    "https://fumi.takuk.me/mcp",
+    "https://FUMI.TAKUK.ME./mcp",
+    "https://files.takuk.me/a.pdf",
+    "https://a.b.takuk.me/a.pdf",
+    "https://workers.dev/a",
+    "https://fumi.example.workers.dev/a",
+    "https://WORKERS.DEV./a",
     "https://files.example.com:8443/a",
     "http://files.example.com:443/a",
     "ftp://files.example.com/a",
@@ -161,6 +173,10 @@ describe("destination rule", () => {
     "https://cdn-1.files.example.com/a",
     "https://v1-2-3.files.example.com/a",
     "https://files-2026-11-22-1.example.com/a",
+    "https://nottakuk.me/a",
+    "https://takuk.me.example.com/a",
+    "https://myworkers.dev/a",
+    "https://workers.dev.example.com/a",
   ])("allows %s", (url) => {
     expect(checkLinkUrl(url).ok).toBe(true);
   });
@@ -187,12 +203,25 @@ describe("destination rule", () => {
     expect(isBlockedIpv4("100.63.255.255")).toBe(false);
     expect(isBlockedIpv4("100.128.0.0")).toBe(false);
     expect(isBlockedIpv4("223.255.255.255")).toBe(false);
+    expect(isBlockedIpv4("192.31.195.255")).toBe(false);
+    expect(isBlockedIpv4("192.31.197.0")).toBe(false);
+    expect(isBlockedIpv4("192.52.192.255")).toBe(false);
+    expect(isBlockedIpv4("192.52.194.0")).toBe(false);
+    expect(isBlockedIpv4("192.175.47.255")).toBe(false);
+    expect(isBlockedIpv4("192.175.49.0")).toBe(false);
     expect(isBlockedIpv6("[1fff:ffff::1]")).toBe(true);
     expect(isBlockedIpv6("[2001:200::1]")).toBe(false);
     expect(isBlockedIpv6("[3fff:1000::1]")).toBe(false);
     expect(isBlockedIpv6("[4000::1]")).toBe(true);
     expect(isBlockedIpv6("[not:an:address]")).toBe(true);
     expect(isBlockedHostname("files.example.com")).toBe(false);
+  });
+
+  it("refuses the Worker's configured domain and every name in its zone", () => {
+    expect(isBlockedHostname(workerDomain)).toBe(true);
+    expect(isBlockedHostname(workerZone)).toBe(true);
+    expect(isBlockedHostname(`any.${workerZone}`)).toBe(true);
+    expect(isBlockedHostname(`not${workerZone}`)).toBe(false);
   });
 
   it("ignores any number of trailing dots in a hostname", () => {

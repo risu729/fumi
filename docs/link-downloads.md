@@ -82,7 +82,8 @@ Destination rule, giving `blocked_destination`:
   storage URLs can be long.
 - IPv4 literals are refused in `0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`,
   `169.254/16` (link-local and cloud metadata), `172.16/12`, `192.0.0/24`,
-  `192.0.2/24`, `192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`,
+  `192.0.2/24`, `192.31.196/24` (AS112), `192.52.193/24` (AMT), `192.88.99/24`,
+  `192.168/16`, `192.175.48/24` (AS112), `198.18/15`, `198.51.100/24`,
   `203.0.113/24`, `224/4` (multicast) and `240/4`. The URL parser first
   canonicalizes decimal (`2130706433`), octal (`0177.0.0.1`), hexadecimal
   (`0x7f000001`), short (`127.1`) and trailing-dot forms.
@@ -100,6 +101,10 @@ Destination rule, giving `blocked_destination`:
   `localdomain`, `internal`, `intranet`, `private`, `corp`, `home`, `lan`, `arpa`,
   `test`, `invalid`, `onion` or `alt`. Full-width forms are mapped by the URL
   parser's IDNA processing first.
+- The Worker's own zone and `workers.dev`: `takuk.me`, `workers.dev` and every
+  name under either (`fumi.takuk.me`, `files.takuk.me`, `x.example.workers.dev`).
+  The zone comes from `workerZone` in `worker-domain.ts`, which also gives
+  `cloudflare.config.ts` its `domains` entry. See below for why.
 
 Action rule, giving `blocked_action_url` or `pending_login`. The path and query
 (not the host or fragment) are compacted: `+` becomes a space, the text is
@@ -196,6 +201,19 @@ What the runtime itself does was checked only in local sources on 2026-11-22:
 - No local source states what production Cloudflare Workers `fetch` guarantees for
   private, loopback or internal destinations. That behavior is unverified here and
   has not been tested in production.
+
+A Worker's fetch to a host in its own zone is a further case the hostname rule
+has to cover. Without the `global_fetch_strictly_public` compatibility flag, such
+a request can go straight to the origin (here, this Worker) and skip the zone's
+security in front of it, such as Cloudflare Access and WAF rules. A link to
+`https://fumi.takuk.me/mcp` would then reach the API without the Access check
+every other client gets. The policy therefore refuses the whole zone `takuk.me`
+and `workers.dev`, not only the Worker's own domain. The flag is deliberately not
+set, because it would change every other `fetch` the Worker makes; adding it, or
+moving the Worker to another zone, needs this rule rechecked. A redirect from a
+public host into the zone is refused the same way, because each `Location` is
+checked. A public name whose DNS points into the zone (a CNAME to
+`fumi.takuk.me`) is not caught, like any other DNS-level case above.
 
 Other residual risks:
 

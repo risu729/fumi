@@ -12,9 +12,9 @@ import {
   collectOcr,
   convertDocument,
   convertZip,
-  documentFormats,
+  documentFormat,
   itemKey,
-  ocrFormats,
+  ocrFormat,
   remoteId,
   verifyOcr,
   type ConversionBindings,
@@ -421,8 +421,8 @@ async function processRow(
     const mime = row.source_mime;
     const zip = mime === "application/zip" || mime === "application/x-zip-compressed";
     const pdf = mime === "application/pdf";
-    const ocr = Boolean(ocrFormats[mime]);
-    if (!zip && !ocr && !documentFormats[mime])
+    const ocr = Boolean(ocrFormat(mime));
+    if (!zip && !ocr && !documentFormat(mime))
       throw new ConversionBlocked(
         mime === "text/plain" ? "native_text_indexed" : "unsupported_format",
       );

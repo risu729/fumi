@@ -902,6 +902,75 @@ describe("durable routing dispatch in workerd", () => {
     expect(calls).toBe(0);
     expect(await rows()).toHaveLength(0);
   });
+  // A reference names only an entry the trusted map defines itself. `constructor`
+  // passes the reference syntax but is an inherited Object.prototype member.
+  it.each(["missing", "constructor"])(
+    "holds an owner whose RPC serviceRef %s has no mapped service, before any offer",
+    async (ref) => {
+      const config: Artifact = await withOwner(artifact());
+      config.destination = null;
+      config.owners[0]!.adapter = rpcAdapter(ref);
+      await configure(config);
+      const item = await source();
+      const owner = service();
+      await repairRoutingDispatch(env, runtime({ owner: owner.binding }));
+      expect(owner.requests).toHaveLength(0);
+      expect(await rows()).toHaveLength(0);
+      expect(
+        await env.MAIL_CATALOG.prepare(
+          "SELECT state,failure_code FROM routing_dispatch_jobs WHERE raw_key=?",
+        )
+          .bind(item.rawKey)
+          .first(),
+      ).toEqual({ state: "waiting", failure_code: "owner_pending" });
+    },
+  );
+  it.each([
+    { authRef: "active", serviceRef: "missing" },
+    { authRef: "active", serviceRef: "constructor" },
+    { authRef: "constructor", serviceRef: "default" },
+  ])(
+    "holds a service destination (authRef $authRef, serviceRef $serviceRef) with an unmapped reference",
+    async (refs) => {
+      const config = artifact();
+      config.destination.adapter = {
+        kind: "service",
+        offerUrl: "https://adapter.example.com/offer",
+        statusUrl: "https://adapter.example.com/status",
+        ...refs,
+        timeoutMs: 1000,
+      };
+      await configure(config);
+      await source();
+      const fetch = vi.fn(async () => new Response(null, { status: 500 }));
+      const run: RoutingDispatchRuntime = {
+        ...runtime({}),
+        transport: {
+          auth: { active: "synthetic-service-account-secret-0000" },
+          services: { default: { fetch } },
+        },
+      };
+      await repairRoutingDispatch(env, run);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await rows()).toHaveLength(0);
+    },
+  );
+  it("does not bind an inherited RPC identity into the destination generation", async () => {
+    const config = artifact();
+    config.destination.adapter = rpcAdapter("constructor");
+    await configure(config);
+    const run = runtime({});
+    run.transport!.rpcIdentities = { default: "synthetic-identity" };
+    expect(await activateRoutingDispatch(env, run)).toBe("active");
+    // Without a mapped identity the generation is the configured destination alone.
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT destination_sha256 FROM routing_dispatch_control",
+      ).first(),
+    ).toEqual({
+      destination_sha256: (await loadDispatchConfiguration(env.MAIL_ARCHIVE))!.destinationSha256,
+    });
+  });
   it("cannot reconcile old-endpoint uncertainty through a replaced credential reference", async () => {
     const config = artifact();
     config.destination.adapter = {
