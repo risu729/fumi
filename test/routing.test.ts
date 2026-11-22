@@ -314,6 +314,10 @@ describe("bounded shadow CEL routing in workerd", () => {
     "(".repeat(1000) + "true" + ")".repeat(1000),
     '"a"'.repeat(1000),
     Array.from({ length: 130 }, () => "true").join(" && "),
+    // CEL reads `"""` as a triple-quoted string, while the token preflight reads an
+    // empty string and then a new literal. Neither form may pass.
+    'subject == """x"""',
+    '"""a" """ == subject || !!hasAttachments || subject == """ " """',
   ])("rejects unsupported or resource-intensive CEL before evaluation %#", async (match) => {
     await expect(
       compileShadowRouter(

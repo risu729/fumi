@@ -153,6 +153,10 @@ function preflight(expression: string) {
     if (depth < 0 || depth > ROUTING_LIMITS.expressionDepth) throw new RoutingConfigError();
     // Long unary chains recurse independently of parentheses in CEL parsers.
     if (value === "!" && /^\s*!/.test(expression.slice(offset))) throw new RoutingConfigError();
+    // CEL reads `"""` as a triple-quoted string, but this scan reads `""` and then a
+    // new literal. Rejecting a quote directly after a literal keeps both readings equal,
+    // so text the parser treats as code cannot pass here as string content.
+    if (value.startsWith('"') && expression[offset] === '"') throw new RoutingConfigError();
   }
   if (depth !== 0) throw new RoutingConfigError();
 }
