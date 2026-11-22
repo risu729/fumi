@@ -73,7 +73,8 @@ Everything else is stored as live mail:
 - A reply has no default sender, because the envelope recipient is fumi's forwarding
   address: `from_address` is required (`reply_sender_unavailable` otherwise).
 - When the original cannot be captured or stored, forwarding mode throws after the
-  receipt is written, as for a failed forward, so Email Routing reports a failure to
+  receipt is written, as for a failed forward (except `invalid_size` and `oversize`,
+  which fail the same way on every retry), so Email Routing reports a failure to
   Gmail; whether Gmail retries is not established. Archive-only mode rejects it
   permanently, and repeated bounces may make Gmail warn about or turn off forwarding.
   Gmail keeps its copy either way.
@@ -88,7 +89,9 @@ Each archived relay, and each relay whose capture failed, also adds a best-effor
 `get_mail_health` adds `sections.gmail_relay` over the latest 1,000
 `gmail_relay_deliveries` rows: `received`, `archived`, `archive_failed` and
 `duplicate_of_live`. The catalog section counts v4 snapshots as
-`receipt_gmail_relay`; they also count in `receipt_forward_skipped`. The rows are
+`receipt_gmail_relay`; they also count in `receipt_forward_skipped`. Each retry of a
+relay that failed to store is a new delivery with its own ingest ID, so
+`archive_failed` counts attempts, not messages. The rows are
 observations for health, not archive evidence, and are not rebuilt from R2.
 
 ## Operator steps

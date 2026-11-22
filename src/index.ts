@@ -485,7 +485,14 @@ export default {
     if (forwarding?.status === "failed") throw new Error("Forwarding did not complete");
     // Gmail keeps its copy, but fumi sees relayed mail nowhere else: ask for a retry like a
     // failed forward. Archive-only mode has already rejected it above.
-    if (relay && mode === "forward" && archive.status === "failed") {
+    // A declared size that cannot be stored fails the same way on every retry.
+    if (
+      relay &&
+      mode === "forward" &&
+      archive.status === "failed" &&
+      archive.code !== "invalid_size" &&
+      archive.code !== "oversize"
+    ) {
       throw new Error("Relayed mail was not stored");
     }
   },

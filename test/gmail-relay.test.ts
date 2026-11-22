@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
+import { MAX_RAW_BYTES } from "../src/limits.ts";
 import { isGmailRelay, RELAY_LOOKUP_TIMEOUT_MS, relayedCopyOf } from "../src/gmail-relay.ts";
 import { getMailHealth } from "../src/mail-health.ts";
 import { readMail, searchMail } from "../src/mail-read.ts";
@@ -437,6 +438,16 @@ describe("Gmail relay ingress in workerd", () => {
       { status: "skipped", reason: "gmail_relay" },
     ]);
     expect(await relayRows()).toEqual([expect.objectContaining({ outcome: "archived" })]);
+  });
+
+  it("does not ask for a retry of a relay too large to store", async () => {
+    const incoming = message(mime("oversize@example.invalid"));
+    await run({ ...incoming, rawSize: MAX_RAW_BYTES + 1 });
+    expect((await receipts())[0]).toMatchObject({
+      schemaVersion: 4,
+      archive: { status: "failed", code: "oversize" },
+    });
+    expect(await relayRows()).toEqual([expect.objectContaining({ outcome: "archive_failed" })]);
   });
 
   it("looks up nothing for a copy without a Message-ID", async () => {
