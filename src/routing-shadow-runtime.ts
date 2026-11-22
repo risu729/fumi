@@ -114,6 +114,29 @@ const pending = `FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.r
     OR d.catalog_sha256 IS NOT s.raw_sha256
     OR d.source_kind!=s.source_kind OR d.notify_events!=s.notify_events)`;
 
+/** The fixed artifact exists but R2 could not be reached. */
+export class ShadowConfigurationUnavailableError extends Error {
+  constructor() {
+    super("Shadow configuration unavailable");
+  }
+}
+
+/** Read and compile the fixed administrator artifact. Absent configuration is null.
+ * Errors carry no configuration text: unreachable storage throws
+ * ShadowConfigurationUnavailableError, and anything else means invalid configuration. */
+export async function loadShadowConfiguration(bucket: R2Bucket) {
+  let object: R2ObjectBody | null;
+  try {
+    object = await bucket.get(ROUTING_CONFIG_KEY);
+  } catch {
+    throw new ShadowConfigurationUnavailableError();
+  }
+  if (!object) return null;
+  const artifact = v.parse(configArtifactSchema, JSON.parse(await configBytes(object)) as unknown);
+  const router = await compileShadowRouter(artifact.configJson, artifact.manifests);
+  return { artifact, router, uploaded: object.uploaded };
+}
+
 /** Scheduled, bounded shadow-only replay. The fixed R2 artifact is administrator-owned. */
 export async function repairRoutingShadow(env: {
   MAIL_ARCHIVE: R2Bucket;
@@ -126,23 +149,18 @@ export async function repairRoutingShadow(env: {
     blocked: 0,
     failed: 0,
   };
-  let object: R2ObjectBody | null;
+  let loaded;
   try {
-    object = await env.MAIL_ARCHIVE.get(ROUTING_CONFIG_KEY);
-  } catch {
-    return { ...result, status: "unavailable" };
+    loaded = await loadShadowConfiguration(env.MAIL_ARCHIVE);
+  } catch (error) {
+    return {
+      ...result,
+      status:
+        error instanceof ShadowConfigurationUnavailableError ? "unavailable" : "invalid_config",
+    };
   }
-  if (!object) return { ...result, status: "disabled" };
-  let router;
-  try {
-    const artifact = v.parse(
-      configArtifactSchema,
-      JSON.parse(await configBytes(object)) as unknown,
-    );
-    router = await compileShadowRouter(artifact.configJson, artifact.manifests);
-  } catch {
-    return { ...result, status: "invalid_config" };
-  }
+  if (!loaded) return { ...result, status: "disabled" };
+  const router = loaded.router;
   const hash = router.configurationSha256;
   const db = env.MAIL_CATALOG.withSession("first-primary");
   try {
