@@ -142,7 +142,7 @@ describe("official MCP HTTP transport", () => {
   it("rejects more metadata filters than D1 can bind with query_too_long", async () => {
     const { client } = await clientFor();
     try {
-      // 50 filters bind 100 LIKE patterns, past D1's limit of 100 bound parameters.
+      // 50 filters bind 100 values, past D1's limit of 100 bound parameters.
       const tooMany = await client.callTool({
         name: "search_emails",
         arguments: { query: Array.from({ length: 50 }, () => "subject:Ä").join(" ") },

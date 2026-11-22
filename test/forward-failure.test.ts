@@ -22,14 +22,29 @@ describe("bounded forward failure classification", () => {
       { code: "rejected_temporary", smtpStatus: "4.7.0" },
     ],
     [
-      "a reply code at the start without an enhanced status",
-      new Error("552 Requested mail action aborted"),
-      { code: "rejected_permanent" },
+      "a temporary reply with a hyphen separator",
+      new Error("421-4.7.0 Try again later"),
+      { code: "rejected_temporary", smtpStatus: "4.7.0" },
     ],
     [
-      "an enhanced status without a reply code",
-      new Error("delivery deferred: 4.2.2 mailbox full"),
-      { code: "rejected_temporary", smtpStatus: "4.2.2" },
+      "a paired reply after a DSN prefix",
+      new Error("smtp; 550 5.1.1 user unknown"),
+      { code: "rejected_permanent", smtpStatus: "5.1.1" },
+    ],
+    [
+      "a paired reply followed by a colon",
+      new Error("550 5.1.1: user unknown"),
+      { code: "rejected_permanent", smtpStatus: "5.1.1" },
+    ],
+    [
+      "a paired reply at the end of a sentence",
+      new Error("rejected with 550 5.1.1."),
+      { code: "rejected_permanent", smtpStatus: "5.1.1" },
+    ],
+    [
+      "a paired reply after a mismatched one",
+      new Error("550 4.1.1 then 451 4.3.0 retry"),
+      { code: "rejected_temporary", smtpStatus: "4.3.0" },
     ],
     [
       "a three-digit enhanced status detail",
@@ -62,6 +77,70 @@ describe("bounded forward failure classification", () => {
       { code: "forward_failed" },
     ],
     ["a mid-text bare number", new Error("Error 500 - internal"), { code: "forward_failed" }],
+    // A reply code alone is too often an HTTP status.
+    [
+      "a leading reply code alone",
+      new Error("552 Requested mail action aborted"),
+      { code: "forward_failed" },
+    ],
+    ["an HTTP 404", new Error("404 Not Found"), { code: "forward_failed" }],
+    ["an HTTP 500", new Error("500 Internal Server Error"), { code: "forward_failed" }],
+    // An enhanced status alone is too often a version, path segment or port.
+    [
+      "a bare temporary status",
+      new Error("delivery deferred: 4.2.2 mailbox full"),
+      { code: "forward_failed" },
+    ],
+    ["a temporary-class version", new Error("runtime 4.1.3 failed"), { code: "forward_failed" }],
+    ["a permanent-class version", new Error("node 5.0.1 crashed"), { code: "forward_failed" }],
+    ["a status-shaped URL segment", new Error("http://h/v1/5.0.0/x"), { code: "forward_failed" }],
+    ["a status-shaped host with a port", new Error("5.1.1:25 refused"), { code: "forward_failed" }],
+    ["a port before a bare status", new Error("port 465 5.0.0"), { code: "forward_failed" }],
+    [
+      "mismatched reply and status classes",
+      new Error("550 4.1.1 synthetic"),
+      { code: "forward_failed" },
+    ],
+    [
+      "a temporary reply with a permanent status",
+      new Error("421 5.7.0 synthetic"),
+      { code: "forward_failed" },
+    ],
+    [
+      "a paired shape inside an address",
+      new Error("x-550 5.1.1@example.invalid"),
+      { code: "forward_failed" },
+    ],
+    [
+      "a paired shape inside a path",
+      new Error("GET /550 5.1.1/x failed"),
+      { code: "forward_failed" },
+    ],
+    // A timeout word inside an address or hostname is not a timeout.
+    [
+      "timeout in an address",
+      new Error("rejected timeout@example.com"),
+      { code: "forward_failed" },
+    ],
+    [
+      "timeout in an angle-bracket address",
+      new Error("rcpt <timeout@example.com> failed"),
+      { code: "forward_failed" },
+    ],
+    [
+      "timeout as a hostname label",
+      new Error("relay timeout.example.com refused"),
+      { code: "forward_failed" },
+    ],
+    [
+      "timeout inside a hostname",
+      new Error("mx.smtp-timeout.example failed"),
+      { code: "forward_failed" },
+    ],
+    ["timeout in a URL", new Error("GET https://h/timeout failed"), { code: "forward_failed" }],
+    ["timeout before a period", new Error("upstream timeout."), { code: "timeout" }],
+    ["a hyphenated timeout", new Error("connection-timeout reached"), { code: "timeout" }],
+    ["timeout beside an address", new Error("timeout for user@example.com"), { code: "timeout" }],
     ["a version number", new Error("runtime 15.7.1 failed"), { code: "forward_failed" }],
     ["an IPv4 address", new Error("peer [4.5.6.7] closed"), { code: "forward_failed" }],
     ["a non-error value", { message: "550 5.7.1" }, { code: "forward_failed" }],
@@ -140,6 +219,10 @@ describe("receipt v3 forward failure reasons", () => {
         schemaVersion: 3,
         forward: { status: "failed", code: "forward_failed", smtpStatus: "2.0.0" },
       },
+    ],
+    [
+      "v3 unclassified failure without a status, which is always v1",
+      { schemaVersion: 3, forward: { status: "failed", code: "forward_failed" } },
     ],
     [
       "free text in the status",

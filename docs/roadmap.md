@@ -148,7 +148,11 @@ establish production delivery.
 - [ ] Evaluate DecisionRAG separately against that baseline; measure recall,
       citation accuracy, incremental update cost, latency and total model cost.
 - [ ] Handle deletions/retention consistently across originals, derivatives and
-      indexes; distinguish import completion from indexing completion.
+      indexes; distinguish import completion from indexing completion. Import
+      status now reports per-run MIME, lexical and managed coverage separately
+      from archival completion; see
+      [downstream coverage](gmail-import.md#downstream-coverage-per-run).
+      Deletion and retention still need an owner policy decision.
 
 ## Phase 2B: routing and selective model use (parallel with 2A)
 

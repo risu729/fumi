@@ -408,6 +408,11 @@ describe("archive and forward ingress in workerd", () => {
     ["421 4.7.0 Try again later", 3, { code: "rejected_temporary", smtpStatus: "4.7.0" }],
     ["Forward request timed out", 3, { code: "timeout" }],
     ["private SMTP diagnostic", 1, { code: "forward_failed" }],
+    // A reply code or an enhanced status alone keeps the v1 receipt.
+    ["404 Not Found", 1, { code: "forward_failed" }],
+    ["runtime 4.1.3 failed", 1, { code: "forward_failed" }],
+    ["550 4.1.1 mismatched", 1, { code: "forward_failed" }],
+    ["rejected timeout@example.com", 1, { code: "forward_failed" }],
   ] as const)("records %s with receipt v%i", async (text, schemaVersion, reason) => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const incoming = message();
