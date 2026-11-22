@@ -328,7 +328,15 @@ export async function runTakeoutChunk(
         return null;
       }
       if (skip.has(item.offset)) {
-        await record(item, "skipped", { fromDate: item.fromDate });
+        // A step that timed out may have stored this entry after the run stopped.
+        const stored = await db
+          .prepare("SELECT raw_key FROM gmail_takeout_labels WHERE run_id=? AND entry_offset=?")
+          .bind(config.runId, item.offset)
+          .first<string>("raw_key");
+        await record(item, stored ? "imported" : "skipped", {
+          fromDate: item.fromDate,
+          ...(stored ? { rawKey: stored } : {}),
+        });
         return null;
       }
       if (config.checkIdDate) {

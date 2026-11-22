@@ -302,6 +302,22 @@ describe("Google Takeout import", () => {
     expect(await outcomes("crash")).toEqual({ imported: 2 });
   });
 
+  it("records a skipped entry as imported when a timed-out step stored it anyway", async () => {
+    const objects = await upload(mbox(2), ["a/late.mbox"]);
+    const run = config("late", objects);
+    await startTakeoutRun(env.MAIL_CATALOG, run);
+    vi.spyOn(env.MAIL_CATALOG, "batch").mockRejectedValueOnce(new Error("D1 unavailable"));
+    await expect(runTakeoutChunk(env, run)).rejects.toThrow("takeout_import_failed");
+    vi.restoreAllMocks();
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE gmail_takeout_runs SET status='stopped',stop_code='takeout_import_failed',stop_offset=0",
+    ).run();
+    expect(await drain(config("late", objects, { skip: [0] }))).toMatchObject({
+      status: "complete",
+    });
+    expect(await outcomes("late")).toEqual({ imported: 2 });
+  });
+
   it("stops at an existing source whose raw object is missing", async () => {
     const objects = await upload(mbox(1), ["a/missing.mbox"]);
     await drain(config("first", objects));

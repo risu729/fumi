@@ -302,8 +302,12 @@ behaviour:
   - `oversize`: over the 25 MiB raw limit; not stored.
   - `skipped`: its stream offset is in the configuration's `skip` list; not stored.
 - A stopped run resumes from its checkpoint when the configuration changes. Raise
-  `attempt` after a transient failure. For a stop the entry itself causes, add the
-  reviewed `stop_offset` to `skip`, which records that one entry as `skipped`.
+  `attempt` after a transient failure. For a stop a split entry causes
+  (`takeout_id_date_mismatch`, `takeout_labels_too_long`, `takeout_receipt_too_large`,
+  `takeout_invalid_provenance` or `takeout_existing_source_invalid`), add the
+  reviewed `stop_offset` to `skip`, which records that one entry as `skipped`. If a
+  step that timed out stored the entry anyway, it is recorded as `imported`. The
+  splitter's own stops come before any entry exists and need a repaired export.
 - Other stop codes: `takeout_existing_source_invalid` (the account's existing source
   for this message ID is missing or not present in R2), `takeout_labels_too_long`,
   `takeout_receipt_too_large` and `takeout_invalid_provenance`.
