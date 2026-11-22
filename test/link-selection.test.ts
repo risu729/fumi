@@ -129,7 +129,11 @@ describe("link selection", () => {
         { index: 1, url: "https://files.example.com/statements/s-1.zip" },
         { index: 0, url: "https://files.example.com/receipts/r-1.pdf" },
       ],
-      refused: [],
+      refused: [
+        { index: 2, outcome: "blocked_action_url" },
+        { index: 3, outcome: "blocked_destination" },
+        { index: 4, outcome: "pending_login" },
+      ],
       expiresAt: "2026-12-01T00:00:00.000Z",
     });
     expect(await budgetCalls()).toBe(1);
@@ -157,7 +161,8 @@ describe("link selection", () => {
       body: bodyText,
       bodyTruncated: false,
     });
-    expect(data.candidates).toHaveLength(5);
+    // Only the candidates that pass the link policy are shown.
+    expect(data.candidates.map((candidate) => candidate.index)).toEqual([0, 1]);
     expect(data.candidates[0]).toEqual({
       index: 0,
       url: "https://files.example.com/receipts/r-1.pdf",
@@ -173,13 +178,18 @@ describe("link selection", () => {
     ).toEqual({
       ok: true,
       selected: [],
-      refused: [],
+      refused: [
+        { index: 2, outcome: "blocked_action_url" },
+        { index: 3, outcome: "blocked_destination" },
+        { index: 4, outcome: "pending_login" },
+      ],
       expiresAt: null,
     });
   });
 
   it.each([
     ["an out-of-range index", { indexes: [5], expiresAt: null }],
+    ["an index the link policy refused", { indexes: [0, 3], expiresAt: null }],
     ["a negative index", { indexes: [-1], expiresAt: null }],
     ["a duplicate index", { indexes: [0, 0], expiresAt: null }],
     ["a fractional index", { indexes: [0.5], expiresAt: null }],
@@ -190,7 +200,6 @@ describe("link selection", () => {
       { indexes: [0], expiresAt: null, url: "https://attacker.example/x" },
     ],
     ["an extra field", { indexes: [0], expiresAt: null, reason: "receipt" }],
-    ["a URL as the expiry", { indexes: [0], expiresAt: "https://attacker.example/x" }],
     ["a missing expiry", { indexes: [0] }],
     ["more indexes than the cap", { indexes: [0, 1, 2, 3, 4], expiresAt: null }],
     ["an array instead of an object", [0, 1]],
@@ -245,23 +254,76 @@ describe("link selection", () => {
     }
   });
 
-  it("drops chosen candidates that the link policy refuses", async () => {
+  it("reports candidates the link policy refuses without showing them to the model", async () => {
     await configure();
-    const model = mockModel(() => modelReply({ indexes: [0, 2, 3, 4], expiresAt: null }));
-    const result = await selectLinkDownloads(modelEnv(), input(), {
+    const text = [
+      "Receipt: https://files.example.com/receipts/r-1.pdf",
+      "Unsubscribe: https://mail.example.com/unsubscribe?u=1",
+      "Statement: https://files.example.com/statements/s-1.zip",
+    ].join("\n");
+    const model = mockModel(() => modelReply({ indexes: [2], expiresAt: null }));
+    const result = await selectLinkDownloads(modelEnv(), input(text), {
       fetch: model.send,
       now: () => now,
     });
+    // Indexes stay those of the extracted list, so the model sees 0 and 2.
+    expect(userData(model.bodies[0]!).data.candidates.map((candidate) => candidate.index)).toEqual([
+      0, 2,
+    ]);
     expect(result).toEqual({
       ok: true,
-      selected: [{ index: 0, url: "https://files.example.com/receipts/r-1.pdf" }],
-      refused: [
-        { index: 2, outcome: "blocked_action_url" },
-        { index: 3, outcome: "blocked_destination" },
-        { index: 4, outcome: "pending_login" },
-      ],
+      selected: [{ index: 2, url: "https://files.example.com/statements/s-1.zip" }],
+      refused: [{ index: 1, outcome: "blocked_action_url" }],
       expiresAt: null,
     });
+  });
+
+  it.each([
+    [
+      "unsubscribe and preference links only",
+      "Unsubscribe: https://mail.example.com/unsubscribe?u=1\nOpt out: https://mail.example.com/opt-out",
+    ],
+    [
+      "private and internal hosts only",
+      "Copy: http://10.0.0.1/r-1.pdf\nMirror: http://files.corp/r-1.pdf\nhttp://localhost/r.pdf",
+    ],
+    ["login links only", "Sign in to download: https://portal.example.com/login?next=/r-1.pdf"],
+  ])("makes no model call and reserves no budget for mail with %s", async (_name, text) => {
+    await configure();
+    const model = mockModel(() => modelReply({ indexes: [0], expiresAt: null }));
+    const mail = input(text);
+    expect(mail.extraction.candidates.length).toBeGreaterThan(0);
+    expect(
+      await selectLinkDownloads(modelEnv(), mail, { fetch: model.send, now: () => now }),
+    ).toEqual({ ok: false, code: "no_candidates" });
+    expect(model.spy).not.toHaveBeenCalled();
+    expect(await budgetCalls()).toBe(0);
+  });
+
+  it("returns a fixed code without calling the model when the budget store fails", async () => {
+    await configure();
+    const failingCatalog = (stage: "session" | "query") =>
+      ({
+        withSession: () => {
+          if (stage === "session") throw new Error("D1 session unavailable");
+          return {
+            prepare: () => ({
+              bind: () => ({ first: () => Promise.reject(new Error("D1 query failed")) }),
+            }),
+          };
+        },
+      }) as unknown as D1Database;
+    for (const stage of ["session", "query"] as const) {
+      const model = mockModel(() => modelReply({ indexes: [0], expiresAt: null }));
+      // oxlint-disable-next-line no-await-in-loop -- One synthetic failure at a time.
+      const result = await selectLinkDownloads(
+        { ...modelEnv(), MAIL_CATALOG: failingCatalog(stage) },
+        input(),
+        { fetch: model.send, now: () => now },
+      );
+      expect(result).toEqual({ ok: false, code: "model_invalid_or_unavailable" });
+      expect(model.spy).not.toHaveBeenCalled();
+    }
   });
 
   it("keeps injected mail text inside the data block and cannot widen what code allows", async () => {
@@ -276,7 +338,8 @@ describe("link selection", () => {
     ].join("\n");
     // A model that follows the injection as far as the output schema lets it.
     const compromised = [
-      { indexes: [0, 1, 2], expiresAt: "2099-01-01T00:00:00Z" },
+      { indexes: [1, 2], expiresAt: "2099-01-01T00:00:00Z" },
+      { indexes: [0, 1, 2], expiresAt: null },
       { indexes: [63], expiresAt: null },
       { indexes: [0], expiresAt: null, url: "https://attacker.example/steal?k=1" },
     ];
@@ -292,12 +355,12 @@ describe("link selection", () => {
       results.push(result);
       prompts.push(userData(model.bodies[0]!));
     }
-    // Candidates come from the deterministic extractor only.
+    // Candidates come from the deterministic extractor only, and the private host
+    // (index 0) is never shown.
     const { content, data } = prompts[0]!;
-    expect(data.candidates.map((candidate) => candidate.url)).toEqual([
-      "http://10.0.0.1/r-1.pdf",
-      "https://attacker.example/steal?k=1",
-      "https://files.example.com/receipts/r-1.pdf",
+    expect(data.candidates.map(({ index, url }) => [index, url])).toEqual([
+      [1, "https://attacker.example/steal?k=1"],
+      [2, "https://files.example.com/receipts/r-1.pdf"],
     ]);
     // The closing tag in the mail is escaped, so the block ends only once.
     expect(content.match(/<\/untrusted_mail_data>/gu)).toHaveLength(1);
@@ -314,8 +377,11 @@ describe("link selection", () => {
       // The far-future claim is outside the expiry window.
       expiresAt: null,
     });
+    // Selecting the refused private host, a made-up index or adding a URL field
+    // rejects the whole answer.
     expect(results[1]).toEqual({ ok: false, code: "model_invalid_output" });
     expect(results[2]).toEqual({ ok: false, code: "model_invalid_output" });
+    expect(results[3]).toEqual({ ok: false, code: "model_invalid_output" });
   });
 
   it("bounds the subject, body and candidate text sent to the model", async () => {
@@ -442,12 +508,18 @@ describe("link selection", () => {
     });
   });
 
-  it("keeps only an expiry inside the window and normalizes it to UTC", async () => {
-    await configure({ maxCallsPerDay: 10 });
+  it("keeps only a well-formed expiry inside the window and normalizes it to UTC", async () => {
+    await configure({ maxCallsPerDay: 20 });
     const cases: [string, string | null][] = [
       ["2026-12-01T09:00:00+09:00", "2026-12-01T00:00:00.000Z"],
       ["2026-11-21T00:00:00Z", null],
       ["2027-11-24T00:00:00Z", null],
+      // A malformed or impossible expiry is dropped; the selection is kept.
+      ["2026-02-30T00:00:00Z", null],
+      ["2026-12-01", null],
+      ["next Friday", null],
+      ["https://attacker.example/x", null],
+      [`2026-12-01T00:00:00.${"0".repeat(60)}Z`, null],
     ];
     for (const [claim, expected] of cases) {
       const model = mockModel(() => modelReply({ indexes: [0], expiresAt: claim }));
@@ -456,17 +528,13 @@ describe("link selection", () => {
         fetch: model.send,
         now: () => now,
       });
-      expect(result).toMatchObject({ ok: true, expiresAt: expected });
+      expect(result).toMatchObject({
+        ok: true,
+        selected: [{ index: 0, url: "https://files.example.com/receipts/r-1.pdf" }],
+        expiresAt: expected,
+      });
+      expect(JSON.stringify(result)).not.toContain("attacker");
     }
-    const invalid = mockModel(() =>
-      modelReply({ indexes: [0], expiresAt: "2026-02-30T00:00:00Z" }),
-    );
-    expect(
-      await selectLinkDownloads(modelEnv(), input(), { fetch: invalid.send, now: () => now }),
-    ).toEqual({
-      ok: false,
-      code: "model_invalid_output",
-    });
   });
 
   it("logs nothing, so no URL or model text reaches the logs", async () => {
@@ -476,7 +544,7 @@ describe("link selection", () => {
     );
     await configure({ maxCallsPerDay: 10 });
     const replies = [
-      modelReply({ indexes: [0, 2, 3], expiresAt: "2026-12-01T00:00:00Z" }),
+      modelReply({ indexes: [0, 1], expiresAt: "2026-12-01T00:00:00Z" }),
       modelReply("model text https://attacker.example/x"),
       modelReply({ indexes: ["https://attacker.example/x"], expiresAt: null }),
       new Response("model text https://attacker.example/x", { status: 500 }),

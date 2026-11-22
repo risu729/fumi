@@ -266,10 +266,18 @@ its own opt-in in that object, independent of routing's `enabled`:
 Without the object, without that field, with `enabled: false` or without the key,
 the function returns a fixed code (`selection_not_configured`,
 `selection_disabled`, `invalid_config`, `config_unavailable`,
-`model_not_configured`) before spending budget or calling a provider. A message
-without candidates returns `no_candidates`, and a candidate list whose `index`
-values are not their positions returns `invalid_input`, both without a call. Routing's
-administrator `instructions` are not sent; the selection prompt is fixed in code.
+`model_not_configured`) before spending budget or calling a provider. A candidate
+list whose `index` values are not their positions returns `invalid_input` without a
+call. Routing's administrator `instructions` are not sent; the selection prompt is
+fixed in code.
+
+Code runs `checkLinkUrl` on every extracted candidate before it reserves budget.
+Only the candidates that pass are shown to the model, under their extracted
+indexes, so the model sees `0` and `2` when candidate `1` is an unsubscribe link.
+When none pass, as in mail whose only links are unsubscribe or preference links,
+private or internal hosts, or login links, the result is `no_candidates`: no budget
+is reserved and no provider is called. A failure to open the D1 session or to
+reserve budget is `model_invalid_or_unavailable`, also without a call.
 
 Request: the same request code as the routing classifier (`src/model-request.ts`).
 One `POST` to the fixed origin `https://api.anthropic.com/v1/messages` with
@@ -301,16 +309,17 @@ untrusted data:
 
 The model must answer `{"indexes": [0], "expiresAt": "2026-12-01T00:00:00Z"}`.
 Code rejects the whole answer as `model_invalid_output` when it has another field,
-a non-integer, negative, out-of-range or repeated index, more than four indexes,
-or an `expiresAt` that is not an RFC 3339 date-time. A refusal, a partial answer,
+a non-integer, negative or repeated index, an index that was not shown (out of range
+or refused by the policy), more than four indexes, a missing `expiresAt`, or an
+`expiresAt` that is neither a string nor `null`. A refusal, a partial answer,
 an oversized or malformed response, or a network failure is
 `model_invalid_or_unavailable`; an HTTP error or redirect, which is not followed,
 is `model_http_error`; the deadline is `model_timeout`; and an exhausted budget is
 `model_budget_exhausted`. A reserved call is not refunded. If the configuration
 object changes during the call, the answer is dropped as `config_changed`.
 
-Code then maps each index to the extracted list, so a URL the model writes is never
-used, and runs `checkLinkUrl` on each chosen URL. The model can only narrow the list:
+Code then maps each index to the extracted list and the URL `checkLinkUrl` returned
+for it, so a URL the model writes is never used. The model can only narrow the list:
 
 ```json
 {
@@ -321,10 +330,16 @@ used, and runs `checkLinkUrl` on each chosen URL. The model can only narrow the 
 }
 ```
 
-`refused` keeps `pending_login` so part C can record a pending download. The
-expiry is a claim from untrusted text: it is normalized to UTC and kept only from
-the evaluation time to 366 days after it, otherwise `null`. The fetcher checks the
-policy again on every request and redirect.
+`refused` lists every extracted candidate the policy refused, in extraction order,
+whether or not it is a download; the model never judged these. A login link is
+therefore never selected: the prompt also tells the model not to select sign-in
+links, so a `pending_login` record in part C comes from the fetcher (a `401` or
+`WWW-Authenticate` on a public link) or from a login candidate in `refused`. The
+expiry is a claim from untrusted text: an RFC 3339 date-time is normalized to UTC
+and kept only from the evaluation time to 366 days after it. Any other string,
+including an impossible date such as February 30, a date without a time, or free
+text, becomes `null` and leaves the selected indexes intact. The fetcher checks
+the policy again on every request and redirect.
 
 Nothing in the module logs, and results contain only fixed codes, indexes,
 extracted candidate URLs and the normalized expiry, never model text. There is no
@@ -363,7 +378,9 @@ full URL (which can hold a token) is an open decision below.
    own model, key and budget. Part B implements the first option as a default
    that awaits this decision, with its own `linkSelection.enabled` opt-in. Related:
    whether selection should need routing's `enabled` too, and whether it needs its
-   own cap inside the shared budget.
+   own cap inside the shared budget. This must be decided before part C calls
+   `selectLinkDownloads` from processing: with the shared budget, link selection
+   on a busy day can use up the calls that routing classification needs.
 2. Storage layout. Proposed: content-addressed R2 objects under
    `derived/link-v1/<raw sha256>/download/<file sha256>`, with a manifest per
    message, mirroring `mime-v1`. Whether the URL itself is stored in R2, in D1 or

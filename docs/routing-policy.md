@@ -45,7 +45,8 @@ Migration `0012_routing_policy.sql` persists classification leases, results,
 attempt counts, a shared UTC-day budget and trusted notification context. A
 sixty-second lease excludes overlapping calls for the same source/policy. Calls
 reserve budget atomically before submission; link selection reserves from the same
-UTC-day row, so the cap covers both. Errors retry no sooner than fifteen
+UTC-day row, so the cap covers both, and only for mail with at least one link that
+passes its URL policy. Errors retry no sooner than fifteen
 minutes and at most three submitted attempts per source/policy; ambiguous provider
 requests consume budget. Changing policy cannot reset the shared daily budget.
 Completed decisions are reused only for the same source and MIME manifest.

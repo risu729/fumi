@@ -1,11 +1,13 @@
 /**
  * Model selection of downloadable links (part B of docs/link-downloads.md).
  *
- * A model reads bounded mail text and the indexed candidate list from
- * `extractLinkCandidates` and answers with candidate indexes only, plus an
- * optional expiry it reads in the mail. Code validates the answer strictly, maps
- * each index back to the extracted list and runs `checkLinkUrl` on every chosen
- * URL, so the model can narrow but never widen what may be fetched.
+ * Code first runs `checkLinkUrl` on every candidate from `extractLinkCandidates`.
+ * Only the candidates that pass are shown to a model, with their extracted
+ * indexes, next to bounded mail text; when none pass, no budget is reserved and
+ * no model is called. The model answers with indexes only, plus an optional
+ * expiry it reads in the mail. Code validates the answer strictly against the
+ * indexes it showed and maps each back to the extracted list, so the model can
+ * narrow but never widen what may be fetched.
  *
  * Off unless the private routing configuration sets `linkSelection.enabled`.
  * Nothing in production calls this yet. Nothing here logs, and no result or error
@@ -75,9 +77,10 @@ export type LinkSelectionCode =
 export type LinkSelectionResult =
   | {
       ok: true;
-      /** Chosen candidates that pass `checkLinkUrl`, in the model's order. */
+      /** Chosen candidates, in the model's order, with the URL `checkLinkUrl` returned. */
       selected: { index: number; url: string }[];
-      /** Chosen candidates that `checkLinkUrl` refuses; never fetched. */
+      /** Extracted candidates that `checkLinkUrl` refuses, in extraction order. They
+       * are never shown to the model or fetched. */
       refused: { index: number; outcome: LinkPolicyRefusal }[];
       /** The expiry the model read in the mail, UTC ISO 8601; a claim from untrusted text. */
       expiresAt: string | null;
@@ -112,7 +115,8 @@ const choiceSchema = v.strictObject({
     v.array(v.pipe(v.number(), v.integer(), v.minValue(0))),
     v.maxLength(LINK_SELECTION_LIMITS.maxSelected),
   ),
-  expiresAt: v.nullable(v.pipe(v.string(), v.maxLength(64), v.regex(dateTimePattern))),
+  // Any string: an unusable expiry becomes null instead of discarding the indexes.
+  expiresAt: v.nullable(v.string()),
 });
 
 /** Parse an RFC 3339 date-time, rejecting impossible dates such as February 30. */
@@ -135,19 +139,17 @@ function parseDateTime(value: string): number | null {
   return Number.isFinite(time) ? time : null;
 }
 
-/** Strictly validate the model's answer against the candidate count. Throws when invalid. */
-function parseChoice(text: string, count: number, now: number) {
+/** Strictly validate the model's indexes against the indexes it was shown. Throws when
+ * invalid. The expiry is a claim: a malformed, impossible, past or far-future one
+ * becomes null and leaves the indexes intact. */
+function parseChoice(text: string, shown: ReadonlySet<number>, now: number) {
   const choice = v.parse(choiceSchema, JSON.parse(text) as unknown);
-  if (choice.indexes.some((index) => index >= count)) throw new Error("Index out of range");
+  if (choice.indexes.some((index) => !shown.has(index))) throw new Error("Index not shown");
   if (new Set(choice.indexes).size !== choice.indexes.length) throw new Error("Duplicate index");
-  let expiresAt: string | null = null;
-  if (choice.expiresAt !== null) {
-    const time = parseDateTime(choice.expiresAt);
-    if (time === null) throw new Error("Invalid expiry");
-    const horizon = now + LINK_SELECTION_LIMITS.expiryHorizonDays * 86_400_000;
-    // A past or far-future claim is dropped, not trusted.
-    if (time >= now && time <= horizon) expiresAt = new Date(time).toISOString();
-  }
+  const time = choice.expiresAt === null ? null : parseDateTime(choice.expiresAt);
+  const horizon = now + LINK_SELECTION_LIMITS.expiryHorizonDays * 86_400_000;
+  const expiresAt =
+    time !== null && time >= now && time <= horizon ? new Date(time).toISOString() : null;
   return { indexes: choice.indexes, expiresAt };
 }
 
@@ -168,8 +170,8 @@ function truncated(value: string | null, limit: number) {
 
 /**
  * Ask the configured model which extracted candidates are file downloads.
- * Returns the chosen candidates that pass the link policy, the refused ones by
- * outcome, and a bounded expiry claim; or one fixed failure code.
+ * Returns the chosen candidates, the candidates the link policy refused before
+ * the model saw them, and a bounded expiry claim; or one fixed failure code.
  */
 export async function selectLinkDownloads(
   env: LinkSelectionEnvironment,
@@ -196,11 +198,27 @@ export async function selectLinkDownloads(
   const { candidates } = input.extraction;
   if (candidates.some((candidate, position) => candidate.index !== position))
     return fail("invalid_input");
-  if (candidates.length === 0) return fail("no_candidates");
 
-  const db = env.MAIL_CATALOG.withSession("first-primary");
-  if (!(await reserveModelCall(db, now, config.maxCallsPerDay)))
-    return fail("model_budget_exhausted");
+  // The policy runs before any budget is spent: a candidate that can never be
+  // fetched is not shown to the model, and mail with none left costs no call.
+  const allowed = new Map<number, string>();
+  const refused: { index: number; outcome: LinkPolicyRefusal }[] = [];
+  for (const candidate of candidates) {
+    const policy = checkLinkUrl(candidate.url);
+    if (policy.ok) allowed.set(candidate.index, policy.url.href);
+    else refused.push({ index: candidate.index, outcome: policy.outcome });
+  }
+  if (allowed.size === 0) return fail("no_candidates");
+  const shown = candidates.filter((candidate) => allowed.has(candidate.index));
+
+  let reserved: boolean;
+  try {
+    const db = env.MAIL_CATALOG.withSession("first-primary");
+    reserved = await reserveModelCall(db, now, config.maxCallsPerDay);
+  } catch {
+    return fail("model_invalid_or_unavailable");
+  }
+  if (!reserved) return fail("model_budget_exhausted");
 
   const subject = truncated(input.subject, LINK_SELECTION_LIMITS.subjectLength);
   const body = truncated(input.text, LINK_SELECTION_LIMITS.bodyLength);
@@ -208,7 +226,7 @@ export async function selectLinkDownloads(
     evaluationTime: new Date(now).toISOString(),
     receivedAt: input.receivedAt ?? null,
     untrustedMail: { subject: subject.text, body: body.text, bodyTruncated: body.cut },
-    candidates: candidates.map((candidate) => {
+    candidates: shown.map((candidate) => {
       const url = truncated(candidate.url, LINK_SELECTION_LIMITS.urlDisplayLength);
       return {
         index: candidate.index,
@@ -242,7 +260,7 @@ export async function selectLinkDownloads(
   if (!reply.ok) return fail("model_http_error");
   let choice: ReturnType<typeof parseChoice>;
   try {
-    choice = parseChoice(reply.text, candidates.length, now);
+    choice = parseChoice(reply.text, new Set(allowed.keys()), now);
   } catch {
     return fail("model_invalid_output");
   }
@@ -259,12 +277,6 @@ export async function selectLinkDownloads(
     clearTimeout(checkTimer);
   }
 
-  const selected: { index: number; url: string }[] = [];
-  const refused: { index: number; outcome: LinkPolicyRefusal }[] = [];
-  for (const index of choice.indexes) {
-    const policy = checkLinkUrl(candidates[index]!.url);
-    if (policy.ok) selected.push({ index, url: policy.url.href });
-    else refused.push({ index, outcome: policy.outcome });
-  }
+  const selected = choice.indexes.map((index) => ({ index, url: allowed.get(index)! }));
   return { ok: true, selected, refused, expiresAt: choice.expiresAt };
 }
