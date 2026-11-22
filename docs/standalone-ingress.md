@@ -68,8 +68,10 @@ mode treats a D1/Workflow result as proof of SMTP delivery.
 
 ## Evidence and schema compatibility
 
-Forwarding mode continues writing the unchanged v1 receipt. Standalone mode writes v2
-with `forward: {status: "skipped", reason: "archive_only"}`. The raw object format,
+Forwarding mode continues writing the unchanged v1 receipt, except that a classified
+forwarding failure writes v3 (see
+[forward failure reasons](ingress.md#forward-failure-reasons)). Standalone mode writes
+v2 with `forward: {status: "skipped", reason: "archive_only"}`. The raw object format,
 checksum and `ingress-v1` source identity are unchanged; forwarding-mode raw metadata is
 unchanged. Standalone raw metadata adds `ingressMode=archive-only` and starts with
 `eventNotifications=0`. Only a matching successful v2 receipt can release
@@ -92,7 +94,7 @@ migration aborts. Child-table rowids are not preserved; nothing reads them. Back
 database and verify row/relationship preservation for a production migration.
 The tests do not perform a production migration.
 
-The reconciler accepts both receipt versions without rewriting objects.
+The reconciler accepts all three receipt versions without rewriting objects.
 `get_mail_health` reports `receipt_forward_skipped` separately from forwarding
 failures and unknown snapshots. Missing originals remain missing. An absent
 receipt does not become a fabricated skipped-forwarding record, even if the

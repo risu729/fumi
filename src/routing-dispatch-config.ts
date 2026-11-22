@@ -61,8 +61,20 @@ const adoptionProjection = v.object({
   ),
 });
 
+/** The dispatch artifact or its activation state could not be read from storage. */
+export class DispatchConfigurationUnavailableError extends Error {
+  constructor() {
+    super("Dispatch configuration unavailable");
+  }
+}
+
 export async function loadDispatchConfiguration(bucket: R2Bucket) {
-  const object = await bucket.get(DISPATCH_CONFIG_KEY);
+  let object: R2ObjectBody | null;
+  try {
+    object = await bucket.get(DISPATCH_CONFIG_KEY);
+  } catch {
+    throw new DispatchConfigurationUnavailableError();
+  }
   if (!object) return null;
   if (object.size > 256 * 1024) {
     await Promise.race([object.body.cancel().catch(() => undefined), Promise.resolve()]);
@@ -117,7 +129,14 @@ export async function loadDispatchConfiguration(bucket: R2Bucket) {
   }
   const configurationSha256 = await dispatchDigest(JSON.stringify(artifact));
   const destinationSha256 = await dispatchDigest(JSON.stringify(artifact.destination));
-  return { artifact, router, adoptions, configurationSha256, destinationSha256 };
+  return {
+    artifact,
+    router,
+    adoptions,
+    configurationSha256,
+    destinationSha256,
+    uploaded: object.uploaded,
+  };
 }
 export type DispatchConfiguration = NonNullable<
   Awaited<ReturnType<typeof loadDispatchConfiguration>>

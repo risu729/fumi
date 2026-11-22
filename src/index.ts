@@ -14,6 +14,7 @@ import { repairRoutingShadow } from "./routing-shadow-runtime.ts";
 import { repairRoutingDispatch } from "./routing-dispatch.ts";
 import { routingRuntime } from "./routing-runtime.ts";
 import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
+import { classifyForwardError, type ForwardErrorReason } from "./forward-failure.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
@@ -21,7 +22,10 @@ import type { ArchiveReceipt } from "./receipt-schema.ts";
 export type Receipt = ArchiveReceipt;
 type ArchiveOutcome = Receipt["archive"];
 type ArchiveFailure = Extract<ArchiveOutcome, { status: "failed" }>["code"];
-type ForwardOutcome = Receipt["forward"];
+type ForwardOutcome =
+  | { status: "forwarded" }
+  | { status: "failed"; code: "invalid_target" }
+  | ({ status: "failed" } & ForwardErrorReason);
 
 // Standalone mode must decide acceptance before the email event ends, so it
 // bounds R2 writes. Forwarding mode keeps awaiting the write as before: a slow
@@ -126,7 +130,7 @@ async function forward(
   message: ForwardableEmailMessage,
   target: string | undefined,
   ingestId: string,
-): Promise<Exclude<ForwardOutcome, { status: "skipped" }>> {
+): Promise<ForwardOutcome> {
   // A single private, verified Gmail destination is the only first-phase route.
   // Incoming X-Fumi-Ingest-ID values never control forwarding.
   if (
@@ -139,9 +143,28 @@ async function forward(
   try {
     await message.forward(target, new Headers({ "X-Fumi-Ingest-ID": ingestId }));
     return { status: "forwarded" };
-  } catch {
-    return { status: "failed", code: "forward_failed" };
+  } catch (error) {
+    // Keep only a fixed code and an enhanced status; never the error text itself.
+    return { status: "failed", ...classifyForwardError(error) };
   }
+}
+
+/** The oldest receipt version that holds the outcome, so v1-only readers keep reading it. */
+function forwardReceipt(forwarding: ForwardOutcome | undefined) {
+  if (!forwarding) {
+    return { schemaVersion: 2, forward: { status: "skipped", reason: "archive_only" } } as const;
+  }
+  if (forwarding.status === "forwarded" || forwarding.code === "invalid_target") {
+    return { schemaVersion: 1, forward: forwarding } as const;
+  }
+  const { code, smtpStatus } = forwarding;
+  if (code === "forward_failed" && smtpStatus === undefined) {
+    return { schemaVersion: 1, forward: { status: "failed", code } } as const;
+  }
+  return {
+    schemaVersion: 3,
+    forward: { status: "failed", code, ...(smtpStatus === undefined ? {} : { smtpStatus }) },
+  } as const;
 }
 
 export default {
@@ -282,9 +305,7 @@ export default {
       envelope: { from: message.from, to: message.to },
       reportedRawSize: Number.isSafeInteger(message.rawSize) ? message.rawSize : null,
       archive,
-      ...(forwarding
-        ? ({ schemaVersion: 1, forward: forwarding } as const)
-        : ({ schemaVersion: 2, forward: { status: "skipped", reason: "archive_only" } } as const)),
+      ...forwardReceipt(forwarding),
     };
     // setReject is permanent, not a request for SMTP retry. Do this before the
     // best-effort receipt write so its failure cannot hide missing raw bytes.
@@ -305,11 +326,18 @@ export default {
       receiptStatus = "failed";
     }
     // Logs exclude envelopes, headers, payloads, hashes, recipients, and exception text.
+    // A failed forward adds only its fixed code and enhanced status code.
     const outcome = {
       event: "ingest",
       ingestId,
       archive: archive.status,
       forward: receipt.forward.status,
+      ...(forwarding?.status === "failed"
+        ? {
+            forwardCode: forwarding.code,
+            ...("smtpStatus" in forwarding ? { smtpStatus: forwarding.smtpStatus } : {}),
+          }
+        : {}),
       receipt: receiptStatus,
     };
     if (

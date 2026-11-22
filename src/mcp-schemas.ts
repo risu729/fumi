@@ -1,6 +1,7 @@
 import * as v from "valibot";
 import { toStandardJsonSchema } from "@valibot/to-json-schema";
 import { INLINE_ATTACHMENT_BASE64_CHARACTERS } from "./outbound.ts";
+import { ROUTING_USAGE_LIMITS } from "./routing-rules.ts";
 
 export const identifier = v.pipe(v.string(), v.minLength(1), v.maxLength(200));
 const shortText = v.pipe(v.string(), v.maxLength(1000));
@@ -134,6 +135,30 @@ export const toolSchemas = {
     attachment_id: v.pipe(v.string(), v.regex(/^part_(0|[1-9][0-9]?)$/)),
     sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
   }),
+  list_routing_rules: v.strictObject({}),
+  routing_rule_usage: v.strictObject({
+    configuration: v.optional(v.picklist(["candidate", "active"]), "candidate"),
+    window_days: v.optional(
+      v.pipe(
+        v.number(),
+        v.integer(),
+        v.minValue(1),
+        v.maxValue(ROUTING_USAGE_LIMITS.maxWindowDays),
+      ),
+      ROUTING_USAGE_LIMITS.defaultWindowDays,
+    ),
+    max_decisions: v.optional(
+      v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(ROUTING_USAGE_LIMITS.maxDecisions)),
+      ROUTING_USAGE_LIMITS.maxDecisions,
+    ),
+    samples_per_rule: v.optional(
+      v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(ROUTING_USAGE_LIMITS.maxSamples)),
+      ROUTING_USAGE_LIMITS.defaultSamples,
+    ),
+  }),
+  explain_routing: v.strictObject({
+    message_id: v.pipe(v.string(), v.regex(/^mail_[a-zA-Z0-9-]{1,128}$/)),
+  }),
 };
 
 const attachmentOutput = v.looseObject({
@@ -195,7 +220,213 @@ const searchOutput = v.looseObject({
   next_page_token: v.nullable(v.string()),
   coverage: v.record(v.string(), v.unknown()),
 });
+const sha256 = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
+const routingId = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,63}$/));
+const routingCode = v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,63}$/)));
+const routingCategory = v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_-]{0,63}$/)));
+const ruleOutcome = v.picklist(["review", "ignore", "unresolved"]);
+const isoTime = v.pipe(v.string(), v.isoTimestamp());
+const count = v.pipe(v.number(), v.integer(), v.minValue(0));
+const ruleSetStatus = v.picklist(["configured", "absent", "unreadable", "unavailable"]);
+const ruleSetOutput = {
+  status: ruleSetStatus,
+  configuration_sha256: v.nullable(sha256),
+  uploaded_at: v.nullable(isoTime),
+  fallback: v.nullable(ruleOutcome),
+  rules: v.array(
+    v.strictObject({
+      id: routingId,
+      priority: count,
+      match: v.string(),
+      outcome: ruleOutcome,
+      category: routingCategory,
+      urgent: v.nullable(v.boolean()),
+      added_at: v.null(),
+      changed_at: v.null(),
+      compared_to_other: v.nullable(v.picklist(["same", "changed", "only_here"])),
+    }),
+  ),
+  adoptions: v.array(
+    v.strictObject({
+      plugin_id: routingId,
+      version: v.string(),
+      manifest_sha256: sha256,
+      enabled: v.boolean(),
+      priority: count,
+      input_fields: v.array(v.picklist(["subject", "from", "to", "hasAttachments"])),
+    }),
+  ),
+};
+const configurationLabel = v.picklist(["candidate_and_active", "candidate", "active", "other"]);
+const routingOutputs = {
+  list_routing_rules: v.strictObject({
+    candidate: v.strictObject(ruleSetOutput),
+    active: v.strictObject({
+      ...ruleSetOutput,
+      revision: v.nullable(count),
+      generation: v.nullable(count),
+      enabled: v.nullable(v.boolean()),
+      activated: v.nullable(v.boolean()),
+    }),
+    same_configuration: v.boolean(),
+    history: v.strictObject({ available: v.literal(false), reason: v.string() }),
+  }),
+  routing_rule_usage: v.strictObject({
+    configuration: v.picklist(["candidate", "active"]),
+    status: ruleSetStatus,
+    configuration_sha256: v.nullable(sha256),
+    window: v.strictObject({ days: count, start: isoTime, end: isoTime }),
+    decisions: v.strictObject({
+      source: v.literal("routing_shadow_decisions"),
+      max_rows: count,
+      scanned: count,
+      truncated: v.boolean(),
+      oldest_scanned_received_at: v.nullable(v.string()),
+      default_outcome: v.nullable(ruleOutcome),
+      default_matches: count,
+      unreadable: count,
+      not_evaluated: v.array(
+        v.strictObject({ failure_code: routingCode, status: v.nullable(v.string()), count }),
+      ),
+      rules: v.array(
+        v.strictObject({
+          rule_id: routingId,
+          matches: count,
+          first_matched_at: v.nullable(v.string()),
+          last_matched_at: v.nullable(v.string()),
+          sample_message_ids: v.array(identifier),
+        }),
+      ),
+      unmatched_rule_ids: v.array(routingId),
+      not_yet_evaluated: v.pipe(count, v.maxValue(ROUTING_USAGE_LIMITS.maxNotYetEvaluated)),
+      unmatched_covers_window: v.boolean(),
+      plugin_candidates: v.array(
+        v.strictObject({
+          plugin_id: routingId,
+          mode: v.picklist(["exclusive", "observer"]),
+          count,
+        }),
+      ),
+    }),
+    classifier: v.strictObject({
+      source: v.literal("routing_classifications"),
+      max_rows: count,
+      scanned: count,
+      truncated: v.boolean(),
+      outcomes: v.array(
+        v.strictObject({
+          state: v.picklist(["pending", "complete", "held", "unknown"]),
+          outcome: v.nullable(v.picklist(["review", "ignore", "hold"])),
+          category: routingCategory,
+          evidence_code: routingCode,
+          count,
+        }),
+      ),
+    }),
+    dispatch: v.strictObject({
+      source: v.literal("routing_dispatch_jobs"),
+      max_rows: count,
+      scanned_jobs: count,
+      jobs_truncated: v.boolean(),
+      jobs: v.array(v.strictObject({ state: v.string(), reason: routingCode, count })),
+      scanned_offers: count,
+      offers_truncated: v.boolean(),
+      offers: v.array(v.strictObject({ lane: v.string(), state: v.string(), count })),
+    }),
+  }),
+  explain_routing: v.strictObject({
+    message_id: identifier,
+    received_at: v.nullable(v.string()),
+    provenance: v.picklist(["live", "historical"]),
+    decided_by: v.strictObject({
+      kind: v.picklist([
+        "plugin",
+        "plugin_offer",
+        "rule",
+        "default",
+        "rule_or_default",
+        "classifier",
+        "unresolved",
+        "suppressed",
+        "blocked",
+        "not_evaluated",
+      ]),
+      source: v.nullable(v.picklist(["dispatch", "shadow"])),
+      plugin_id: v.nullable(routingId),
+      rule_id: v.nullable(routingId),
+      outcome: v.nullable(v.picklist(["review", "ignore", "unresolved", "hold"])),
+      category: routingCategory,
+      evidence_code: routingCode,
+      configuration_sha256: v.nullable(sha256),
+      revision: v.nullable(count),
+    }),
+    shadow: v.array(
+      v.strictObject({
+        configuration_sha256: sha256,
+        configuration: configurationLabel,
+        state: v.picklist(["complete", "unreadable", "blocked"]),
+        failure_code: routingCode,
+        status: v.nullable(
+          v.picklist(["shadow", "historical_suppressed", "invalid_metadata", "evaluation_error"]),
+        ),
+        rule_id: v.nullable(routingId),
+        outcome: v.nullable(ruleOutcome),
+        category: routingCategory,
+        urgent: v.nullable(v.boolean()),
+        plugin_candidates: v.array(
+          v.strictObject({
+            plugin_id: routingId,
+            mode: v.picklist(["exclusive", "observer"]),
+            manifest_version: v.string(),
+          }),
+        ),
+        evaluated_at: isoTime,
+        current: v.boolean(),
+      }),
+    ),
+    shadow_truncated: v.boolean(),
+    dispatch: v.strictObject({
+      job: v.nullable(
+        v.strictObject({
+          state: v.string(),
+          reason: routingCode,
+          revision: count,
+          updated_at: isoTime,
+        }),
+      ),
+      offers: v.array(
+        v.strictObject({
+          lane: v.string(),
+          state: v.string(),
+          failure_code: routingCode,
+          revision: count,
+          generation: count,
+          category: routingCategory,
+          urgent: v.nullable(v.boolean()),
+          evidence_code: routingCode,
+          updated_at: isoTime,
+        }),
+      ),
+      offers_truncated: v.boolean(),
+    }),
+    classifications: v.array(
+      v.strictObject({
+        policy_sha256: v.string(),
+        state: v.string(),
+        outcome: v.nullable(v.picklist(["review", "ignore", "hold"])),
+        category: routingCategory,
+        urgent: v.nullable(v.boolean()),
+        evidence_code: routingCode,
+        failure_code: routingCode,
+        updated_at: isoTime,
+      }),
+    ),
+    classifications_truncated: v.boolean(),
+    rule_id_note: v.string(),
+  }),
+};
 export const toolOutputSchemas = {
+  ...routingOutputs,
   get_mail_health: v.looseObject({
     observed_at: v.string(),
     status: v.picklist(["observations_available", "partial_observations"]),

@@ -80,6 +80,35 @@ describe("bounded read-only archival health evidence", () => {
     });
     expect(result.archive_completeness).toBe("unknown");
   });
+  it("counts v3 classified forward failures as known failures", async () => {
+    await source(
+      "classified",
+      "present",
+      JSON.stringify({
+        ...JSON.parse(failedReceipt("classified")),
+        schemaVersion: 3,
+        forward: { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+      }),
+    );
+    await source(
+      "v3-forwarded",
+      "present",
+      JSON.stringify({
+        ...JSON.parse(failedReceipt("v3-forwarded")),
+        schemaVersion: 3,
+        forward: { status: "forwarded" },
+      }),
+    );
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET forward_status='forwarded' WHERE external_id='v3-forwarded'",
+    ).run();
+    const result = await getMailHealth(env, reader, now);
+    expect(counts(result.sections.catalog)).toMatchObject({
+      known_ingress_snapshots: 1,
+      receipt_forward_failures: 1,
+      ingress_snapshot_unknown: 1,
+    });
+  });
   it("requires mail:read before inspecting catalog state", async () => {
     const prepare = vi.fn();
     await expect(

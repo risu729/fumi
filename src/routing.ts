@@ -415,6 +415,20 @@ export async function compileShadowRouter(
   }
 }
 
+export type RoutingConfig = v.InferOutput<typeof configSchema>;
+export type RoutingRule = RoutingConfig["rules"][number];
+
+/** Parse administrator configuration for authorized reads. Rules are returned in
+ * evaluation order. The caller compiles it first; this does not replace validation. */
+export function readRoutingConfig(configJson: string): RoutingConfig {
+  try {
+    const config = v.parse(configSchema, boundedJson(configJson, ROUTING_LIMITS.configBytes));
+    return { ...config, rules: [...config.rules].sort(order) };
+  } catch {
+    throw new RoutingConfigError();
+  }
+}
+
 /** Validate an owner publication without granting adoption or invoking its handler. */
 export function validateRoutingManifest(json: string) {
   try {
