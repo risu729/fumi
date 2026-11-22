@@ -3,7 +3,8 @@
 Status: capture, agent mail, historical import, attachment conversion/decryption,
 managed retrieval and configurable routing are implemented. Lexical retrieval and
 a bounded semantic/hybrid source-citation sample are verified in production;
-historical backfill is in progress on 2026-11-12.
+historical backfill stopped on 2026-11-12 after 4,810 messages and moves to
+Google Takeout ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)).
 Checked items describe completed implementation or preparation;
 production acceptance is separate. Unchecked items remain future work.
 
@@ -69,9 +70,11 @@ establish production delivery.
       labels, account/thread/date provenance and exact MIME. Trusted admin routes,
       transport account verification and synthetic checks are complete. See
       [historical Gmail import](gmail-import.md).
-- [ ] Complete and independently verify the configured historical scope. Exact
-      copies through the connected Gmail transport are active; optional read-only
-      OAuth remains an alternative. No Gmail writes are supported.
+- [ ] Complete and independently verify the historical scope from Google Takeout
+      per account, and group copies of one message across accounts and live capture
+      ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). The connector
+      transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
+      before it stopped on 2026-11-12. No Gmail writes are supported.
 - [ ] On hold (owner, 2026-11-17 17:44 UTC): keep importing Gmail SENT mail after the
       historical cutoff. Do not implement until the owner picks the design. The owner
       sends by hand from Gmail through Cloudflare Email Sending SMTP. Those messages do
