@@ -76,6 +76,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `create_draft`, `get_draft`, `list_drafts`, `update_draft` | Owner isolation and revision checks |
 | `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key; Gmail-style reply quote and forward block |
 | `get_send_status` | Submission state plus per-recipient delivery evidence |
+| `get_mail_health` | Bounded catalog counts, plus up to 20 failed forwards with `mail_` IDs, reason codes and retry recovery ([archive health](archive-health.md#failed-forwards-and-retry-recovery)) |
 | `list_routing_rules`, `routing_rule_usage`, `explain_routing` | `mail:routing` only: private rules, bounded per-rule usage and one message's routing evidence ([routing shadow](routing-shadow.md#reading-rules-and-their-usage-over-mcp)) |
 | `propose_routing_rule`, `update_routing_rule`, `retire_routing_rule` | `mail:routing` and `mail:routing:write`: change one candidate rule as a new revision with an expected SHA-256; never activates ([routing shadow](routing-shadow.md#changing-candidate-rules-over-mcp)) |
 

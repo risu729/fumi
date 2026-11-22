@@ -40,6 +40,7 @@ export const FORWARD_ERROR_CODES = [
 ] as const;
 /** v1 codes. `invalid_target` covers a missing, non-Gmail or looping destination. */
 const V1_FORWARD_CODES = ["invalid_target", "forward_failed"] as const;
+export const FORWARD_FAILURE_CODES = ["invalid_target", ...FORWARD_ERROR_CODES] as const;
 
 const common = {
   ingestId: v.string(),

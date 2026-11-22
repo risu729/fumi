@@ -48,6 +48,54 @@ const failedReceipt = (id: string) =>
     archive: { status: "failed", code: "capture_timeout" },
     forward: { status: "failed", code: "forward_failed" },
   });
+type Forward = { status: "forwarded" } | { status: "failed"; code: string; smtpStatus?: string };
+/** A live ingress row with a retained receipt and, optionally, a current extraction. */
+async function ingress(
+  id: string,
+  receivedAt: string,
+  forward: Forward,
+  messageId: string | null,
+  extraction: "current" | "stale" | "none" = messageId === null ? "none" : "current",
+  from = "synthetic@example.invalid",
+) {
+  const rawKey = `synthetic/forward/${id}`;
+  const schemaVersion =
+    forward.status === "failed" &&
+    forward.code !== "forward_failed" &&
+    forward.code !== "invalid_target"
+      ? 3
+      : 1;
+  const snapshot = JSON.stringify({
+    schemaVersion,
+    ingestId: id,
+    receivedAt,
+    envelope: { from, to: "archive@example.invalid" },
+    reportedRawSize: 100,
+    archive: { status: "stored", key: rawKey, size: 100, sha256: "a".repeat(64) },
+    forward,
+  });
+  await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,
+    received_at,receipt_snapshot,forward_status,raw_state,receipt_state,raw_size,raw_sha256,observed_pass,observed_revision)
+    VALUES('email_routing','ingress-v1',?,?,?,?,?,?,'present','valid',100,?,0,0)`)
+    .bind(id, rawKey, `${rawKey}.receipt`, receivedAt, snapshot, forward.status, "a".repeat(64))
+    .run();
+  if (extraction !== "none")
+    await env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,body_json_key,manifest_key,updated_at)
+      VALUES(?,'mime-v1',?,100,?,'complete',?,'[]','synthetic/body','synthetic/manifest',0)`)
+      .bind(
+        rawKey,
+        (extraction === "current" ? "a" : "b").repeat(64),
+        rawKey,
+        JSON.stringify({ subject: "Synthetic", messageId }),
+      )
+      .run();
+}
+function forwardFailures(result: Awaited<ReturnType<typeof getMailHealth>>) {
+  const section = result.sections.forward_failures;
+  expect(section.status).toBe("observed");
+  if (section.status !== "observed") throw new Error("Missing synthetic evidence");
+  return section;
+}
 beforeAll(async () => applyD1Migrations(env.MAIL_CATALOG, env.TEST_MIGRATIONS));
 beforeEach(async () => {
   await env.MAIL_CATALOG.exec(
@@ -108,6 +156,206 @@ describe("bounded read-only archival health evidence", () => {
       receipt_forward_failures: 1,
       ingress_snapshot_unknown: 1,
     });
+  });
+  it("lists failed forwards newest first with codes and retry recovery by Message-ID", async () => {
+    const at = (time: string) => `2026-11-21T${time}:00.000Z`;
+    // A legacy failure that a later retry with the same Message-ID forwarded.
+    await ingress(
+      "legacy",
+      at("00:00"),
+      { status: "failed", code: "forward_failed" },
+      "<a@example.invalid>",
+    );
+    await ingress("retry", at("00:05"), { status: "forwarded" }, "<a@example.invalid>");
+    // Every attempt of one Message-ID failed.
+    await Promise.all(
+      ["01:00", "01:05", "01:10"].map((time, index) =>
+        ingress(
+          `rejected-${index}`,
+          at(time),
+          { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+          "<b@example.invalid>",
+        ),
+      ),
+    );
+    // A forwarded copy received before the failure is not a recovery.
+    await ingress("earlier", at("01:59"), { status: "forwarded" }, "<c@example.invalid>");
+    await ingress(
+      "after-copy",
+      at("02:00"),
+      { status: "failed", code: "timeout" },
+      "<c@example.invalid>",
+    );
+    // A later failed attempt is not a recovery either; no or stale extraction is unknown.
+    await ingress(
+      "no-extraction",
+      at("03:00"),
+      { status: "failed", code: "rejected_temporary", smtpStatus: "4.7.0" },
+      null,
+    );
+    await ingress(
+      "stale",
+      at("04:00"),
+      { status: "failed", code: "invalid_target" },
+      "<d@example.invalid>",
+      "stale",
+    );
+    await ingress("stale-retry", at("04:05"), { status: "forwarded" }, "<d@example.invalid>");
+    const result = await getMailHealth(env, reader, now);
+    const section = forwardFailures(result);
+    expect(section.counts).toEqual({
+      receipt_forward_failures: 7,
+      receipt_forward_failures_recovered: 1,
+      receipt_forward_failures_unrecovered: 4,
+      receipt_forward_failures_recovery_unknown: 2,
+    });
+    expect(section.failed_forwards).toEqual([
+      {
+        id: "mail_stale",
+        received_at: at("04:00"),
+        code: "invalid_target",
+        smtp_status: null,
+        recovery: "unknown",
+        recovered_by: null,
+      },
+      {
+        id: "mail_no-extraction",
+        received_at: at("03:00"),
+        code: "rejected_temporary",
+        smtp_status: "4.7.0",
+        recovery: "unknown",
+        recovered_by: null,
+      },
+      {
+        id: "mail_after-copy",
+        received_at: at("02:00"),
+        code: "timeout",
+        smtp_status: null,
+        recovery: "unrecovered",
+        recovered_by: null,
+      },
+      ...[2, 1, 0].map((index) => ({
+        id: `mail_rejected-${index}`,
+        received_at: at(["01:00", "01:05", "01:10"][index]!),
+        code: "rejected_permanent",
+        smtp_status: "5.7.1",
+        recovery: "unrecovered",
+        recovered_by: null,
+      })),
+      {
+        id: "mail_legacy",
+        received_at: at("00:00"),
+        code: "forward_failed",
+        smtp_status: null,
+        recovery: "recovered",
+        recovered_by: "mail_retry",
+      },
+    ]);
+    expect(section.failed_forwards_truncated).toBe(false);
+    expect(counts(result.sections.catalog)["receipt_forward_failures"]).toBe(7);
+    const text = JSON.stringify(result);
+    for (const secret of ["@example.invalid", "synthetic/forward/", "Synthetic"])
+      expect(text).not.toContain(secret);
+  });
+  it("recovers only by a msg-id shaped Message-ID from the same envelope sender", async () => {
+    const at = (time: string) => `2026-11-21T${time}:00.000Z`;
+    const failed = { status: "failed", code: "forward_failed" } as const;
+    // postal-mime returns "<>" for an empty header; an unrelated later "<>" is no recovery.
+    await ingress("empty-id", at("00:00"), failed, "<>");
+    await ingress("empty-later", at("00:05"), { status: "forwarded" }, "<>");
+    // Ids without a local or domain part are not keys either.
+    await ingress("no-local", at("01:00"), failed, "<@example.invalid>");
+    await ingress("no-local-later", at("01:05"), { status: "forwarded" }, "<@example.invalid>");
+    await ingress("no-domain", at("02:00"), failed, "<x@>");
+    await ingress("no-domain-later", at("02:05"), { status: "forwarded" }, "<x@>");
+    // The same Message-ID from another envelope sender is not a recovery.
+    await ingress("other-sender", at("03:00"), failed, "<e@example.invalid>");
+    await ingress(
+      "other-sender-later",
+      at("03:05"),
+      { status: "forwarded" },
+      "<e@example.invalid>",
+      "current",
+      "another@example.invalid",
+    );
+    // A short but well-formed id still matches from the same sender.
+    await ingress("short", at("04:00"), failed, "<a@b>");
+    await ingress("short-later", at("04:05"), { status: "forwarded" }, "<a@b>");
+    const section = forwardFailures(await getMailHealth(env, reader, now));
+    expect(section.counts).toEqual({
+      receipt_forward_failures: 5,
+      receipt_forward_failures_recovered: 1,
+      receipt_forward_failures_unrecovered: 1,
+      receipt_forward_failures_recovery_unknown: 3,
+    });
+    expect(
+      Object.fromEntries(
+        section.failed_forwards.map((row) => [row.id, [row.recovery, row.recovered_by]]),
+      ),
+    ).toEqual({
+      "mail_empty-id": ["unknown", null],
+      "mail_no-local": ["unknown", null],
+      "mail_no-domain": ["unknown", null],
+      "mail_other-sender": ["unrecovered", null],
+      mail_short: ["recovered", "mail_short-later"],
+    });
+  });
+  it("caps the failed forward list and reports zero failures as an empty observation", async () => {
+    let result = await getMailHealth(env, reader, now);
+    expect(forwardFailures(result)).toMatchObject({
+      counts: { receipt_forward_failures: 0, receipt_forward_failures_unrecovered: 0 },
+      failed_forwards: [],
+      failed_forwards_truncated: false,
+    });
+    await Promise.all(
+      Array.from({ length: 21 }, (_, index) => index.toString().padStart(2, "0")).map((index) =>
+        ingress(
+          `capped-${index}`,
+          `2026-11-21T00:${index}:00.000Z`,
+          { status: "failed", code: "forward_failed" },
+          `<capped-${index}@example.invalid>`,
+        ),
+      ),
+    );
+    result = await getMailHealth(env, reader, now);
+    const section = forwardFailures(result);
+    expect(section.counts).toMatchObject({
+      receipt_forward_failures: 21,
+      receipt_forward_failures_unrecovered: 21,
+    });
+    expect(section.failed_forwards).toHaveLength(20);
+    expect(section.failed_forwards[0]?.id).toBe("mail_capped-20");
+    expect(section.failed_forwards.at(-1)?.id).toBe("mail_capped-01");
+    expect(section.failed_forwards_truncated).toBe(true);
+  });
+  it("makes the failed forward list unknown when a row breaks the closed output shape", async () => {
+    await ingress(
+      "bad id",
+      "2026-11-21T00:00:00.000Z",
+      { status: "failed", code: "forward_failed" },
+      null,
+    );
+    const result = await getMailHealth(env, reader, now);
+    expect(result.sections.forward_failures).toEqual({
+      status: "unknown",
+      reason: "invalid_catalog_evidence",
+    });
+    expect(JSON.stringify(result)).not.toContain("bad id");
+  });
+  it("makes the failed forward list unknown when a v3 snapshot has an invalid SMTP status", async () => {
+    await ingress(
+      "bad-status",
+      "2026-11-21T00:00:00.000Z",
+      { status: "failed", code: "rejected_permanent", smtpStatus: "2.0.0" },
+      null,
+    );
+    const result = await getMailHealth(env, reader, now);
+    expect(counts(result.sections.catalog)["receipt_forward_failures"]).toBe(1);
+    expect(result.sections.forward_failures).toEqual({
+      status: "unknown",
+      reason: "invalid_catalog_evidence",
+    });
+    expect(JSON.stringify(result)).not.toContain("2.0.0");
   });
   it("requires mail:read before inspecting catalog state", async () => {
     const prepare = vi.fn();
@@ -254,6 +502,10 @@ describe("bounded read-only archival health evidence", () => {
     expect(result.sections.mime).toEqual({ status: "unknown", reason: "schema_missing" });
     expect(result.sections.processing).toEqual({ status: "unknown", reason: "schema_missing" });
     expect(result.sections.gmail_imports).toEqual({ status: "unknown", reason: "schema_missing" });
+    expect(result.sections.forward_failures).toEqual({
+      status: "unknown",
+      reason: "schema_missing",
+    });
     expect(result.status).toBe("partial_observations");
     expect(statements).toHaveLength(3);
     expect(statements.every((sql) => /^(SELECT|WITH)\b/.test(sql))).toBe(true);
