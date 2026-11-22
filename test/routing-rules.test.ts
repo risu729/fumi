@@ -689,6 +689,22 @@ describe("explain_routing", () => {
       expect(explained.shadow[0]?.current).toBe(false);
       expect(explained.decided_by).toMatchObject({ kind: "not_evaluated", rule_id: null });
     }
+    // The shadow repair then records the replaced source as blocked and leaves it
+    // settled; that decision describes the present catalog state, so it is current.
+    // A missing raw object is not re-evaluated and stays not current.
+    await evaluateAll();
+    const blocked = await explainRouting(env, replaced.messageId);
+    expect(v.is(toolOutputSchemas.explain_routing, blocked)).toBe(true);
+    expect(blocked.shadow).toEqual([
+      expect.objectContaining({ state: "blocked", failure_code: "source_changed", current: true }),
+    ]);
+    expect(blocked.decided_by).toMatchObject({
+      kind: "blocked",
+      source: "shadow",
+      rule_id: null,
+      evidence_code: "source_changed",
+    });
+    expect((await explainRouting(env, missing.messageId)).shadow[0]?.current).toBe(false);
   });
 
   it("attributes a live static-rule decision to a rule only under the active configuration", async () => {
