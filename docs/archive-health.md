@@ -20,7 +20,9 @@ forwarding nor a forwarding failure. A failure remains known when a later scan f
 receipt object missing. Missing, malformed or absent snapshots are unknown; they do not
 prove successful capture or forwarding. Gmail imports have no SMTP forwarding receipt
 and are not counted as failed ingress snapshots. Recipient addresses, object keys,
-message IDs, cursors, policy text and provider error text are never returned.
+Message-ID headers, cursors, policy text and provider error text are never returned.
+The only message identifiers returned are the opaque `mail_` IDs of
+[failed forwards](#failed-forwards-and-retry-recovery).
 
 MIME coverage distinguishes current complete extractions, blocked records,
 present originals awaiting an extraction, and stale/unverifiable results.
@@ -39,7 +41,7 @@ be outside the window. Missing optional tables or failed queries make the affect
 section explicitly unknown. A missing scan checkpoint is also unknown. The scan
 counter describes completed R2 listing passes, not upstream email acceptance.
 
-There are at most seven fixed read queries and a shared five-second deadline.
+There are at most eight fixed read queries and a shared five-second deadline.
 An expired query cannot start further queries; a database operation already in
 flight may finish later. Sections are not a single transactional snapshot. Counts
 and truncation apply only to their stated window, even when every reported count
@@ -47,8 +49,64 @@ is zero. `archive_completeness` is always `unknown`: uncataloged objects and
 events that left no surviving catalog or receipt evidence are invisible here.
 The number of unseen ingress events and total mailbox size remain `null`.
 
-Synthetic workerd tests cover empty/unknown coverage, capture and forwarding
-failures, malformed receipt evidence, MIME/job states, partial and overlapping
-imports, window limits, missing schema, scope enforcement and stalled queries.
-They do not establish production receipt, a live R2 inventory or end-to-end mail
-capture completeness.
+Synthetic workerd tests cover empty/unknown coverage, capture and forwarding failures,
+forwarding failure codes, the failed forward list cap and closed output shape, recovery
+through the same Message-ID, malformed receipt evidence, MIME/job states, partial and
+overlapping imports, window limits, missing schema, scope enforcement and stalled
+queries. They do not establish production receipt, a live R2 inventory or end-to-end
+mail capture completeness.
+
+## Failed forwards and retry recovery
+
+Status (2026-11-22 07:52 UTC): implemented for
+[#138](https://github.com/risu729/fumi/issues/138). Before this, health only counted
+forwarding failures, and finding the failed messages needed direct D1 access.
+
+A forward failure usually throws, Email Routing reports a temporary failure, and the
+sender retries. Each attempt is its own ingress row, so the failure count overstates
+mail that never reached the destination. `sections.forward_failures` reads the same
+1,000-row window as the catalog section and returns:
+
+```json
+{
+  "counts": {
+    "receipt_forward_failures": 3,
+    "receipt_forward_failures_recovered": 1,
+    "receipt_forward_failures_unrecovered": 1,
+    "receipt_forward_failures_recovery_unknown": 1
+  },
+  "failed_forwards": [
+    {"id": "mail_<uuid>", "received_at": "2026-11-21T01:00:00.000Z", "code": "rejected_permanent", "smtp_status": "5.7.1", "recovery": "unrecovered", "recovered_by": null},
+    {"id": "mail_<uuid>", "received_at": "2026-11-21T00:30:00.000Z", "code": "timeout", "smtp_status": null, "recovery": "unknown", "recovered_by": null},
+    {"id": "mail_<uuid>", "received_at": "2026-11-21T00:00:00.000Z", "code": "forward_failed", "smtp_status": null, "recovery": "recovered", "recovered_by": "mail_<uuid>"}
+  ],
+  "failed_forwards_truncated": false
+}
+```
+
+The section also carries the usual `status` and `window`. The list holds at most the
+20 newest failures by `received_at`; the counts cover every failure in the window, and
+`failed_forwards_truncated` says when the list is shorter. `code` and `smtp_status`
+come from the retained receipt snapshot
+([forward failure reasons](ingress.md#forward-failure-reasons)); failures recorded
+before reasons existed show `forward_failed` and `null`. Pass an `id` to `read_email`
+for the message itself.
+
+`recovery` is `recovered` when a later ingress row in the window was forwarded and its
+current MIME extraction has the same `Message-ID` header; `recovered_by` names the
+earliest such row. It is `unrecovered` when the failed row has a Message-ID and no such
+row exists, and `unknown` when its extraction is missing, pending, blocked or stale or
+has no Message-ID. The match reads `mail_extractions.metadata_json`, so it needs no new
+index or migration; the 1,000-row window bounds its cost. Matching is deliberately
+narrow:
+
+- A sender's resend under a new Message-ID counts as `unrecovered`. Envelope sender
+  and subject were not used: two distinct mails can share them.
+- A forwarded copy received before the failure, or at the same instant, is not a
+  recovery.
+- Message-ID is an untrusted header. A recovery is a hint that the destination
+  accepted an attempt of the same message, not proof of Gmail inbox placement.
+- A retry outside the window, or not yet cataloged, is not seen.
+
+Treat `receipt_forward_failures_unrecovered` and `recovery_unknown` as the messages
+to check in Gmail.

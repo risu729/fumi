@@ -70,6 +70,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `create_draft`, `get_draft`, `list_drafts`, `update_draft` | Owner isolation and revision checks |
 | `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key; Gmail-style reply quote and forward block |
 | `get_send_status` | Submission state plus per-recipient delivery evidence |
+| `get_mail_health` | Bounded catalog counts, plus up to 20 failed forwards with `mail_` IDs, reason codes and retry recovery ([archive health](archive-health.md#failed-forwards-and-retry-recovery)) |
 
 Schemas are generated from Valibot through Standard Schema and Standard JSON
 Schema. Results include structured data and machine-readable error codes.

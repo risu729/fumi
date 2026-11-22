@@ -1,11 +1,26 @@
-import { MailReadError } from "./mail-read.ts";
+import { CURRENT_EXTRACTION_SQL, inboundMessageId, MailReadError } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
+import { FORWARD_FAILURE_CODES, SMTP_ENHANCED_STATUS } from "./receipt-schema.ts";
 
 export interface MailHealthEnvironment {
   MAIL_CATALOG: Pick<D1Database, "prepare">;
 }
 const CATALOG_LIMIT = 1000;
 const IMPORT_LIMIT = 100;
+/** The failed forward list is a short worklist; counts still cover the whole window. */
+const FAILED_FORWARD_LIMIT = 20;
+const EXTERNAL_ID = /^[a-zA-Z0-9-]{1,128}$/;
+const RECEIVED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+// A retained snapshot whose version, forwarding outcome and identity agree with its row.
+const KNOWN_RECEIPT_SQL = `CASE WHEN receipt_snapshot IS NOT NULL AND length(receipt_snapshot)<=65536 AND json_valid(receipt_snapshot)
+        THEN CASE WHEN (
+          (json_extract(receipt_snapshot,'$.schemaVersion')=1 AND forward_status IN ('forwarded','failed'))
+          OR (json_extract(receipt_snapshot,'$.schemaVersion')=3 AND forward_status='failed')
+          OR (json_extract(receipt_snapshot,'$.schemaVersion')=2 AND forward_status='skipped'
+            AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only'))
+          AND json_extract(receipt_snapshot,'$.ingestId')=external_id
+          AND json_extract(receipt_snapshot,'$.archive.status') IN ('stored','failed')
+          AND json_extract(receipt_snapshot,'$.forward.status')=forward_status THEN 1 ELSE 0 END ELSE 0 END`;
 const TABLES = [
   "archive_sources",
   "archive_scan",
@@ -25,10 +40,40 @@ type HealthSection =
       };
       counts: Record<string, number>;
     }
-  | {
-      status: "unknown";
-      reason: "schema_missing" | "query_unavailable" | "invalid_catalog_evidence";
-    };
+  | UnknownSection;
+type UnknownSection = {
+  status: "unknown";
+  reason: "schema_missing" | "query_unavailable" | "invalid_catalog_evidence";
+};
+interface FailedForward {
+  id: string;
+  received_at: string;
+  code: (typeof FORWARD_FAILURE_CODES)[number];
+  smtp_status: string | null;
+  /** Whether a later forwarded ingress row in the window has the same Message-ID header. */
+  recovery: "recovered" | "unrecovered" | "unknown";
+  recovered_by: string | null;
+}
+type ForwardFailureSection =
+  | (Extract<HealthSection, { status: "observed" }> & {
+      failed_forwards: FailedForward[];
+      failed_forwards_truncated: boolean;
+    })
+  | UnknownSection;
+interface ForwardFailureRow {
+  records: number;
+  truncated: number;
+  failures: number;
+  recovered: number;
+  unrecovered: number;
+  recovery_unknown: number;
+  external_id: string | null;
+  received_at: unknown;
+  code: unknown;
+  smtp_status: unknown;
+  keyed: number | null;
+  recovered_by: unknown;
+}
 
 /** Bounded catalog evidence, not a live R2 audit or proof that every email was captured. */
 export async function getMailHealth(
@@ -109,19 +154,119 @@ export async function getMailHealth(
       sample AS (SELECT * FROM observed ORDER BY health_row DESC LIMIT ${CATALOG_LIMIT})`;
     const windowCount =
       "COUNT(*) AS records,(SELECT COUNT(*) FROM observed)>" + CATALOG_LIMIT + " AS truncated";
-    const [catalog, mime, processing, imports, importedItems, scan] = await Promise.all([
+    // One query lists the newest failed forwards and counts recovery over the same window.
+    // A failure is recovered when a later forwarded ingress row in the window carries the
+    // same Message-ID header in a current extraction; without that header it is unknown.
+    const forwardFailures = async (): Promise<ForwardFailureSection> => {
+      if (!schemaAvailable) return { status: "unknown", reason: "query_unavailable" };
+      if (!tables.has("archive_sources") || !tables.has("mail_extractions"))
+        return { status: "unknown", reason: "schema_missing" };
+      let rows: ForwardFailureRow[];
+      try {
+        rows = (
+          await bounded(() =>
+            env.MAIL_CATALOG.prepare(
+              `${catalogWindow}, keyed AS MATERIALIZED (
+              SELECT s.health_row,s.external_id,s.received_at,s.forward_status,s.receipt_snapshot,
+              ${KNOWN_RECEIPT_SQL} AS known_receipt,
+              CASE WHEN ${CURRENT_EXTRACTION_SQL} AND json_valid(e.metadata_json)
+                AND json_type(e.metadata_json,'$.messageId')='text'
+              THEN json_extract(e.metadata_json,'$.messageId') END AS message_key
+              FROM sample s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
+              WHERE s.source_kind='email_routing'),
+            failed AS MATERIALIZED (SELECT f.*,CASE WHEN f.message_key IS NULL THEN NULL ELSE (
+              SELECT r.external_id FROM keyed r WHERE r.message_key=f.message_key AND r.known_receipt=1
+              AND r.forward_status='forwarded' AND r.received_at>f.received_at
+              ORDER BY r.received_at,r.external_id LIMIT 1) END AS recovered_by
+              FROM keyed f WHERE f.known_receipt=1 AND f.forward_status='failed'),
+            totals AS (SELECT (SELECT COUNT(*) FROM sample) AS records,
+              (SELECT COUNT(*) FROM observed)>${CATALOG_LIMIT} AS truncated,COUNT(*) AS failures,
+              COALESCE(SUM(recovered_by IS NOT NULL),0) AS recovered,
+              COALESCE(SUM(message_key IS NOT NULL AND recovered_by IS NULL),0) AS unrecovered,
+              COALESCE(SUM(message_key IS NULL),0) AS recovery_unknown FROM failed),
+            listed AS (SELECT health_row,external_id,received_at,recovered_by,message_key IS NOT NULL AS keyed,
+              json_extract(receipt_snapshot,'$.forward.code') AS code,
+              json_extract(receipt_snapshot,'$.forward.smtpStatus') AS smtp_status FROM failed
+              ORDER BY COALESCE(received_at,'') DESC,health_row DESC LIMIT ${FAILED_FORWARD_LIMIT})
+            SELECT t.*,l.external_id,l.received_at,l.code,l.smtp_status,l.keyed,l.recovered_by
+            FROM totals t LEFT JOIN listed l ORDER BY COALESCE(l.received_at,'') DESC,l.health_row DESC`,
+            ).all<ForwardFailureRow>(),
+          )
+        ).results;
+      } catch {
+        return { status: "unknown", reason: "query_unavailable" };
+      }
+      const invalid = { status: "unknown", reason: "invalid_catalog_evidence" } as const;
+      const totals = rows[0];
+      const fields = [
+        "records",
+        "truncated",
+        "failures",
+        "recovered",
+        "unrecovered",
+        "recovery_unknown",
+      ] as const;
+      if (
+        !totals ||
+        fields.some((field) => !Number.isSafeInteger(totals[field]) || totals[field] < 0) ||
+        totals.records > CATALOG_LIMIT ||
+        totals.truncated > 1 ||
+        totals.recovered + totals.unrecovered + totals.recovery_unknown !== totals.failures
+      )
+        return invalid;
+      const listed = rows.filter((row) => row.external_id !== null);
+      if (listed.length !== Math.min(totals.failures, FAILED_FORWARD_LIMIT)) return invalid;
+      const failedForwards: FailedForward[] = [];
+      for (const row of listed) {
+        const {
+          external_id: id,
+          received_at: at,
+          code,
+          smtp_status: status,
+          recovered_by: by,
+        } = row;
+        if (
+          !EXTERNAL_ID.test(id!) ||
+          typeof at !== "string" ||
+          !RECEIVED_AT.test(at) ||
+          !FORWARD_FAILURE_CODES.includes(code as FailedForward["code"]) ||
+          (status !== null && (typeof status !== "string" || !SMTP_ENHANCED_STATUS.test(status))) ||
+          (by !== null && (typeof by !== "string" || !EXTERNAL_ID.test(by))) ||
+          (row.keyed !== 0 && row.keyed !== 1) ||
+          (row.keyed === 0 && by !== null)
+        )
+          return invalid;
+        failedForwards.push({
+          id: inboundMessageId(id!),
+          received_at: at,
+          code: code as FailedForward["code"],
+          smtp_status: status,
+          recovery: by !== null ? "recovered" : row.keyed ? "unrecovered" : "unknown",
+          recovered_by: by === null ? null : inboundMessageId(by),
+        });
+      }
+      return {
+        status: "observed",
+        window: {
+          records: totals.records,
+          limit: CATALOG_LIMIT,
+          truncated: Boolean(totals.truncated),
+          selection: "latest_inserted_rows",
+        },
+        counts: {
+          receipt_forward_failures: totals.failures,
+          receipt_forward_failures_recovered: totals.recovered,
+          receipt_forward_failures_unrecovered: totals.unrecovered,
+          receipt_forward_failures_recovery_unknown: totals.recovery_unknown,
+        },
+        failed_forwards: failedForwards,
+        failed_forwards_truncated: totals.failures > FAILED_FORWARD_LIMIT,
+      };
+    };
+    const [catalog, mime, processing, imports, importedItems, scan, failures] = await Promise.all([
       section(
         ["archive_sources"],
-        `${catalogWindow}, evidence AS (
-        SELECT *,CASE WHEN receipt_snapshot IS NOT NULL AND length(receipt_snapshot)<=65536 AND json_valid(receipt_snapshot)
-        THEN CASE WHEN (
-          (json_extract(receipt_snapshot,'$.schemaVersion')=1 AND forward_status IN ('forwarded','failed'))
-          OR (json_extract(receipt_snapshot,'$.schemaVersion')=3 AND forward_status='failed')
-          OR (json_extract(receipt_snapshot,'$.schemaVersion')=2 AND forward_status='skipped'
-            AND json_extract(receipt_snapshot,'$.forward.reason')='archive_only'))
-          AND json_extract(receipt_snapshot,'$.ingestId')=external_id
-          AND json_extract(receipt_snapshot,'$.archive.status') IN ('stored','failed')
-          AND json_extract(receipt_snapshot,'$.forward.status')=forward_status THEN 1 ELSE 0 END ELSE 0 END AS known_receipt FROM sample)
+        `${catalogWindow}, evidence AS (SELECT *,${KNOWN_RECEIPT_SQL} AS known_receipt FROM sample)
         SELECT ${windowCount},COALESCE(SUM(raw_state='present'),0) AS stored,
         COALESCE(SUM(raw_state='missing'),0) AS missing,COALESCE(SUM(raw_state NOT IN ('present','missing')),0) AS unknown,
         COALESCE(SUM(known_receipt),0) AS known_ingress_snapshots,
@@ -199,6 +344,7 @@ export async function getMailHealth(
         ["completed_listing_passes", "revision", "listing_in_progress"],
         1,
       ),
+      forwardFailures(),
     ]);
     const sections = {
       catalog,
@@ -207,6 +353,7 @@ export async function getMailHealth(
       gmail_imports: imports,
       gmail_memberships: importedItems,
       archive_scan: scan,
+      forward_failures: failures,
     };
     const partial = Object.values(sections).some(
       (value) => value.status === "unknown" || value.window.truncated,
@@ -223,7 +370,7 @@ export async function getMailHealth(
         mailbox_total: null,
         zero_failures_proves_complete: false,
         sections_are_transactionally_consistent: false,
-        max_queries: 7,
+        max_queries: 8,
         deadline_ms: 5000,
         caveat:
           "Uncataloged objects and events without surviving catalog/receipt evidence are not counted. Counts describe bounded catalog windows, not a complete archive or a live R2 audit. Completed Gmail scopes do not prove whole-mailbox coverage; memberships can overlap.",

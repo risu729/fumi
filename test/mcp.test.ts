@@ -72,6 +72,52 @@ describe("official MCP HTTP transport", () => {
       await client.close();
     }
   });
+  it("lists a failed forward's message ID and reason code through get_mail_health", async () => {
+    const id = "00000000-0000-4000-8000-0000000f0138";
+    const key = `ingest/2026-11-21/${id}/raw.eml`;
+    const receipt = {
+      schemaVersion: 3,
+      ingestId: id,
+      receivedAt: "2026-11-21T00:00:00.000Z",
+      envelope: { from: "other@example.invalid", to: "captured@example.invalid" },
+      reportedRawSize: 1,
+      archive: { status: "stored", key, size: 1, sha256: "a".repeat(64) },
+      forward: { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+    };
+    await env.MAIL_CATALOG.prepare(
+      `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,receipt_snapshot,forward_status,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES ('email_routing','ingress-v1',?,?,?,'2026-11-21T00:00:00.000Z',?,'failed','present','valid',?,0,0)`,
+    )
+      .bind(id, key, `${key}.receipt`, JSON.stringify(receipt), "a".repeat(64))
+      .run();
+    const { client } = await clientFor();
+    try {
+      const health = await client.callTool({ name: "get_mail_health", arguments: {} });
+      expect(health.isError).not.toBe(true);
+      expect(health.structuredContent).toMatchObject({
+        sections: {
+          forward_failures: {
+            status: "observed",
+            failed_forwards: expect.arrayContaining([
+              {
+                id: `mail_${id}`,
+                received_at: "2026-11-21T00:00:00.000Z",
+                code: "rejected_permanent",
+                smtp_status: "5.7.1",
+                recovery: "unknown",
+                recovered_by: null,
+              },
+            ]),
+          },
+        },
+      });
+      expect(JSON.stringify(health.structuredContent)).not.toContain("example.invalid");
+    } finally {
+      await client.close();
+      await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources WHERE external_id=?")
+        .bind(id)
+        .run();
+    }
+  });
   it("rejects unknown arguments and unsupported queries with closed errors", async () => {
     const { client } = await clientFor();
     try {

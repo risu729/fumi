@@ -36,6 +36,10 @@ from Gmail, and Gmail inbox management are out of scope.
       R2/D1 catalog evidence, including known missing originals and explicit unknown
       coverage. This does not recover missing originals or prove that all ingress
       was observed. See [archive health](archive-health.md).
+- [x] Make forward failures identifiable: a bounded reason code in the receipt and
+      log, and a failed-forward list with retry recovery in health
+      ([#138](https://github.com/risu729/fumi/issues/138)). See
+      [forward failure reasons](ingress.md#forward-failure-reasons).
 - [x] Implement a separate D1 archive catalog and bounded R2 evidence reconciler.
       This repairs the
       catalog, not missing original MIME. See [catalog recovery](archive-catalog.md).
