@@ -32,6 +32,9 @@ pending scopes, staged pages, current leases and checkpointed memberships. The
 durable-membership window can include messages saved before a page checkpoint;
 overlapping import scopes can count the same original more than once. Completing
 a configured date range does not prove whole-mailbox completeness.
+Copy grouping (`copy_grouping`) counts indexed, blocked and pending
+[identity rows](copy-grouping.md), Message-ID conflicts, and originals in a group with
+more than one copy, over the same catalog window.
 
 Each catalog, processing and membership section examines at most the latest 1,000
 inserted rows; import scopes examine at most 100. One additional row determines
@@ -41,7 +44,7 @@ be outside the window. Missing optional tables or failed queries make the affect
 section explicitly unknown. A missing scan checkpoint is also unknown. The scan
 counter describes completed R2 listing passes, not upstream email acceptance.
 
-There are at most eight fixed read queries and a shared five-second deadline.
+There are at most nine fixed read queries and a shared five-second deadline.
 An expired query cannot start further queries; a database operation already in
 flight may finish later. Sections are not a single transactional snapshot. Counts
 and truncation apply only to their stated window, even when every reported count

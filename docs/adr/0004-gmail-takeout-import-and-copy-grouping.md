@@ -1,13 +1,14 @@
 # ADR 0004: Gmail backfill from Google Takeout, and grouping copies of one message
 
 Status: accepted by the owner on 2026-11-22 at 20:31 UTC ("yes work on it, you may
-create a r2 bucket and upload the takeout from gdrive"). The Takeout transport is
-implemented ([historical Gmail import](../gmail-import.md#google-takeout-transport));
-no run has been configured, and copy grouping is not implemented. It
-replaces the connector transport as the way to finish the historical Gmail backfill
-in [historical Gmail import](../gmail-import.md) and
-[connector import](../gmail-connector-import.md); both transports stay in the code
-until this import is accepted.
+create a r2 bucket and upload the takeout from gdrive"). Grouping copies of one message
+is implemented ([copies of one message](../copy-grouping.md)), with the agent
+refinements in the 2026-11-22 amendment below. The Takeout transport is implemented
+([historical Gmail import](../gmail-import.md#google-takeout-transport)), and no run
+has been configured. It replaces the connector transport as the way to finish the
+historical Gmail backfill in [historical Gmail import](../gmail-import.md) and
+[connector import](../gmail-connector-import.md); both transports stay in the code until
+this import is accepted.
 
 Date: 2026-11-22
 
@@ -150,3 +151,17 @@ Originals are never merged or deleted; each route keeps its own source and prove
   namespace, with every rejected entry listed with a fixed reason.
 - Grouping: the 276 live/Gmail Message-ID pairs of 2026-11-22 collapse to one result
   each by default and expand to two with `expand_copies`.
+
+## Amendment 2026-11-22: grouping implementation details (agent)
+
+Not confirmed by the owner. While implementing the agent-specified grouping, an
+independent review found two gaps, and the implementation differs from the text above:
+
+- Rule 1 also requires an equal From. Message-ID and `bh=` can be copied from a mail
+  someone has seen, and DKIM is not verified.
+- "The account's own Gmail" is decided as the Gmail copy with the earliest provider
+  receipt time, because forwarding to another account happens after the first account
+  received the mail. A thread read keeps the requested message as its group's
+  representative.
+
+Details are in [copies of one message](../copy-grouping.md).

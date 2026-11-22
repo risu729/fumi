@@ -78,7 +78,8 @@ Use an ingress receipt ID or Gmail account/message ID as source identity, raw
 hashes for byte identity, and a separate logical-message link. Message-ID alone
 is not trustworthy or unique. Gmail copies may differ from ingress bytes because
 forwarding adds headers. Preserve both provenance and the relationship rather
-than assuming equal hashes. Derivatives retain parent IDs, hashes, extraction
+than assuming equal hashes; [copies of one message](copy-grouping.md) links them by
+header identity. Derivatives retain parent IDs, hashes, extraction
 version, page/part locations and success/unsupported/error states.
 
 D1 holds structured metadata and processing status; an outbox remains planned.

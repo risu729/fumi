@@ -35,6 +35,8 @@ interface MailRow {
   body_json_key: string | null;
   body_text_key: string | null;
   extraction_current: 0 | 1;
+  copy_group_id?: string | null;
+  copies?: number;
 }
 interface Attachment {
   index: number;
@@ -51,15 +53,48 @@ interface Attachment {
  */
 export const CURRENT_EXTRACTION_SQL =
   "e.status='complete' AND s.raw_state='present' AND e.raw_sha256=s.raw_sha256";
-const SELECT_MAIL = `SELECT s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_kind,s.source_namespace,
+const MAIL_COLUMNS = `s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_kind,s.source_namespace,
  g.message_id AS gmail_message_id,g.thread_id AS gmail_thread_id,g.internal_date AS gmail_internal_date,
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
  e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
- CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current
- FROM archive_sources s LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
+ CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current`;
+const MAIL_JOINS = `LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
+const SELECT_MAIL = `SELECT ${MAIL_COLUMNS} FROM archive_sources s ${MAIL_JOINS}`;
+/**
+ * Copies of one message (ADR 0004) collapse after filters to one representative per
+ * copy group: live capture first, then Gmail copies by earliest provider receipt time
+ * (the account that received it first, before any forwarding hop), then external ID.
+ * A thread read prefers the message it was asked for. Rows without a complete identity
+ * row for their current original, or whose row is newer than the snapshot, stand alone.
+ * `copies` counts the originals of the group that matched the same filters.
+ */
+function collapsedSql(
+  where: string,
+  order: string,
+  expand: boolean,
+  options: { after?: string; preferRawKey?: boolean } = {},
+) {
+  const { after = "", preferRawKey = false } = options;
+  return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
+   CASE WHEN i.rowid<=? AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
+ ranked AS (SELECT source_row,copy_group_id,
+   ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
+     ORDER BY ${preferRawKey ? "CASE WHEN raw_key=? THEN 0 ELSE 1 END," : ""}CASE source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
+   COUNT(*) OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)) AS copies FROM matched)
+ SELECT ${MAIL_COLUMNS},r.copy_group_id,r.copies FROM ranked r JOIN archive_sources s ON s.rowid=r.source_row ${MAIL_JOINS}
+ WHERE ${expand ? "1" : "r.copy_rank=1"}${after ? ` AND ${after}` : ""} ORDER BY ${order} LIMIT ?`;
+}
+const NEWEST_FIRST = "COALESCE(s.received_at,'') DESC,s.external_id DESC";
+/** Identity rows at or below this rowid group; the snapshot keeps pages consistent. */
+async function identitySnapshot(env: MailReadEnvironment) {
+  return (await env.MAIL_CATALOG.prepare(
+    "SELECT COALESCE(MAX(rowid),0) AS maximum FROM mail_identity",
+  ).first<{ maximum: number }>())!.maximum;
+}
 const LIMIT = 16_000;
 function bodyPreview(value: string | null): string | null {
   if (value === null) return null;
@@ -130,7 +165,14 @@ function summary(row: MailRow) {
     size_estimate: row.raw_size,
     extraction: { status: row.status ?? "pending", failure_code: row.failure_code },
     metadata: metadata(row),
+    ...copyFields(row),
   };
+}
+/** Present only on collapsed reads: the copy group and how many originals it has. */
+function copyFields(row: MailRow): { group_id?: string | null; copies?: number } {
+  return row.copies === undefined
+    ? {}
+    : { group_id: row.copy_group_id ?? null, copies: row.copies };
 }
 export async function readMail(
   env: MailReadEnvironment,
@@ -401,9 +443,12 @@ export interface SearchArgs {
   max_results?: number | undefined;
   next_page_token?: string | undefined;
   label_ids?: string[] | null | undefined;
+  expand_copies?: boolean | undefined;
 }
 interface Cursor {
   snapshot: number;
+  /** mail_identity rowid snapshot; copy groups are fixed for the whole traversal. */
+  groups: number;
   beforeTime: string;
   beforeId: string;
   query: string;
@@ -421,6 +466,8 @@ function decodeCursor(value: string): Cursor {
     if (
       !Number.isSafeInteger(cursor.snapshot) ||
       cursor.snapshot < 0 ||
+      !Number.isSafeInteger(cursor.groups) ||
+      cursor.groups < 0 ||
       typeof cursor.beforeTime !== "string" ||
       typeof cursor.beforeId !== "string" ||
       typeof cursor.query !== "string"
@@ -436,7 +483,7 @@ const D1_BOUND_PARAMETERS = 100;
 /**
  * The most parameters a caller binds besides the parsed filters. search_mail_semantic binds
  * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
- * and two per label for up to ten labels (33). search_emails binds at most 26 (snapshot,
+ * and two per label for up to ten labels (33). search_emails binds at most 27 (two snapshots,
  * archive source, 20 for labels, three for the cursor, limit) and search_mail_content 3.
  */
 const CALLER_BOUND_PARAMETERS = 33;
@@ -512,15 +559,17 @@ export async function searchMail(
   const limit = args.max_results ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
   const cursor = args.next_page_token ? decodeCursor(args.next_page_token) : null;
-  const binding = JSON.stringify([query, source, labels]);
+  const expand = args.expand_copies ?? false;
+  const binding = JSON.stringify([query, source, labels, expand]);
   if (cursor && cursor.query !== binding) throw new MailReadError("page_query_mismatch");
   const maximum =
     cursor?.snapshot ??
     (await env.MAIL_CATALOG.prepare(
       "SELECT COALESCE(MAX(rowid),0) AS maximum FROM archive_sources",
     ).first<{ maximum: number }>())!.maximum;
+  const groups = cursor?.groups ?? (await identitySnapshot(env));
   const clauses = ["s.rowid<=?", ...parsed.clauses];
-  const values: (string | number)[] = [maximum, ...parsed.values];
+  const values: (string | number)[] = [groups, maximum, ...parsed.values];
   if (source !== "all") {
     clauses.push("s.source_kind=?");
     values.push(source);
@@ -531,15 +580,14 @@ export async function searchMail(
     );
     values.push(label, label);
   }
-  if (cursor) {
-    clauses.push(
-      "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND s.external_id < ?))",
-    );
-    values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
-  }
+  // The cursor follows representatives, so it applies after the copies collapse.
+  const after = cursor
+    ? "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND s.external_id < ?))"
+    : "";
+  if (cursor) values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
   const rows = (
     await env.MAIL_CATALOG.prepare(
-      `${SELECT_MAIL} WHERE ${clauses.join(" AND ")} ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`,
+      collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, { after }),
     )
       .bind(...values, limit + 1)
       .all<MailRow>()
@@ -553,6 +601,7 @@ export async function searchMail(
       more && last
         ? encodeCursor({
             snapshot: maximum,
+            groups,
             beforeTime: last.received_at ?? "",
             beforeId: last.external_id,
             query: binding,
@@ -564,6 +613,7 @@ export async function searchMail(
       label_ids: labels,
       searches: "extracted_metadata_only",
       incomplete_extractions_visible: true,
+      copies: expand ? "every_original" : "one_representative_per_copy_group",
     },
     supported_query_operators: [
       "from:",
@@ -583,6 +633,7 @@ export async function readMailThread(
     message_id?: string | null | undefined;
     thread_id?: string | null | undefined;
     max_messages?: number | undefined;
+    expand_copies?: boolean | undefined;
   },
   base: string,
 ) {
@@ -595,36 +646,61 @@ export async function readMailThread(
   const reply = meta?.["inReplyTo"];
   const limit = args.max_messages ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
+  const expand = args.expand_copies ?? false;
+  const groups = await identitySnapshot(env);
   // Header links are untrusted conversation hints; they never grant access or prove identity.
   const rows =
     row.source_kind === "gmail"
       ? (
-          await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.source_kind='gmail' AND
-      ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)
-      ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`)
-            .bind(row.source_namespace, row.gmail_thread_id, row.external_id, limit + 1)
+          await env.MAIL_CATALOG.prepare(
+            collapsedSql(
+              "s.source_kind='gmail' AND ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)",
+              NEWEST_FIRST,
+              expand,
+              { preferRawKey: true },
+            ),
+          )
+            .bind(
+              groups,
+              row.source_namespace,
+              row.gmail_thread_id,
+              row.external_id,
+              row.raw_key,
+              limit + 1,
+            )
             .all<MailRow>()
         ).results
       : (
-          await env.MAIL_CATALOG.prepare(`${SELECT_MAIL} WHERE s.source_kind='email_routing' AND (s.external_id=? OR
+          await env.MAIL_CATALOG.prepare(
+            collapsedSql(
+              `s.source_kind='email_routing' AND (s.external_id=? OR
     (? IS NOT NULL AND (json_extract(e.metadata_json,'$.messageId')=? OR json_extract(e.metadata_json,'$.inReplyTo')=?)) OR
-    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))
-    ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`)
+    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))`,
+              NEWEST_FIRST,
+              expand,
+              { preferRawKey: true },
+            ),
+          )
             .bind(
+              groups,
               row.external_id,
               messageId ?? null,
               messageId ?? null,
               messageId ?? null,
               reply ?? null,
               reply ?? null,
+              row.raw_key,
               limit + 1,
             )
             .all<MailRow>()
         ).results;
   const messages = [];
   for (const item of rows.slice(0, limit).reverse()) {
-    // oxlint-disable-next-line no-await-in-loop -- Parse at most one bounded body at a time; retain only truncated results.
-    messages.push(await readMail(env, principal, inboundMessageId(item.external_id), "full", base));
+    messages.push({
+      // oxlint-disable-next-line no-await-in-loop -- Parse at most one bounded body at a time; retain only truncated results.
+      ...(await readMail(env, principal, inboundMessageId(item.external_id), "full", base)),
+      ...copyFields(item),
+    });
   }
   return {
     thread_id: inboundMessageId(row.gmail_thread_anchor ?? row.external_id),
@@ -636,5 +712,6 @@ export async function readMailThread(
           ? "gmail_account_thread_id"
           : "gmail_provenance_unavailable"
         : "direct_message_id_header_links_only",
+    copies: expand ? "every_original" : "one_representative_per_copy_group",
   };
 }

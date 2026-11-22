@@ -15,6 +15,7 @@ import { repairRoutingDispatch } from "./routing-dispatch.ts";
 import { routingRuntime } from "./routing-runtime.ts";
 import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
 import { ensureTakeoutWorkflow } from "./gmail-takeout-import.ts";
+import { repairMailIdentity } from "./mail-identity.ts";
 import { classifyForwardError, type ForwardErrorReason } from "./forward-failure.ts";
 
 export { MailProcessing } from "./mail-processing.ts";
@@ -202,6 +203,13 @@ export default {
       console.log(JSON.stringify({ event: "processing_repair", ...processing }));
     } catch {
       console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
+      failed = true;
+    }
+    try {
+      const identity = await repairMailIdentity(env);
+      console.log(JSON.stringify({ event: "mail_identity", ...identity }));
+    } catch {
+      console.error(JSON.stringify({ event: "mail_identity", status: "deferred" }));
       failed = true;
     }
     try {

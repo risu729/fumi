@@ -28,6 +28,7 @@ const TABLES = [
   "mail_extractions",
   "gmail_imports",
   "gmail_import_items",
+  "mail_identity",
 ] as const;
 type HealthSection =
   | {
@@ -100,7 +101,7 @@ export async function getMailHealth(
     try {
       const found = await bounded(() =>
         env.MAIL_CATALOG.prepare(
-          `SELECT name FROM sqlite_master WHERE type='table' AND name IN (${TABLES.map(() => "?").join(",")}) LIMIT 6`,
+          `SELECT name FROM sqlite_master WHERE type='table' AND name IN (${TABLES.map(() => "?").join(",")}) LIMIT ${TABLES.length}`,
         )
           .bind(...TABLES)
           .all<{ name: string }>(),
@@ -272,10 +273,11 @@ export async function getMailHealth(
         failed_forwards_truncated: totals.failures > FAILED_FORWARD_LIMIT,
       };
     };
-    const [catalog, mime, processing, imports, importedItems, scan, failures] = await Promise.all([
-      section(
-        ["archive_sources"],
-        `${catalogWindow}, evidence AS (SELECT *,${KNOWN_RECEIPT_SQL} AS known_receipt FROM sample)
+    const [catalog, mime, processing, imports, importedItems, scan, failures, copies] =
+      await Promise.all([
+        section(
+          ["archive_sources"],
+          `${catalogWindow}, evidence AS (SELECT *,${KNOWN_RECEIPT_SQL} AS known_receipt FROM sample)
         SELECT ${windowCount},COALESCE(SUM(raw_state='present'),0) AS stored,
         COALESCE(SUM(raw_state='missing'),0) AS missing,COALESCE(SUM(raw_state NOT IN ('present','missing')),0) AS unknown,
         COALESCE(SUM(known_receipt),0) AS known_ingress_snapshots,
@@ -286,23 +288,23 @@ export async function getMailHealth(
         COALESCE(SUM(receipt_state='missing'),0) AS current_receipt_missing,
         COALESCE(SUM(receipt_state='invalid'),0) AS current_receipt_invalid,
         COALESCE(SUM(source_kind='gmail'),0) AS gmail_sources FROM evidence`,
-        [
-          "stored",
-          "missing",
-          "unknown",
-          "known_ingress_snapshots",
-          "receipt_archive_failures",
-          "receipt_forward_failures",
-          "receipt_forward_skipped",
-          "ingress_snapshot_unknown",
-          "current_receipt_missing",
-          "current_receipt_invalid",
-          "gmail_sources",
-        ],
-      ),
-      section(
-        ["archive_sources", "mail_extractions"],
-        `${catalogWindow}, coverage AS (
+          [
+            "stored",
+            "missing",
+            "unknown",
+            "known_ingress_snapshots",
+            "receipt_archive_failures",
+            "receipt_forward_failures",
+            "receipt_forward_skipped",
+            "ingress_snapshot_unknown",
+            "current_receipt_missing",
+            "current_receipt_invalid",
+            "gmail_sources",
+          ],
+        ),
+        section(
+          ["archive_sources", "mail_extractions"],
+          `${catalogWindow}, coverage AS (
         SELECT s.raw_state,s.raw_sha256,e.raw_sha256 AS extracted_sha,e.status FROM sample s LEFT JOIN mail_extractions e
         ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1')
         SELECT ${windowCount},COALESCE(SUM(status='complete' AND raw_state='present' AND extracted_sha=raw_sha256),0) AS current_complete,
@@ -310,51 +312,62 @@ export async function getMailHealth(
         COALESCE(SUM(status IS NULL AND raw_state='present'),0) AS pending,
         COUNT(*)-COALESCE(SUM(CASE WHEN status='blocked' OR (status IS NULL AND raw_state='present')
           OR (status='complete' AND raw_state='present' AND extracted_sha=raw_sha256) THEN 1 ELSE 0 END),0) AS unknown FROM coverage`,
-        ["current_complete", "blocked", "pending", "unknown"],
-      ),
-      section(
-        ["processing_jobs"],
-        `WITH observed AS (SELECT rowid AS health_row,state FROM processing_jobs ORDER BY rowid DESC LIMIT ${CATALOG_LIMIT + 1}),
+          ["current_complete", "blocked", "pending", "unknown"],
+        ),
+        section(
+          ["processing_jobs"],
+          `WITH observed AS (SELECT rowid AS health_row,state FROM processing_jobs ORDER BY rowid DESC LIMIT ${CATALOG_LIMIT + 1}),
         sample AS (SELECT * FROM observed ORDER BY health_row DESC LIMIT ${CATALOG_LIMIT}) SELECT ${windowCount},
         COALESCE(SUM(state='pending'),0) AS pending,COALESCE(SUM(state='running'),0) AS running,
         COALESCE(SUM(state='complete'),0) AS complete,COALESCE(SUM(state='failed'),0) AS failed FROM sample`,
-        ["pending", "running", "complete", "failed"],
-      ),
-      section(
-        ["gmail_imports"],
-        `WITH observed AS (SELECT rowid AS health_row,complete,imported_count,pending_json,lease_until FROM gmail_imports ORDER BY rowid DESC LIMIT ${IMPORT_LIMIT + 1}),
+          ["pending", "running", "complete", "failed"],
+        ),
+        section(
+          ["gmail_imports"],
+          `WITH observed AS (SELECT rowid AS health_row,complete,imported_count,pending_json,lease_until FROM gmail_imports ORDER BY rowid DESC LIMIT ${IMPORT_LIMIT + 1}),
         sample AS (SELECT * FROM observed ORDER BY health_row DESC LIMIT ${IMPORT_LIMIT}) SELECT COUNT(*) AS records,(SELECT COUNT(*) FROM observed)>${IMPORT_LIMIT} AS truncated,
         COALESCE(SUM(complete=1),0) AS completed_scopes,COALESCE(SUM(complete=0),0) AS pending_scopes,
         COALESCE(SUM(imported_count),0) AS checkpointed_memberships,COALESCE(SUM(pending_json IS NOT NULL),0) AS staged_pages,
         COALESCE(SUM(lease_until>?),0) AS active_leases FROM sample`,
-        [
-          "completed_scopes",
-          "pending_scopes",
-          "checkpointed_memberships",
-          "staged_pages",
-          "active_leases",
-        ],
-        IMPORT_LIMIT,
-        [now],
-      ),
-      section(
-        ["gmail_import_items", "archive_sources"],
-        `WITH observed AS (SELECT rowid AS health_row,raw_key FROM gmail_import_items ORDER BY rowid DESC LIMIT ${CATALOG_LIMIT + 1}),
+          [
+            "completed_scopes",
+            "pending_scopes",
+            "checkpointed_memberships",
+            "staged_pages",
+            "active_leases",
+          ],
+          IMPORT_LIMIT,
+          [now],
+        ),
+        section(
+          ["gmail_import_items", "archive_sources"],
+          `WITH observed AS (SELECT rowid AS health_row,raw_key FROM gmail_import_items ORDER BY rowid DESC LIMIT ${CATALOG_LIMIT + 1}),
         sample AS (SELECT * FROM observed ORDER BY health_row DESC LIMIT ${CATALOG_LIMIT}) SELECT ${windowCount},COUNT(*) AS recorded_memberships,
         COALESCE(SUM(s.raw_state='present'),0) AS catalog_original_present,
         COUNT(*)-COALESCE(SUM(s.raw_state='present'),0) AS original_missing_or_unknown
         FROM sample i LEFT JOIN archive_sources s ON s.raw_key=i.raw_key`,
-        ["recorded_memberships", "catalog_original_present", "original_missing_or_unknown"],
-      ),
-      section(
-        ["archive_scan"],
-        `SELECT COUNT(*) AS records,0 AS truncated,COALESCE(MAX(pass),0) AS completed_listing_passes,
+          ["recorded_memberships", "catalog_original_present", "original_missing_or_unknown"],
+        ),
+        section(
+          ["archive_scan"],
+          `SELECT COUNT(*) AS records,0 AS truncated,COALESCE(MAX(pass),0) AS completed_listing_passes,
         COALESCE(MAX(revision),0) AS revision,COALESCE(MAX(cursor IS NOT NULL),0) AS listing_in_progress FROM archive_scan WHERE id=1 HAVING COUNT(*)=1`,
-        ["completed_listing_passes", "revision", "listing_in_progress"],
-        1,
-      ),
-      forwardFailures(),
-    ]);
+          ["completed_listing_passes", "revision", "listing_in_progress"],
+          1,
+        ),
+        forwardFailures(),
+        section(
+          ["archive_sources", "mail_identity"],
+          `${catalogWindow}, identity AS (SELECT s.raw_state,i.status,i.group_id,i.message_id_conflict FROM sample s
+        LEFT JOIN mail_identity i ON i.raw_key=s.raw_key)
+        SELECT ${windowCount},COALESCE(SUM(status='complete'),0) AS indexed,COALESCE(SUM(status='blocked'),0) AS blocked,
+        COALESCE(SUM(status IS NULL AND raw_state='present'),0) AS pending,
+        COALESCE(SUM(message_id_conflict=1),0) AS message_id_conflicts,
+        COALESCE(SUM(status='complete' AND (SELECT COUNT(*) FROM mail_identity m WHERE m.group_id=identity.group_id)>1),0) AS in_multi_copy_groups
+        FROM identity`,
+          ["indexed", "blocked", "pending", "message_id_conflicts", "in_multi_copy_groups"],
+        ),
+      ]);
     const sections = {
       catalog,
       mime,
@@ -363,6 +376,7 @@ export async function getMailHealth(
       gmail_memberships: importedItems,
       archive_scan: scan,
       forward_failures: failures,
+      copy_grouping: copies,
     };
     const partial = Object.values(sections).some(
       (value) => value.status === "unknown" || value.window.truncated,
@@ -379,7 +393,7 @@ export async function getMailHealth(
         mailbox_total: null,
         zero_failures_proves_complete: false,
         sections_are_transactionally_consistent: false,
-        max_queries: 8,
+        max_queries: 9,
         deadline_ms: 5000,
         caveat:
           "Uncataloged objects and events without surviving catalog/receipt evidence are not counted. Counts describe bounded catalog windows, not a complete archive or a live R2 audit. Completed Gmail scopes do not prove whole-mailbox coverage; memberships can overlap.",
