@@ -37,7 +37,7 @@ else unclassified:
 | `550 5.7.1 ...` or `550-5.7.1 ...` anywhere | `rejected_permanent` | `5.7.1` |
 | `421 4.7.0 ...` | `rejected_temporary` | `4.7.0` |
 | Starts with `552 ...`, no enhanced status | `rejected_permanent` | none |
-| Only `... 4.2.2 ...` | `rejected_temporary` | `4.2.2` |
+| Only `... 4.2.2 ...`, no reply code (see note) | `rejected_temporary` | `4.2.2` |
 | A `TimeoutError`, or `timeout` / `timed out` with no SMTP code | `timeout` | none |
 | Anything else | `forward_failed` | none |
 
@@ -45,9 +45,16 @@ A reply code counts only when it starts the text or is followed by an enhanced s
 the same class, so `Error 500 - internal` or `user550@...` stays unclassified. An
 enhanced status must stand alone: digits or a dot next to it (a version number or IPv4
 address) do not match. Only the `4` and `5` classes count: a `2.x.x` status cannot
-explain a failure and has the shape of a version number, so it stays an unclassified v1
-`forward_failed` (review fix, 2026-11-22 08:05 UTC). The destination check keeps its own
-`invalid_target` code, which also covers the forwarding-loop guard.
+explain a failure and has the shape of a version number, so the classifier ignores it
+and never records it as `smtpStatus` (review fix, 2026-11-22 08:05 UTC). The rest of the
+text is still classified: `runtime 2.1.3 timed out` gives `timeout`, and
+`550 build 2.1.3: 5.7.1` gives `rejected_permanent` with `5.7.1`. The destination check
+keeps its own `invalid_target` code, which also covers the forwarding-loop guard.
+
+Note on the bare-status row, a known limitation pending an owner decision (2026-11-22
+08:20 UTC): a `4.x.x` or `5.x.x` status with no reply code still classifies. For
+example, `runtime 4.1.3 failed` gives `rejected_temporary` with `smtpStatus` `4.1.3` and
+writes a v3 receipt, although the number may be a version rather than an SMTP status.
 
 The receipt keeps the oldest version that can hold the outcome. Success,
 `invalid_target` and an unclassified `forward_failed` stay unchanged v1 receipts.
