@@ -22,8 +22,10 @@ interface SearchInput {
   filters?: string | undefined;
   archive_source?: "all" | "gmail" | "email_routing" | undefined;
   label_ids?: string[] | null | undefined;
+  expand_copies?: boolean | undefined;
 }
 interface Candidate {
+  group_id: string | null;
   external_id: string;
   text_key: string;
   text_sha256: string;
@@ -115,8 +117,11 @@ export async function searchManagedMail(
   }
   const matches = [];
   let omitted = 0,
-    verifiedSources = 0;
+    verifiedSources = 0,
+    duplicateCopies = 0;
   const seen = new Set<string>();
+  // Copies of one message hold the same text: show it once per copy group (ADR 0004).
+  const shownCopies = new Set<string>();
   for (const value of chunks) {
     const chunk = record(value),
       item = record(chunk["item"]);
@@ -138,9 +143,10 @@ export async function searchManagedMail(
     seen.add(item["key"]);
     const row =
       await env.MAIL_CATALOG.prepare(`SELECT s.external_id,d.text_key,d.text_sha256,d.raw_sha256,d.manifest_key,d.raw_key,
-      d.part,d.original_sha256,d.representation,d.conversion_policy
+      d.part,d.original_sha256,d.representation,d.conversion_policy,i.group_id
       FROM managed_mail_documents d JOIN mail_extractions e ON e.raw_key=d.raw_key JOIN archive_sources s ON s.raw_key=d.raw_key
-      LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key WHERE ${clauses.join(" AND ")}`)
+      LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key
+      LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND i.status='complete' WHERE ${clauses.join(" AND ")}`)
         .bind(item["key"], runtime.policy, ...filters)
         .first<Candidate>();
     if (!row) {
@@ -186,9 +192,18 @@ export async function searchManagedMail(
       omitted++;
       continue;
     }
+    const copyKey = JSON.stringify([row.group_id, row.part, row.text_sha256]);
+    if (!args.expand_copies && row.group_id !== null) {
+      if (shownCopies.has(copyKey)) {
+        duplicateCopies++;
+        continue;
+      }
+      shownCopies.add(copyKey);
+    }
     const messageId = `mail_${row.external_id}`;
     matches.push({
       message_id: messageId,
+      group_id: row.group_id,
       excerpt: JSON.parse(JSON.stringify(truncateCodeUnits(chunk["text"], 800))) as string,
       score: chunk["score"],
       citation: {
@@ -229,6 +244,7 @@ export async function searchManagedMail(
       attachment_byte_limit: 256 * 1024,
       documents: coverage,
       omitted_candidates: omitted,
+      duplicate_copies_omitted: duplicateCopies,
       ranked_candidates: chunks.length,
       verified_sources: verifiedSources,
       candidate_limit: Math.min(30, limit * 3),

@@ -72,7 +72,9 @@ establish production delivery.
       [historical Gmail import](gmail-import.md).
 - [ ] Complete and independently verify the historical scope from Google Takeout
       per account, and group copies of one message across accounts and live capture
-      ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). The connector
+      ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Grouping is
+      implemented ([copies of one message](copy-grouping.md)); its production check of
+      the 276 live/Gmail pairs is pending. The connector
       transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
       before it stopped on 2026-11-12. No Gmail writes are supported.
 - [ ] On hold (owner, 2026-11-17 17:44 UTC): keep importing Gmail SENT mail after the

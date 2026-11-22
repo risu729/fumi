@@ -65,7 +65,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await env.MAIL_CATALOG.exec(
-    "DELETE FROM mail_extractions; DELETE FROM archive_sources; DELETE FROM processing_jobs;",
+    "DELETE FROM mail_identity; DELETE FROM mail_extractions; DELETE FROM archive_sources; DELETE FROM processing_jobs;",
   );
 });
 
@@ -79,6 +79,47 @@ async function completedJob(rawKey: string, instanceId: string) {
     .run();
 }
 describe("bounded content retrieval", () => {
+  it("shows a chunk once per copy group within a page unless copies are expanded", async () => {
+    const rows = [
+      await insert("copy-live", "duplicated copy needle"),
+      await insert("copy-gmail", "duplicated copy needle"),
+      await insert("copy-alone", "duplicated copy needle"),
+    ];
+    for (const row of rows)
+      // oxlint-disable-next-line no-await-in-loop -- Index entries in order; results list newest first.
+      expect(await indexMailContent(env, row)).toBe(true);
+    // Synthetic identity rows: the first two originals are copies of one message.
+    for (const [row, group] of [
+      [rows[0]!, "a".repeat(64)],
+      [rows[1]!, "a".repeat(64)],
+      [rows[2]!, "b".repeat(64)],
+    ] as const)
+      // oxlint-disable-next-line no-await-in-loop -- Ordered synthetic rows.
+      await env.MAIL_CATALOG.prepare(
+        `INSERT INTO mail_identity(raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at)
+        VALUES(?,'identity-v1',?,'complete',?,'message_id_dkim','2026-11-11T00:00:00.000Z')`,
+      )
+        .bind(row.raw_key, "a".repeat(64), group)
+        .run();
+    const collapsed = await searchMailContent(env, reader, { query: "copy needle" }, base);
+    expect(collapsed.matches.map((match) => [match.message_id, match.group_id])).toEqual([
+      ["mail_copy-alone", "b".repeat(64)],
+      ["mail_copy-gmail", "a".repeat(64)],
+    ]);
+    expect(collapsed.coverage).toMatchObject({ duplicate_copies_omitted: 1 });
+    const expanded = await searchMailContent(
+      env,
+      reader,
+      { query: "copy needle", expand_copies: true },
+      base,
+    );
+    expect(expanded.matches.map((match) => match.message_id)).toEqual([
+      "mail_copy-alone",
+      "mail_copy-gmail",
+      "mail_copy-live",
+    ]);
+    expect(expanded.coverage).toMatchObject({ duplicate_copies_omitted: 0 });
+  });
   it("fences an immediate projection against an attempt change during R2 reads and missing originals", async () => {
     const source = await insert("workflow-fenced", "immediate fenced needle");
     await completedJob(source.raw_key, "synthetic-old-instance");

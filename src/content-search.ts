@@ -324,6 +324,7 @@ interface SearchInput {
   filters?: string | undefined;
   max_results?: number | undefined;
   next_page_token?: string | undefined;
+  expand_copies?: boolean | undefined;
 }
 function excerpt(text: string, query: string, fallback: string) {
   const at = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text)?.index ?? -1;
@@ -369,11 +370,12 @@ export async function searchMailContent(
   }
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,c.original_sha256,c.representation,c.source_part,
-    snippet(mail_search_fts,0,'','','…',48) AS excerpt,d.coverage_json
+    snippet(mail_search_fts,0,'','','…',48) AS excerpt,d.coverage_json,i.group_id
     FROM mail_search_fts JOIN mail_search_chunks c ON c.id=mail_search_fts.rowid
     JOIN mail_search_documents d ON d.raw_key=c.raw_key AND d.status='ready'
     JOIN archive_sources s ON s.raw_key=c.raw_key
     JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=d.manifest_key
+    LEFT JOIN mail_identity i ON i.raw_key=c.raw_key AND i.status='complete'
     WHERE mail_search_fts MATCH ? AND c.id<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
     ORDER BY c.id DESC LIMIT ?`)
       .bind(`"${query.replaceAll('"', '""')}"`, before, ...parsed.values, limit + 1)
@@ -389,18 +391,30 @@ export async function searchMailContent(
         text: string;
         excerpt: string;
         coverage_json: string;
+        group_id: string | null;
       }>()
   ).results;
   const page = rows.slice(0, limit);
   const last = page.at(-1);
+  // Copies of one message index the same chunks. Within this page only, keep the first
+  // match of each chunk per copy group (ADR 0004); later pages are not deduplicated.
+  const seen = new Set<string>();
+  const shown = page.filter((row) => {
+    if (input.expand_copies || row.group_id === null) return true;
+    const key = JSON.stringify([row.group_id, row.part, row.ordinal, row.sha256]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const coverage = await env.MAIL_CATALOG.prepare(`SELECT
     COUNT(*) AS extracted_messages,
     SUM(CASE WHEN d.status='ready' AND d.manifest_key=e.manifest_key THEN 1 ELSE 0 END) AS indexed_messages
     FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
     LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key WHERE ${CURRENT_EXTRACTION_SQL}`).first();
   return {
-    matches: page.map((row) => ({
+    matches: shown.map((row) => ({
       message_id: `mail_${row.external_id}`,
+      group_id: row.group_id,
       excerpt: excerpt(row.text, query, row.excerpt),
       citation: {
         part: row.part,
@@ -433,6 +447,7 @@ export async function searchMailContent(
       searches: "bounded_plain_text_utf8_attachments_and_completed_derivatives",
       pending_and_unsupported_content_excluded: true,
       semantic_search: false,
+      duplicate_copies_omitted: page.length - shown.length,
     },
   };
 }

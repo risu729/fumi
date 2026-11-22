@@ -1,7 +1,9 @@
 # ADR 0004: Gmail backfill from Google Takeout, and grouping copies of one message
 
 Status: accepted by the owner on 2026-11-22 at 20:31 UTC ("yes work on it, you may
-create a r2 bucket and upload the takeout from gdrive"). Not implemented. It
+create a r2 bucket and upload the takeout from gdrive"). Grouping copies of one message
+is implemented ([copies of one message](../copy-grouping.md)); the Takeout import is not
+implemented. It
 replaces the connector transport as the way to finish the historical Gmail backfill
 in [historical Gmail import](../gmail-import.md) and
 [connector import](../gmail-connector-import.md); both transports stay in the code
