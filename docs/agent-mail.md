@@ -31,10 +31,12 @@ Server secrets:
 Principal IDs are `user:<verified sub>` or `service:<verified common_name>`.
 An unlisted principal has no access. Grants contain `scopes`, `fromAddresses`
 and optional `fromDomains`; every field is validated. The scopes are
-`mail:read`, `mail:draft`, `mail:send`, `mail:events` and `mail:import`.
-The last scope grants only server-configured historical import operations; it
-does not authorize a caller to select credentials or import scope. See
-[historical Gmail import](gmail-import.md). A domain grant permits
+`mail:read`, `mail:draft`, `mail:send`, `mail:events`, `mail:import` and
+`mail:routing`. `mail:import` grants only server-configured historical import
+operations; it does not authorize a caller to select credentials or import scope.
+See [historical Gmail import](gmail-import.md). `mail:routing` is the operator
+scope for the `/api/admin/routing/*` routes and the routing rule tools below; it
+grants no mail read or send. A domain grant permits
 any local part at that exact domain, without permitting its subdomains or
 unrelated addresses. The provider must also have verified the sending domain.
 
@@ -70,6 +72,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | `create_draft`, `get_draft`, `list_drafts`, `update_draft` | Owner isolation and revision checks |
 | `send_email`, `send_draft`, `forward_emails` | Explicit content and stable idempotency key; Gmail-style reply quote and forward block |
 | `get_send_status` | Submission state plus per-recipient delivery evidence |
+| `list_routing_rules`, `routing_rule_usage`, `explain_routing` | `mail:routing` only: private rules, bounded per-rule usage and one message's routing evidence ([routing shadow](routing-shadow.md#reading-rules-and-their-usage-over-mcp)) |
 
 Schemas are generated from Valibot through Standard Schema and Standard JSON
 Schema. Results include structured data and machine-readable error codes.
