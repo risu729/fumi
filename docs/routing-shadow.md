@@ -285,9 +285,9 @@ them is reported as unreadable rather than passed through.
 ## Changing candidate rules over MCP
 
 Status: implements [#145](https://github.com/risu729/fumi/issues/145) item 2 on
-2026-11-22 08:05 UTC, with synthetic workerd tests. The tool names, the reuse of
-`mail:routing`, the revision record layout and the output schemas are proposed and
-await the owner's approval.
+2026-11-22 08:05 UTC, with synthetic workerd tests. The tool names, the
+`mail:routing:write` scope, the revision record layout and the output schemas are
+proposed and await the owner's approval.
 
 | Tool | Change |
 | --- | --- |
@@ -303,20 +303,31 @@ Activation stays the administrator's separate steps: write the reviewed configur
 into the dispatch artifact, then `POST /api/admin/routing/activate`. Every result has
 `activated: false`. Adoptions, owner manifests and `fallback` are never changed.
 
-Authorization. The tools need `mail:routing`, the scope that already authorizes the
-`/api/admin/routing/*` writes, including activation, drain, receipts and context.
-They are hidden from and refused for any other principal. Tool inputs come only from
-the authenticated caller; no mail-processing, classifier or scheduled path calls them.
-The tool descriptions require the owner's explicit instruction and forbid changes
-derived from mail content, retrieved documents or model output, and the tools are
-annotated as destructive so a client can ask for confirmation. A server cannot tell
+Authorization. The tools need both `mail:routing` and `mail:routing:write`. The write
+scope adds to the read scope rather than implying it, because a writer must list the
+candidate to get the SHA-256 it passes; `mail:routing:write` alone grants nothing, and a
+`mail:routing` principal without it can read rules but not change them. The tools are
+hidden from and refused for any principal without both. The HTTP `/api/admin/routing/*`
+routes are unchanged: activation, drain, receipts and context still need only
+`mail:routing`, so `mail:routing:write` does not stand between a candidate and
+activation; it keeps MCP rule changes away from read-only operators. Tool inputs come
+only from the authenticated caller; no mail-processing, classifier or scheduled path
+calls them. The tool descriptions require the owner's explicit instruction and forbid
+changes derived from mail content, retrieved documents or model output, and the tools
+are annotated as destructive so a client can ask for confirmation. A server cannot tell
 whether a model in the owner's own MCP client chose the arguments; that remains the
-client's confirmation step. The risk is therefore an injected instruction in mail or
-a document that a model reads in the same session as a `mail:routing` grant: a
+client's confirmation step. The risk is therefore an injected instruction in mail or a
+document that a model reads in the same session as a `mail:routing:write` grant: a
 changed candidate does not route mail, but it changes shadow decisions, usage and the
 configuration an administrator may later copy into the dispatch artifact. Hold
-`mail:routing` in a principal whose client does not also read mail, and review the
-candidate diff before activation.
+`mail:routing:write` in a principal whose client does not also read mail, give read-only
+operators `mail:routing` alone, and review the candidate diff before activation.
+
+Deploy order. `resolveGrant` validates the whole `MAIL_GRANTS` secret against the
+scopes the running code knows, and one unknown scope makes every principal's grant
+fail. Deploy the release that adds `mail:routing:write` first, then add the scope to
+the operator's grant. Rolling the code back requires removing the scope from the
+secret first.
 
 Validation. Each call builds the full new artifact and checks it with
 `parseShadowArtifact`, the validator the scheduled reader uses (256 KiB artifact,
@@ -346,6 +357,15 @@ was read (`onlyIf.etagMatches`), so a write that lands in between makes this cal
 with `configuration_conflict` instead of overwriting it. Of two concurrent changes from
 the same revision, exactly one commits. Read the candidate again and retry.
 
+Retrying after `configuration_unavailable`. The tools take no idempotency key, and a
+`configuration_unavailable` result can follow a conditional candidate write whose
+outcome is unknown. Call `list_routing_rules` again before retrying: when the candidate
+already shows the change, with a new `configuration_sha256` and `history.revision_id`,
+it committed and must not be repeated; otherwise retry with the SHA-256 just listed. A
+retry with the old SHA-256 after a committed write fails with `configuration_conflict`
+and writes nothing. A retry with a newly listed SHA-256 of a candidate that already
+holds the change fails with `rule_id_exists`, `rule_unchanged` or `rule_not_found`.
+
 Revision records. Before the conditional write, each change writes an immutable
 record `config/routing-shadow-revisions/<uuid>.json` in the same private bucket:
 `schemaVersion: 1`, `revisionId`, `previousRevisionId`, `previousConfigurationSha256`,
@@ -359,7 +379,12 @@ fails with an unknown outcome, the record stays and the call fails with
 `configuration_unavailable`; it is referenced only if that write committed. History
 follows only the current candidate's custom metadata and requires the record's
 `configurationSha256` to equal the candidate's configuration SHA-256, so an
-unreferenced record is never reported; the chain from the current candidate through
+unreferenced record is never reported. An absent record, or one that is invalid or
+names another revision or configuration, means no history. A named record that R2
+cannot return (a failed read or an interrupted body) is not treated as no history: a
+change fails with `configuration_unavailable` and writes nothing, and
+`list_routing_rules` reports the candidate as `unavailable`, so a transient storage
+error never starts a new chain. The chain from the current candidate through
 `previousRevisionId` is the audit trail, and it starts again after a direct R2 write.
 A record keeps only the artifact it committed: the candidate as an administrator
 uploaded it is not recorded, so the first change after a direct upload keeps no copy
@@ -370,6 +395,16 @@ bodies. Each change adds one record of at most about 0.5 MiB (the artifact of at
 256 KiB, escaped as a JSON string); a reader rejects a record over 1 MiB. Nothing
 expires or prunes them; removing old records is a manual administrator action on the
 private bucket. No migration is needed.
+
+Each committed change also produces a new candidate configuration SHA-256. The
+scheduled shadow repair keeps a scan cursor per configuration and replays every
+completely extracted source in the archive, live and historical, under the new hash,
+at most five sources per scheduled invocation, oldest raw key first. Every edit
+therefore adds one `routing_shadow_decisions` row per archived source and one
+`routing_shadow_scan` row, and decisions of earlier hashes are not pruned. Until the
+replay reaches recent mail, `routing_rule_usage` reports it under `not_yet_evaluated`
+and `unmatched_covers_window` is `false`. Batch related edits where possible: every
+intermediate configuration costs a full replay of D1 writes and its replay lag.
 
 Logs. A committed change logs one line: `event: "routing_rule_change"`, `operation`,
 `principal_id`, `revision_id` and the previous and new configuration SHA-256. Rule

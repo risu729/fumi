@@ -87,8 +87,11 @@ export type RuleChange =
   | { operation: "update"; expectedSha256: string; ruleId: string; rule: RuleFields }
   | { operation: "retire"; expectedSha256: string; ruleId: string };
 
-/** Read the committed revision record the candidate names. Any mismatch or
- * failure means no history, never a guessed one. */
+/** Read the committed revision record the candidate names. No named record, an
+ * absent object, or a record that is invalid or describes another revision or
+ * configuration means no history, never a guessed one. A named record that storage
+ * cannot return fails with `configuration_unavailable`: treating a transient error as
+ * no history would start a new audit chain at the next change. */
 export async function readRuleRevision(
   bucket: R2Bucket,
   metadata: Record<string, string>,
@@ -96,27 +99,31 @@ export async function readRuleRevision(
 ): Promise<RuleRevision | null> {
   const id = metadata["revision_id"];
   if (!id || !v.is(uuid, id)) return null;
+  let text;
   try {
     const object = await bucket.get(`${RULE_REVISION_PREFIX}${id}.json`);
     if (!object) return null;
     if (object.size > REVISION_BYTES) {
-      await object.body.cancel();
+      await object.body.cancel().catch(() => undefined);
       return null;
     }
-    const parsed = v.safeParse(
-      revisionSchema,
-      JSON.parse(await readDispatchBytes(object.body, REVISION_BYTES, 5000)) as unknown,
-    );
-    if (
-      !parsed.success ||
-      parsed.output.revisionId !== id ||
-      parsed.output.configurationSha256 !== configurationSha256
-    )
-      return null;
-    return parsed.output;
+    text = await readDispatchBytes(object.body, REVISION_BYTES, 5000);
+  } catch {
+    throw new RuleChangeError("configuration_unavailable");
+  }
+  let parsed;
+  try {
+    parsed = v.safeParse(revisionSchema, JSON.parse(text) as unknown);
   } catch {
     return null;
   }
+  if (
+    !parsed.success ||
+    parsed.output.revisionId !== id ||
+    parsed.output.configurationSha256 !== configurationSha256
+  )
+    return null;
+  return parsed.output;
 }
 
 function normalized(rule: RoutingRule): RoutingRule {

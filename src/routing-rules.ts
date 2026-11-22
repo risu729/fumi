@@ -9,7 +9,7 @@ import {
   loadDispatchConfiguration,
 } from "./routing-dispatch-config.ts";
 import { MailReadError } from "./mail-read.ts";
-import { readRuleRevision, type RuleRevision } from "./routing-rule-changes.ts";
+import { readRuleRevision, RuleChangeError, type RuleRevision } from "./routing-rule-changes.ts";
 
 /**
  * Authorized read layer for private routing rules and their recorded decisions.
@@ -86,8 +86,12 @@ export async function loadRoutingRuleSets(env: RoutingRulesEnvironment): Promise
         }
       : empty("absent");
   } catch (error) {
+    // The revision record behind the candidate is storage too.
     candidate = empty(
-      error instanceof ShadowConfigurationUnavailableError ? "unavailable" : "unreadable",
+      error instanceof ShadowConfigurationUnavailableError ||
+        (error instanceof RuleChangeError && error.code === "configuration_unavailable")
+        ? "unavailable"
+        : "unreadable",
     );
   }
   const inactive = { revision: null, generation: null, enabled: null, activated: null };

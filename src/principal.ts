@@ -13,6 +13,8 @@ export const MAIL_SCOPES = [
   "mail:events",
   "mail:import",
   "mail:routing",
+  // Candidate rule changes over MCP. It adds to mail:routing and does not replace it.
+  "mail:routing:write",
 ] as const;
 
 export function hasScope(principal: MailPrincipal, scope: string): boolean {

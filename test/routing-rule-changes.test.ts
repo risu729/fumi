@@ -33,7 +33,17 @@ const secretRule = {
 };
 const operator: MailPrincipal = {
   id: "service:synthetic-operator",
+  scopes: ["mail:routing", "mail:routing:write"],
+  fromAddresses: [],
+};
+const routingReader: MailPrincipal = {
+  id: "service:synthetic-routing-reader",
   scopes: ["mail:routing"],
+  fromAddresses: [],
+};
+const writeOnly: MailPrincipal = {
+  id: "service:synthetic-write-only",
+  scopes: ["mail:routing:write"],
   fromAddresses: [],
 };
 const reader: MailPrincipal = {
@@ -138,7 +148,7 @@ async function clientFor(principal: MailPrincipal) {
 }
 
 describe("routing rule change authorization", () => {
-  it("denies and hides the write tools without mail:routing, writing nothing", async () => {
+  it("denies and hides the write tools without both routing scopes, writing nothing", async () => {
     await configure();
     const before = await candidate();
     const expected = await hash(baseConfig);
@@ -151,17 +161,28 @@ describe("routing rule change authorization", () => {
       },
       retire_routing_rule: { expected_configuration_sha256: expected, rule_id: "synthetic-alpha" },
     };
-    for (const name of WRITE_TOOLS)
-      // oxlint-disable-next-line no-await-in-loop -- Each tool is checked independently.
-      expect(await rejected(call(name, inputs[name], reader))).toMatchObject({ code: "forbidden" });
+    // mail:routing alone reads rules but cannot change them; mail:routing:write
+    // alone grants nothing, because a writer must also read the candidate.
+    for (const principal of [reader, routingReader, writeOnly])
+      for (const name of WRITE_TOOLS)
+        // oxlint-disable-next-line no-await-in-loop -- Each tool is checked independently.
+        expect(await rejected(call(name, inputs[name], principal))).toMatchObject({
+          code: "forbidden",
+        });
     expect((await candidate())?.etag).toBe(before?.etag);
     expect(await revisionKeys()).toEqual([]);
-    const client = await clientFor(reader);
-    try {
-      const names = (await client.listTools()).tools.map((tool) => tool.name);
-      for (const name of WRITE_TOOLS) expect(names).not.toContain(name);
-    } finally {
-      await client.close();
+    for (const principal of [reader, routingReader, writeOnly]) {
+      // oxlint-disable-next-line no-await-in-loop -- Each principal is checked independently.
+      const client = await clientFor(principal);
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- Each principal is checked independently.
+        const names = (await client.listTools()).tools.map((tool) => tool.name);
+        for (const name of WRITE_TOOLS) expect(names).not.toContain(name);
+        expect(names.includes("list_routing_rules")).toBe(principal === routingReader);
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop -- Each principal is checked independently.
+        await client.close();
+      }
     }
   });
 
@@ -335,6 +356,51 @@ describe("routing rule changes", () => {
 
     // The scheduled shadow reader accepts the written candidate.
     expect((await repairRoutingShadow(env)).status).not.toBe("invalid_config");
+  });
+
+  it("fails closed when the named revision record cannot be read, keeping the chain", async () => {
+    await configure();
+    const first = await changeRoutingRule(env, operator, {
+      operation: "propose",
+      expectedSha256: await hash(baseConfig),
+      rule: secretRule as never,
+    });
+    const before = await candidate();
+    const keys = await revisionKeys();
+    const flaky = {
+      ...env,
+      MAIL_ARCHIVE: new Proxy(env.MAIL_ARCHIVE, {
+        get(target, property) {
+          if (property === "get")
+            return async (key: string) => {
+              if (key.startsWith(RULE_REVISION_PREFIX)) throw new Error("synthetic R2 outage");
+              return target.get(key);
+            };
+          const value = Reflect.get(target, property) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
+    const error = await rejected(
+      changeRoutingRule(flaky, operator, {
+        operation: "retire",
+        expectedSha256: first.configuration_sha256,
+        ruleId: "synthetic-beta",
+      }),
+    );
+    expect(error).toMatchObject({ code: "configuration_unavailable" });
+    // Nothing is written, so the next change still links to the named record.
+    expect((await candidate())?.etag).toBe(before?.etag);
+    expect(await revisionKeys()).toEqual(keys);
+    // A reader reports the candidate as unavailable rather than as having no history.
+    const listed = await listRoutingRules(flaky);
+    expect(listed.candidate.status).toBe("unavailable");
+    const retired = await changeRoutingRule(env, operator, {
+      operation: "retire",
+      expectedSha256: first.configuration_sha256,
+      ruleId: "synthetic-beta",
+    });
+    expect(retired.previous_revision_id).toBe(first.revision_id);
   });
 
   it("reports no history once a candidate is replaced outside the tools", async () => {

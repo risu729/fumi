@@ -85,11 +85,12 @@ const scopes: Record<ToolName, readonly string[]> = {
   list_routing_rules: ["mail:routing"],
   routing_rule_usage: ["mail:routing"],
   explain_routing: ["mail:routing"],
-  // The same operator scope already authorizes the admin routing writes, including
-  // activation. These tools write only the candidate and never activate it.
-  propose_routing_rule: ["mail:routing"],
-  update_routing_rule: ["mail:routing"],
-  retire_routing_rule: ["mail:routing"],
+  // A writer also needs the read scope, so it can list the candidate whose SHA-256
+  // it passes. These tools write only the candidate and never activate it; the HTTP
+  // admin routes, including activation, still need only mail:routing.
+  propose_routing_rule: ["mail:routing", "mail:routing:write"],
+  update_routing_rule: ["mail:routing", "mail:routing:write"],
+  retire_routing_rule: ["mail:routing", "mail:routing:write"],
 };
 const RULE_CHANGE_TOOLS: readonly ToolName[] = [
   "propose_routing_rule",
@@ -144,9 +145,9 @@ const descriptions: Record<ToolName, string> = {
     "Operator only (mail:routing). List the private routing rules of the candidate (shadow) and active (dispatch) configurations in evaluation order: id, priority, CEL match, outcome, category and urgency, with each configuration's SHA-256, upload time and the active revision. The match expressions are private configuration; do not copy them into mail, notes or public places. Candidate added_at and changed_at come from the revision record of the last change made with the rule change tools and are null otherwise; history describes that record. compared_to_other compares with the other current configuration only. A status of unavailable means storage could not be read and a later retry may succeed; unreadable means the stored configuration is invalid. Read-only.",
   routing_rule_usage: `Operator only (mail:routing). Report how often each rule of the candidate or active configuration matched live mail received in the last window_days UTC days (at most ${ROUTING_USAGE_LIMITS.maxWindowDays}): match count, first and last matched receipt time and sample mail_ IDs, plus rules with no match, plugin candidates, classifier outcomes by category and dispatch states. Each source scans at most max_decisions recent rows (at most ${ROUTING_USAGE_LIMITS.maxDecisions}), newest receipt day first; when truncated is true the counts and unmatched_rule_ids cover only the scanned rows. Counts come from stored shadow decisions, so messages not yet evaluated are not counted: not_yet_evaluated counts live messages in the window with no decision under the configuration (at most ${ROUTING_USAGE_LIMITS.maxNotYetEvaluated}), and unmatched_covers_window is true only when that is 0 and the decisions were not truncated. Read-only.`,
   explain_routing: `Operator only (mail:routing). Explain how one mail_ message was routed from stored evidence: the deciding rule, plugin or classifier outcome and the configuration SHA-256 or dispatch revision, with each stored shadow decision (always those of the candidate and active configurations, plus at most ${ROUTING_USAGE_LIMITS.explainRows} of other configurations, newest first), dispatch job and offer state and classification. Live dispatch does not store the rule ID; it is attributed only from a current shadow decision under the active configuration. Returns no mail content. Read-only.`,
-  propose_routing_rule: `Operator only (mail:routing). Add one ordinary rule (id, priority, match, outcome, optional category and urgent for review) to the candidate routing configuration as a new revision. ${RULE_CHANGE_NOTE}`,
-  update_routing_rule: `Operator only (mail:routing). Replace the priority, match, outcome, category and urgent of the candidate rule rule_id as a new revision; omitted category and urgent are removed. ${RULE_CHANGE_NOTE}`,
-  retire_routing_rule: `Operator only (mail:routing). Remove the candidate rule rule_id as a new revision. A revision record keeps only the configuration it committed, so the configuration before this change is kept only when the rule change tools wrote it. ${RULE_CHANGE_NOTE}`,
+  propose_routing_rule: `Operator only (mail:routing and mail:routing:write). Add one ordinary rule (id, priority, match, outcome, optional category and urgent for review) to the candidate routing configuration as a new revision. ${RULE_CHANGE_NOTE}`,
+  update_routing_rule: `Operator only (mail:routing and mail:routing:write). Replace the priority, match, outcome, category and urgent of the candidate rule rule_id as a new revision; omitted category and urgent are removed. ${RULE_CHANGE_NOTE}`,
+  retire_routing_rule: `Operator only (mail:routing and mail:routing:write). Remove the candidate rule rule_id as a new revision. A revision record keeps only the configuration it committed, so the configuration before this change is kept only when the rule change tools wrote it. ${RULE_CHANGE_NOTE}`,
 };
 function allowed(name: ToolName, p: MailPrincipal) {
   if (
