@@ -188,7 +188,8 @@ agents, because the Grok Bot side has no runtime. The signed, retrying `webhook`
 adapter above implements [ADR 0003](adr/0003-signed-notification-webhooks.md).
 
 Decision (owner, 2026-11-21 17:18 UTC to 2026-11-22 14:23 UTC): the receiver is a
-generic webhook relay. It is a Worker in its own repository, built by this
+generic webhook relay. It is a Worker in its own repository,
+[risu729/tayori](https://github.com/risu729/tayori), built by this
 project's agents.
 
 - **Sources and routes.** A source, such as fumi, POSTs to `/in/<source>` with
