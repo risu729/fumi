@@ -110,7 +110,8 @@ async function readReceipt(bucket: R2Bucket, candidate: Candidate): Promise<Rece
     value !== null &&
     "schemaVersion" in value &&
     value.schemaVersion !== 1 &&
-    value.schemaVersion !== 2
+    value.schemaVersion !== 2 &&
+    value.schemaVersion !== 3
   ) {
     return { state: "invalid", code: "unsupported_receipt" };
   }

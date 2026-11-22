@@ -1,7 +1,9 @@
 # Archive catalog and reconciliation
 
 This implementation adds a D1 catalog and a bounded scheduled reconciler for the
-existing R2 archive, including v1 forwarding and v2 standalone receipts. It preserves
+existing R2 archive, including v1 forwarding, v2 standalone and v3 classified
+forwarding-failure receipts
+([forward failure reasons](ingress.md#forward-failure-reasons)). It preserves
 `ingest/YYYY-MM-DD/<UUID>/raw.eml` and `receipt.json` without rewriting or moving them.
 Production D1 provisioning, migration and schedule activation are separate rollout
 steps; local synthetic tests do not establish production recovery. See

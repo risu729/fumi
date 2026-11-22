@@ -250,6 +250,51 @@ describe("standalone archive evidence", () => {
   });
 });
 
+describe("forward failure reasons", () => {
+  it("reconciles a v3 reason into the canonical snapshot beside v1 failures", async () => {
+    const legacy: ArchiveReceipt = {
+      ...receipt(1, await putRaw(1, false, { eventNotifications: "1" })),
+      schemaVersion: 1,
+      forward: { status: "failed", code: "forward_failed" },
+    };
+    const classified: ArchiveReceipt = {
+      ...receipt(2, await putRaw(2, false, { eventNotifications: "1" })),
+      schemaVersion: 3,
+      forward: { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+    };
+    await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, JSON.stringify(legacy));
+    await env.MAIL_ARCHIVE.put(`${prefix(2)}/receipt.json`, JSON.stringify(classified));
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    const rows = await sources();
+    expect(rows).toMatchObject([
+      { forward_status: "failed", receipt_state: "valid", notify_events: 1 },
+      { forward_status: "failed", receipt_state: "valid", notify_events: 1 },
+    ]);
+    expect(rows[0]?.receipt_snapshot).toBe(canonicalReceipt(legacy));
+    expect(JSON.parse(rows[1]!.receipt_snapshot!)).toMatchObject({
+      schemaVersion: 3,
+      forward: { status: "failed", code: "rejected_permanent", smtpStatus: "5.7.1" },
+    });
+    expect(await issueCodes()).toEqual([]);
+    // A rescan of the unchanged receipts keeps the snapshots and raises no conflict.
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect((await sources()).map((row) => row.receipt_snapshot)).toEqual(
+      rows.map((row) => row.receipt_snapshot),
+    );
+    expect(await issueCodes()).toEqual([]);
+  });
+
+  it("reports an unknown future receipt version as unsupported", async () => {
+    await putRaw(1);
+    await env.MAIL_ARCHIVE.put(
+      `${prefix(1)}/receipt.json`,
+      JSON.stringify({ ...receipt(1, "a".repeat(64)), schemaVersion: 4 }),
+    );
+    await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG);
+    expect(await issueCodes()).toEqual(["unsupported_receipt"]);
+  });
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -327,7 +372,7 @@ describe("bounded R2 catalog reconciliation in workerd", () => {
     await env.MAIL_ARCHIVE.put("ingest/not-an-ingest/private", "unexpected");
     await env.MAIL_ARCHIVE.put(`${prefix(1)}/receipt.json`, "not json");
     await env.MAIL_ARCHIVE.put(`${prefix(2)}/receipt.json`, "x".repeat(MAX_RECEIPT_BYTES + 1));
-    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 3 }));
+    await env.MAIL_ARCHIVE.put(`${prefix(3)}/receipt.json`, JSON.stringify({ schemaVersion: 4 }));
     const crossKey = receipt(4, "0".repeat(64));
     crossKey.archive = {
       status: "stored",
