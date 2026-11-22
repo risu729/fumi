@@ -57,7 +57,7 @@ export class TakeoutImport extends WorkflowEntrypoint<Env, { runId: string }> {
         // Every retry failed: record the fixed code so the cron does not restart forever.
         // oxlint-disable-next-line no-await-in-loop -- Runs once, as the instance ends.
         await step.do(`stop-${chunk}`, retry, () =>
-          stopTakeoutRun(this.env.MAIL_CATALOG, event.payload.runId, code),
+          stopTakeoutRun(this.env.MAIL_CATALOG, event.payload.runId, event.instanceId, code),
         );
         throw takeoutStepError(error);
       }

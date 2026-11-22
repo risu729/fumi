@@ -13,7 +13,7 @@ import {
 } from "../src/gmail-takeout-import.ts";
 import { parseGmailProvenance } from "../src/gmail-provenance.ts";
 import { reconcileArchive } from "../src/reconcile.ts";
-import { GmailImportError } from "../src/gmail-transport.ts";
+import { GMAIL_IMPORT_RAW_LIMIT, GmailImportError } from "../src/gmail-transport.ts";
 import { takeoutStepError } from "../src/gmail-takeout-workflow.ts";
 
 const workflow = {
@@ -213,6 +213,12 @@ describe("Google Takeout import", () => {
       status: "complete",
     });
     expect(await outcomes("second")).toEqual({ verified: 2, conflict: 1 });
+    // The conflicting copy's labels are not attached to the stored original.
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM gmail_takeout_labels WHERE run_id='second'",
+      ).first("n"),
+    ).toBe(0);
     const key = await env.MAIL_CATALOG.prepare(
       "SELECT raw_key FROM gmail_takeout_items WHERE run_id='second' AND outcome='conflict'",
     ).first<string>("raw_key");
@@ -261,6 +267,28 @@ describe("Google Takeout import", () => {
       offset: 0,
     });
     expect((await env.MAIL_ARCHIVE.list()).objects).toEqual([]);
+    // After review, the operator skips that one entry and the run finishes.
+    expect(await drain(config("labels", objects, { skip: [0] }))).toMatchObject({
+      status: "complete",
+    });
+    expect(await outcomes("labels")).toEqual({ skipped: 1 });
+    expect((await env.MAIL_ARCHIVE.list()).objects).toEqual([]);
+  });
+
+  it("records an entry over the raw limit as oversize without storing it", async () => {
+    const big = entry(0) + entry(1, "x".repeat(GMAIL_IMPORT_RAW_LIMIT)) + entry(2);
+    const objects = await upload(big, ["a/big-1.mbox", "a/big-2.mbox"]);
+    expect(await drain(config("big", objects))).toMatchObject({ status: "complete" });
+    expect(await outcomes("big")).toEqual({ imported: 2, oversize: 1 });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT raw_size > ? AS over FROM gmail_takeout_items WHERE outcome='oversize'",
+      )
+        .bind(GMAIL_IMPORT_RAW_LIMIT)
+        .first("over"),
+    ).toBe(1);
+    const stored = (await env.MAIL_ARCHIVE.list({ prefix: "ingest/" })).objects;
+    expect(stored.filter((object) => object.key.endsWith("/raw.eml"))).toHaveLength(2);
   });
 
   it("records an entry stored just before a lost commit as imported, not verified", async () => {
@@ -296,21 +324,25 @@ describe("Google Takeout import", () => {
       await startTakeoutRun(env.MAIL_CATALOG, config("retry", wrong, { attempt: 1 })),
     ).toMatchObject({ status: "running" });
 
+    // The run's own instance stops it even while a timed-out step still holds the lease.
     await startTakeoutRun(env.MAIL_CATALOG, config("failed", objects));
-    await stopTakeoutRun(env.MAIL_CATALOG, "failed", "select * from secrets");
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE gmail_takeout_runs SET workflow_instance='w1',lease_token='stale',lease_until=? WHERE run_id='failed'",
+    )
+      .bind(Date.now() + 60_000)
+      .run();
+    await stopTakeoutRun(env.MAIL_CATALOG, "failed", "w1", "select * from secrets");
     expect(
       await env.MAIL_CATALOG.prepare(
         "SELECT status,stop_code,stop_offset FROM gmail_takeout_runs WHERE run_id='failed'",
       ).first(),
     ).toEqual({ status: "stopped", stop_code: "takeout_import_failed", stop_offset: 0 });
-    // A live lease belongs to another runner, which keeps going.
+    // An instance the cron has since replaced cannot stop the run.
     await startTakeoutRun(env.MAIL_CATALOG, config("leased", objects));
     await env.MAIL_CATALOG.prepare(
-      "UPDATE gmail_takeout_runs SET lease_token='other',lease_until=? WHERE run_id='leased'",
-    )
-      .bind(Date.now() + 60_000)
-      .run();
-    await stopTakeoutRun(env.MAIL_CATALOG, "leased", "gmail_receipt_conflict");
+      "UPDATE gmail_takeout_runs SET workflow_instance='new' WHERE run_id='leased'",
+    ).run();
+    await stopTakeoutRun(env.MAIL_CATALOG, "leased", "old", "gmail_receipt_conflict");
     expect(
       await env.MAIL_CATALOG.prepare(
         "SELECT status FROM gmail_takeout_runs WHERE run_id='leased'",
@@ -382,6 +414,8 @@ describe("Google Takeout import", () => {
       { ...base, objects: [] },
       { ...base, bucket: "fumi-mail" },
       { ...base, onConflict: "replace" },
+      { ...base, skip: [3, 3] },
+      { ...base, skip: [-1] },
     ])
       expect(parse(bad), JSON.stringify(bad)).toThrow(GmailImportError);
   });

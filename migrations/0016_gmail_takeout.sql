@@ -20,7 +20,7 @@ CREATE TABLE gmail_takeout_items (
   run_id TEXT NOT NULL REFERENCES gmail_takeout_runs(run_id),
   entry_offset INTEGER NOT NULL,
   message_id TEXT NOT NULL,
-  outcome TEXT NOT NULL CHECK (outcome IN ('imported','verified','conflict','oversize')),
+  outcome TEXT NOT NULL CHECK (outcome IN ('imported','verified','conflict','oversize','skipped')),
   from_date INTEGER,
   raw_size INTEGER,
   raw_sha256 TEXT,

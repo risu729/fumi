@@ -58,6 +58,14 @@ const configSchema = v.strictObject({
   checkIdDate: v.optional(v.boolean(), true),
   /** Raising it resumes a stopped run without changing its policy. */
   attempt: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0)), 0),
+  /**
+   * Stream offsets of entries an operator reviewed and chose not to import, such as a
+   * stop the run cannot pass otherwise. Each is recorded as `skipped`.
+   */
+  skip: v.optional(
+    v.pipe(v.array(v.pipe(v.number(), v.safeInteger(), v.minValue(0))), v.maxLength(1000)),
+    [],
+  ),
 });
 export type TakeoutConfig = v.InferOutput<typeof configSchema>;
 
@@ -82,7 +90,11 @@ export function takeoutConfig(env: { GMAIL_TAKEOUT_CONFIG?: string }): TakeoutCo
   if (!parsed.success) throw new GmailImportError("invalid_takeout_configuration");
   const keys = parsed.output.objects.map((object) => object.key);
   const total = parsed.output.objects.reduce((sum, object) => sum + object.size, 0);
-  if (new Set(keys).size !== keys.length || !Number.isSafeInteger(total))
+  if (
+    new Set(keys).size !== keys.length ||
+    new Set(parsed.output.skip).size !== parsed.output.skip.length ||
+    !Number.isSafeInteger(total)
+  )
     throw new GmailImportError("invalid_takeout_configuration");
   return parsed.output;
 }
@@ -99,6 +111,7 @@ const configJson = (config: TakeoutConfig) =>
     onConflict: config.onConflict,
     checkIdDate: config.checkIdDate,
     attempt: config.attempt,
+    skip: config.skip,
   });
 
 interface RunRow {
@@ -178,7 +191,7 @@ function objectAt(config: TakeoutConfig, offset: number): string {
   throw new GmailImportError("takeout_offset_outside_objects");
 }
 
-type Outcome = "imported" | "verified" | "conflict" | "oversize";
+type Outcome = "imported" | "verified" | "conflict" | "oversize" | "skipped";
 
 async function stop(db: D1Database, runId: string, lease: string, code: string, offset: number) {
   await db
@@ -205,6 +218,7 @@ export async function runTakeoutChunk(
   const db = env.MAIL_CATALOG;
   const json = configJson(config);
   const total = totalBytes(config);
+  const skip = new Set(config.skip);
   const lease = crypto.randomUUID();
   const now = Date.now();
   const claimed = await db
@@ -250,7 +264,7 @@ export async function runTakeoutChunk(
       labels?: string,
     ) => {
       const fence = `EXISTS(SELECT 1 FROM gmail_takeout_runs WHERE run_id=? AND lease_token=?
-        AND lease_until>? AND next_offset=?)`;
+        AND lease_until>? AND next_offset=? AND status='running')`;
       const fenceArgs = [config.runId, lease, Date.now(), item.offset];
       const statements = [
         db
@@ -294,7 +308,7 @@ export async function runTakeoutChunk(
         db
           .prepare(
             `UPDATE gmail_takeout_runs SET next_offset=?,lease_until=?
-            WHERE run_id=? AND lease_token=? AND lease_until>? AND next_offset=?`,
+            WHERE run_id=? AND lease_token=? AND lease_until>? AND next_offset=? AND status='running'`,
           )
           .bind(item.end, Date.now() + LEASE_MS, config.runId, lease, Date.now(), item.offset),
       );
@@ -311,6 +325,10 @@ export async function runTakeoutChunk(
       };
       if (item.kind === "oversize") {
         await record(item, "oversize", { size: item.size });
+        return null;
+      }
+      if (skip.has(item.offset)) {
+        await record(item, "skipped", { fromDate: item.fromDate });
         return null;
       }
       if (config.checkIdDate) {
@@ -364,7 +382,9 @@ export async function runTakeoutChunk(
             .run();
           return halt("takeout_raw_conflict");
         }
-        await record(item, same ? "verified" : "conflict", { ...details, rawKey }, item.labels);
+        // A conflict's labels describe the differing Takeout copy, not the stored original.
+        const labels = same ? item.labels : undefined;
+        await record(item, same ? "verified" : "conflict", { ...details, rawKey }, labels);
         return null;
       }
       const receivedAt = new Date(item.fromDate).toISOString();
@@ -479,16 +499,23 @@ export const TAKEOUT_FAILURE_CODES = new Set([
 /**
  * Stops a running run after its Workflow step failed every retry, so a failure that
  * repeats for the same entry ends in a recorded code instead of an endless restart.
- * The failing step already released its lease; a live lease means another runner.
+ * Only the run's current instance may stop it. The lease is ignored, because a step
+ * that timed out never released it; its writes are fenced on the run still running.
  */
-export async function stopTakeoutRun(db: D1Database, runId: string, code: string) {
+export async function stopTakeoutRun(
+  db: D1Database,
+  runId: string,
+  instanceId: string,
+  code: string,
+) {
   const fixed = TAKEOUT_FAILURE_CODES.has(code) ? code : "takeout_import_failed";
   await db
     .prepare(
-      `UPDATE gmail_takeout_runs SET status='stopped',stop_code=?,stop_offset=next_offset
-      WHERE run_id=? AND status='running' AND lease_until<=?`,
+      `UPDATE gmail_takeout_runs SET status='stopped',stop_code=?,stop_offset=next_offset,
+        lease_token=NULL,lease_until=0
+      WHERE run_id=? AND status='running' AND workflow_instance=?`,
     )
-    .bind(fixed, runId, Date.now())
+    .bind(fixed, runId, instanceId)
     .run();
 }
 
