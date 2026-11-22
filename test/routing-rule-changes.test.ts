@@ -461,6 +461,96 @@ describe("routing rule change validation", () => {
     expect(await revisionKeys()).toEqual([]);
   });
 
+  it("stops at the parent for an added key that the tool does not define at that level", async () => {
+    await configure();
+    const expected = await hash(baseConfig);
+    const update = { priority: 1, match: "true", outcome: "ignore" };
+    const proto = JSON.parse(`{"__proto__": {"synthetic_secret_marker": true}}`) as object;
+    for (const [name, input, path] of [
+      // Key names that another level or another tool defines.
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: { ...secretRule, rule: true } },
+        "rule",
+      ],
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: secretRule, id: "x" },
+        null,
+      ],
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: secretRule, rule_id: "x" },
+        null,
+      ],
+      [
+        "update_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule_id: "synthetic-alpha",
+          rule: { ...update, id: "x" },
+        },
+        "rule",
+      ],
+      [
+        "retire_routing_rule",
+        { expected_configuration_sha256: expected, rule_id: "synthetic-alpha", rule: secretRule },
+        null,
+      ],
+      // Prototype-like, non-ASCII and very long key names.
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: { ...secretRule, ...proto } },
+        "rule",
+      ],
+      [
+        "propose_routing_rule",
+        { expected_configuration_sha256: expected, rule: { ...secretRule, constructor: true } },
+        "rule",
+      ],
+      [
+        "propose_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule: { ...secretRule, synthetic_secret_marker_é: true },
+        },
+        "rule",
+      ],
+      [
+        "propose_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule: { ...secretRule, [`synthetic_secret_marker_${"x".repeat(10_000)}`]: true },
+        },
+        "rule",
+      ],
+      // A wrong value type still names the field.
+      [
+        "propose_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule: { ...secretRule, match: { synthetic_secret_marker: true } },
+        },
+        "rule.match",
+      ],
+      [
+        "update_routing_rule",
+        {
+          expected_configuration_sha256: expected,
+          rule_id: "synthetic-alpha",
+          rule: { ...update, outcome: ["synthetic_secret_marker"] },
+        },
+        "rule.outcome",
+      ],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- Each input is checked independently.
+      const error = await rejected(call(name, input));
+      expect({ code: error.code, path: error.path }).toEqual({ code: "invalid_arguments", path });
+      expect(JSON.stringify(error)).not.toContain("synthetic_secret_marker");
+    }
+    expect(await revisionKeys()).toEqual([]);
+  });
+
   it("rejects unknown and unchanged rules on update and retire", async () => {
     await configure();
     const expected = await hash(baseConfig);
@@ -490,7 +580,7 @@ describe("routing rule change validation", () => {
           rule: { id: "synthetic-renamed", priority: 1, match: "true", outcome: "review" },
         }),
       ),
-    ).toMatchObject({ code: "invalid_arguments", path: "rule.id" });
+    ).toMatchObject({ code: "invalid_arguments", path: "rule" });
     expect(await candidate()).toEqual(before);
     expect(await revisionKeys()).toEqual([]);
   });

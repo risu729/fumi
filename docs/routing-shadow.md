@@ -294,8 +294,9 @@ strict shape, full router compilation: at most 32 ordinary rules, the bounded CE
 subset over `subject`, `from`, `to` and `hasAttachments`, 64 KiB configuration).
 Nothing is written when a check fails. Errors are `{"error": {"code", "path"}}`, where
 `path` is an input key path such as `rule.match`, never a value. It names only keys
-the tool schemas define; for a key the caller added, it stops at the parent (`rule`,
-or no `path` at the top level):
+the called tool's schema defines at that level; for a key the caller added, it stops
+at the parent (`rule`, or no `path` at the top level), even when another level or
+tool defines that name, such as `id` in an `update_routing_rule` rule:
 
 | Code | Meaning |
 | --- | --- |
@@ -322,9 +323,12 @@ record `config/routing-shadow-revisions/<uuid>.json` in the same private bucket:
 (`{id, addedAt, changedAt}` per rule, carried forward) and `artifactJson`, the exact
 committed artifact. The committed candidate's custom metadata is
 `{revision_id, configuration_sha256}`. A record whose write lost the race is deleted
-and is never referenced. When the conditional write fails with an unknown outcome, or
-that delete fails, the record stays unreferenced. History follows only the current
-candidate's custom metadata and requires the record's SHA-256 to match, so an
+and is never referenced. When that delete fails, or a record write fails with an
+unknown outcome, the record stays unreferenced. When the conditional candidate write
+fails with an unknown outcome, the record stays and the call fails with
+`configuration_unavailable`; it is referenced only if that write committed. History
+follows only the current candidate's custom metadata and requires the record's
+`configurationSha256` to equal the candidate's configuration SHA-256, so an
 unreferenced record is never reported; the chain from the current candidate through
 `previousRevisionId` is the audit trail, and it starts again after a direct R2 write.
 A record keeps only the artifact it committed: the candidate as an administrator

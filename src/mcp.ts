@@ -202,22 +202,26 @@ function failure(error: unknown): CallToolResult {
     structuredContent: body,
   };
 }
-// Every input key the rule change schemas name. Only these may appear in an error path.
-const RULE_CHANGE_KEYS: ReadonlySet<string> = new Set([
-  ...Object.keys(toolSchemas.propose_routing_rule.entries),
-  ...Object.keys(toolSchemas.update_routing_rule.entries),
-  ...Object.keys(toolSchemas.retire_routing_rule.entries),
-  ...Object.keys(toolSchemas.propose_routing_rule.entries.rule.entries),
-]);
+const entriesOf = (schema: unknown) =>
+  schema && typeof schema === "object" && "entries" in schema
+    ? (schema.entries as v.ObjectEntries)
+    : undefined;
 /** The schema key path of an input issue. A strict object also reports a key the
- * caller added; such a key can carry data, so the path stops before any key that no
- * rule change schema names. */
-function schemaKeyPath(issue: v.BaseIssue<unknown>): string | null {
+ * caller added; such a key can carry data, so the path stops before any key that the
+ * tool's schema does not define at that level. */
+function schemaKeyPath(schema: v.GenericSchema, issue: v.BaseIssue<unknown>): string | null {
   const keys: string[] = [];
+  let entries = entriesOf(schema);
   for (const item of issue.path ?? []) {
-    if (item.type !== "object" || typeof item.key !== "string" || !RULE_CHANGE_KEYS.has(item.key))
+    if (
+      item.type !== "object" ||
+      typeof item.key !== "string" ||
+      !entries ||
+      !Object.hasOwn(entries, item.key)
+    )
       break;
     keys.push(item.key);
+    entries = entriesOf(entries[item.key]);
   }
   const path = keys.join(".");
   return /^[a-z0-9_.]{1,64}$/.test(path) ? path : null;
@@ -309,7 +313,10 @@ export async function dispatchMailTool(
   const parsed = v.safeParse(toolSchemas[name], input);
   if (!parsed.success) {
     if (!RULE_CHANGE_TOOLS.includes(name)) throw new MailReadError("invalid_arguments");
-    throw new RuleChangeError("invalid_arguments", schemaKeyPath(parsed.issues[0]));
+    throw new RuleChangeError(
+      "invalid_arguments",
+      schemaKeyPath(toolSchemas[name], parsed.issues[0]),
+    );
   }
   switch (name) {
     case "get_mail_health":
