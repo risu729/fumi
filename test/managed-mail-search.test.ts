@@ -398,7 +398,7 @@ describe("optional managed body corpus and semantic retrieval", () => {
         sourceRawKeys: Array.from({ length: 10 }, (_, index) => canonical(index + 1)),
       });
     await ready(context);
-    // Each subject:Ä binds two LIKE patterns, the most a filter can bind.
+    // Each subject:Ä binds two values, the most a filter can bind.
     const filters = (count: number) =>
       Array.from({ length: count }, () => "subject:\u00c4").join(" ");
     const matched = await searchManagedMail(
