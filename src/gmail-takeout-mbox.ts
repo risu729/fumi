@@ -12,6 +12,9 @@
 
 import { GMAIL_IMPORT_RAW_LIMIT } from "./gmail-transport.ts";
 
+/** The largest chunk the runner pushes: one ranged R2 read. */
+export const TAKEOUT_READ_BYTES = 8 * 1024 * 1024;
+
 export type TakeoutEntry = {
   kind: "entry";
   /** Byte offset of the entry's From_ line in the whole mbox stream. */
@@ -24,6 +27,7 @@ export type TakeoutEntry = {
   fromDate: number;
   /** X-Gmail-Labels value as stored; may be localized or RFC 2047 encoded. */
   labels: string;
+  /** A view of the splitter's buffer, valid until the next `push`; copy it to keep it. */
   raw: Uint8Array;
 };
 
@@ -66,6 +70,14 @@ const encoder = new TextEncoder();
 /** An entry boundary candidate: the separator CRLF, then a From_ line. */
 const NEXT_FROM = encoder.encode("\r\nFrom ");
 const THREAD_PREFIX = encoder.encode("X-GM-THRID: ");
+/**
+ * How far an entry may pass the raw limit before its bytes are dropped (149). It covers
+ * what a boundary check still needs: from two bytes before a candidate's separator
+ * through `X-GM-THRID: `.
+ */
+const KEEP = NEXT_FROM.length + FROM_LINE_LIMIT + THREAD_PREFIX.length + 2;
+/** The longest From_ line and Gmail headers, with their CRLFs (131,206). */
+const HEAD_LIMIT = FROM_LINE_LIMIT + 2 + 2 * (GMAIL_HEADERS_LIMIT + 2);
 const FROM_LINE =
   /^From ([0-9]{1,20})@xxx ([A-Z][a-z]{2}) ([A-Z][a-z]{2}) ([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([+-])([0-9]{2})([0-9]{2}) ([0-9]{4})$/;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -186,17 +198,26 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
 
 /**
  * Splits a Takeout mbox stream. Push chunks in order, then call `end()` once. Each
- * returned entry's `raw` is a copy that stays valid after later pushes. An entry whose
- * stripped size exceeds `rawLimit` is reported as `oversize` without retaining its
- * bytes, so memory stays near one entry plus one chunk. After an error every later
- * call throws it again.
+ * returned entry's `raw` is a view of the splitter's buffer that stays valid until the
+ * next `push`, so a caller handles every returned item before it pushes again, or
+ * copies `raw`. An entry whose stripped size exceeds `rawLimit` is reported as
+ * `oversize` without retaining its bytes. A call that splits entries before an error
+ * returns them, and the next call throws the error; every later call throws it again.
+ *
+ * Between pushes the splitter keeps at most max(rawLimit + 149, 131,206) unread bytes:
+ * an entry up to the limit and what its boundary check needs, or the longest From_ line
+ * and Gmail headers. With chunks of at most TAKEOUT_READ_BYTES, its buffer therefore
+ * never exceeds that plus one read: 34,603,157 bytes (33.0 MiB) at the 25 MiB limit.
+ * A buffer that must hold a full read is allocated at that bound at once, and only
+ * smaller ones double, so growing never holds more than one read of old buffer beside
+ * the new one. The buffer is released after `end()` and after an error.
  *
  * The format cannot show a stream cut right after a blank line in the last message,
  * so the caller must also check that it pushed the whole object (for example, the
  * byte count against the R2 object size).
  */
 export class TakeoutMboxSplitter {
-  /** Backing store; the unread bytes are #store[#start, #end). It grows by doubling. */
+  /** Backing store; the unread bytes are #store[#start, #end). */
   #store = new Uint8Array(0);
   #start = 0;
   #end = 0;
@@ -212,6 +233,8 @@ export class TakeoutMboxSplitter {
   #error: unknown = null;
 
   readonly #rawLimit: number;
+  /** The buffer bound for chunks of at most TAKEOUT_READ_BYTES (see the class comment). */
+  readonly #bound: number;
 
   /**
    * `startOffset` is the stream offset of the first pushed byte; a run resumed at a
@@ -220,6 +243,12 @@ export class TakeoutMboxSplitter {
   constructor(rawLimit = GMAIL_IMPORT_RAW_LIMIT, startOffset = 0) {
     this.#rawLimit = rawLimit;
     this.#base = startOffset;
+    this.#bound = Math.max(rawLimit + KEEP, HEAD_LIMIT) + TAKEOUT_READ_BYTES;
+  }
+
+  /** Bytes allocated for the buffer; tests check it against the bound. */
+  get capacity(): number {
+    return this.#store.length;
   }
 
   push(chunk: Uint8Array): TakeoutItem[] {
@@ -228,10 +257,16 @@ export class TakeoutMboxSplitter {
     if (chunk.length === 0) return [];
     const length = this.#end - this.#start;
     if (this.#end + chunk.length > this.#store.length) {
+      const capacity = this.#store.length;
       const needed = length + chunk.length;
-      if (needed <= this.#store.length / 2) this.#store.copyWithin(0, this.#start, this.#end);
+      // Compacting overwrites bytes behind #start, including earlier entries' raw views.
+      if (needed <= capacity && (needed <= capacity / 2 || capacity >= this.#bound))
+        this.#store.copyWithin(0, this.#start, this.#end);
       else {
-        const next = new Uint8Array(Math.max(needed, this.#store.length * 2));
+        // Stores below one read double; one that must hold a full read gets the bound.
+        let size = Math.max(needed, Math.min(capacity * 2, this.#bound));
+        if (size >= TAKEOUT_READ_BYTES) size = Math.max(needed, this.#bound);
+        const next = new Uint8Array(size);
         next.set(this.#store.subarray(this.#start, this.#end));
         this.#store = next;
       }
@@ -247,38 +282,54 @@ export class TakeoutMboxSplitter {
     if (this.#failed) throw this.#error;
     if (this.#ended) return [];
     this.#ended = true;
-    return this.#run(true);
+    try {
+      return this.#run(true);
+    } finally {
+      this.#release();
+    }
   }
 
-  /** The first error is kept, so a retry or cleanup never reads a failed stream as complete. */
+  /**
+   * The first error is kept, so a retry or cleanup never reads a failed stream as
+   * complete. Entries split before it are returned first, and the next call throws it.
+   */
   #run(final: boolean): TakeoutItem[] {
+    const items: TakeoutItem[] = [];
     try {
-      return this.#drain(final);
+      this.#drain(final, items);
     } catch (error) {
       this.#failed = true;
       this.#error = error;
-      throw error;
+      this.#release();
+      if (items.length === 0) throw error;
     }
+    return items;
+  }
+
+  /** Drops the buffer once no push can follow; returned raw views keep their bytes. */
+  #release() {
+    this.#store = new Uint8Array(0);
+    this.#start = 0;
+    this.#end = 0;
   }
 
   get #bytes(): Uint8Array {
     return this.#store.subarray(this.#start, this.#end);
   }
 
-  #drain(final: boolean): TakeoutItem[] {
-    const items: TakeoutItem[] = [];
+  #drain(final: boolean, items: TakeoutItem[]): void {
     for (;;) {
       if (!this.#head) {
         const bytes = this.#bytes;
-        if (bytes.length === 0) return items;
-        if (bytes.length < 5 && !final) return items;
+        if (bytes.length === 0) return;
+        if (bytes.length < 5 && !final) return;
         if (latin1.decode(bytes.subarray(0, 5)) !== "From ")
           throw new TakeoutMboxError(
             this.#base === 0 ? "takeout_invalid_start" : "takeout_invalid_from_line",
             this.#base,
           );
         const head = parseHead(bytes, this.#base, final);
-        if (!head) return items;
+        if (!head) return;
         this.#head = { ...head, offset: this.#base };
         this.#consume(head.size);
         this.#dropped = 0;
@@ -289,14 +340,13 @@ export class TakeoutMboxSplitter {
       const boundary = this.#findBoundary(bytes, final);
       if (boundary === null) {
         // No boundary yet. An entry already over the limit keeps only the bytes from
-        // two before the next possible boundary on.
-        const keep = NEXT_FROM.length + FROM_LINE_LIMIT + THREAD_PREFIX.length + 2;
-        if (this.#dropped + bytes.length > this.#rawLimit + keep) {
+        // two before the next possible boundary on, at most KEEP.
+        if (this.#dropped + bytes.length > this.#rawLimit + KEEP) {
           const drop = Math.max(0, this.#scanFrom - 2);
           this.#dropped += drop;
           this.#consume(drop);
         }
-        return items;
+        return;
       }
       // At the end of the stream the entry ends at the last two bytes, Takeout's
       // separator, which must follow the message's own CRLF.
@@ -322,12 +372,13 @@ export class TakeoutMboxSplitter {
           threadId: head.threadId,
           fromDate: head.fromDate,
           labels: head.labels,
-          raw: bytes.slice(0, size),
+          // Nothing writes the buffer until the next push, so no copy is needed.
+          raw: bytes.subarray(0, size),
         });
       this.#head = null;
       if (boundary < 0) {
         this.#consume(bytes.length);
-        return items;
+        return;
       }
       this.#consume(boundary + 2);
     }

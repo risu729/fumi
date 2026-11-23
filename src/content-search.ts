@@ -7,6 +7,7 @@ import {
 } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { pairBoundary, truncateCodeUnits } from "./utf16.ts";
+import { CURRENT_IDENTITY_SQL } from "./mail-identity.ts";
 
 const VERSION = "text-v2";
 const CHUNK = 3500;
@@ -378,7 +379,7 @@ export async function searchMailContent(
     JOIN mail_search_documents d ON d.raw_key=c.raw_key AND d.status='ready'
     JOIN archive_sources s ON s.raw_key=c.raw_key
     JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=d.manifest_key
-    LEFT JOIN mail_identity i ON i.raw_key=c.raw_key AND i.status='complete' AND i.raw_sha256=s.raw_sha256
+    LEFT JOIN mail_identity i ON i.raw_key=c.raw_key AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND i.raw_sha256=s.raw_sha256
     WHERE mail_search_fts MATCH ? AND mail_search_fts.rowid<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
     ORDER BY mail_search_fts.rowid DESC LIMIT ?`)
       .bind(`"${query.replaceAll('"', '""')}"`, before, ...parsed.values, limit + 1)
