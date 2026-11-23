@@ -438,7 +438,8 @@ export async function runTakeoutChunk(
     const splitter = new TakeoutMboxSplitter(GMAIL_IMPORT_RAW_LIMIT, offset);
     let read = 0;
     try {
-      // Entries already split are handled before end() can reject the stream's tail.
+      // The splitter returns the entries before an error and throws it on the next call,
+      // so they are handled first and the checkpoint reaches the stop.
       const handleAll = async (
         items: TakeoutItem[],
       ): Promise<TakeoutChunkResult | "limit" | null> => {

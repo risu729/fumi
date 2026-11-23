@@ -271,7 +271,8 @@ behaviour:
 - [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The
   stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
   and Takeout's separator removed. A malformed or cut-off stream stops the run with
-  the splitter's fixed code and stream offset.
+  the splitter's fixed code and stream offset, once every entry split before the error
+  is processed.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference

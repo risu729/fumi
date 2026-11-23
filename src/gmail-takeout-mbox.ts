@@ -188,8 +188,9 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
  * Splits a Takeout mbox stream. Push chunks in order, then call `end()` once. Each
  * returned entry's `raw` is a copy that stays valid after later pushes. An entry whose
  * stripped size exceeds `rawLimit` is reported as `oversize` without retaining its
- * bytes, so memory stays near one entry plus one chunk. After an error every later
- * call throws it again.
+ * bytes, so memory stays near one entry plus one chunk. A call that splits entries
+ * before an error returns them, and the next call throws the error; every later call
+ * throws it again.
  *
  * The format cannot show a stream cut right after a blank line in the last message,
  * so the caller must also check that it pushed the whole object (for example, the
@@ -250,35 +251,39 @@ export class TakeoutMboxSplitter {
     return this.#run(true);
   }
 
-  /** The first error is kept, so a retry or cleanup never reads a failed stream as complete. */
+  /**
+   * The first error is kept, so a retry or cleanup never reads a failed stream as
+   * complete. Entries split before it are returned first, and the next call throws it.
+   */
   #run(final: boolean): TakeoutItem[] {
+    const items: TakeoutItem[] = [];
     try {
-      return this.#drain(final);
+      this.#drain(final, items);
     } catch (error) {
       this.#failed = true;
       this.#error = error;
-      throw error;
+      if (items.length === 0) throw error;
     }
+    return items;
   }
 
   get #bytes(): Uint8Array {
     return this.#store.subarray(this.#start, this.#end);
   }
 
-  #drain(final: boolean): TakeoutItem[] {
-    const items: TakeoutItem[] = [];
+  #drain(final: boolean, items: TakeoutItem[]): void {
     for (;;) {
       if (!this.#head) {
         const bytes = this.#bytes;
-        if (bytes.length === 0) return items;
-        if (bytes.length < 5 && !final) return items;
+        if (bytes.length === 0) return;
+        if (bytes.length < 5 && !final) return;
         if (latin1.decode(bytes.subarray(0, 5)) !== "From ")
           throw new TakeoutMboxError(
             this.#base === 0 ? "takeout_invalid_start" : "takeout_invalid_from_line",
             this.#base,
           );
         const head = parseHead(bytes, this.#base, final);
-        if (!head) return items;
+        if (!head) return;
         this.#head = { ...head, offset: this.#base };
         this.#consume(head.size);
         this.#dropped = 0;
@@ -296,7 +301,7 @@ export class TakeoutMboxSplitter {
           this.#dropped += drop;
           this.#consume(drop);
         }
-        return items;
+        return;
       }
       // At the end of the stream the entry ends at the last two bytes, Takeout's
       // separator, which must follow the message's own CRLF.
@@ -327,7 +332,7 @@ export class TakeoutMboxSplitter {
       this.#head = null;
       if (boundary < 0) {
         this.#consume(bytes.length);
-        return items;
+        return;
       }
       this.#consume(boundary + 2);
     }

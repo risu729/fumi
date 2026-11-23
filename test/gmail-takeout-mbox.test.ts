@@ -237,6 +237,18 @@ describe("Takeout mbox splitter", () => {
       });
   });
 
+  it("returns entries split before an error and throws it on the next call", () => {
+    const head = entry({ id: "1", message: first });
+    const bad = `From 2@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 2\r\nSubject: x\r\n\r\nbody\r\n\r\n`;
+    const splitter = new TakeoutMboxSplitter();
+    const items = splitter.push(encoder.encode(head + bad));
+    expect(items.map((item) => item.offset)).toEqual([0]);
+    expect(decoder.decode((items[0] as TakeoutEntry).raw)).toBe(first);
+    const error = failure(() => splitter.end());
+    expect(error).toEqual({ code: "takeout_invalid_gmail_headers", offset: head.length });
+    expect(failure(() => splitter.push(encoder.encode(mbox)))).toEqual(error);
+  });
+
   it("stops when a message has no final line break before the next entry", () => {
     const head = entry({ id: "1", message: first });
     const text = `${head.slice(0, -2)}${entry({ id: "2", message: second })}`;
