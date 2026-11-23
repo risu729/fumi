@@ -68,10 +68,14 @@ Status (2026-11-22 07:52 UTC): implemented for
 [#138](https://github.com/risu729/fumi/issues/138). Before this, health only counted
 forwarding failures, and finding the failed messages needed direct D1 access.
 
-A forward failure usually throws, Email Routing reports a temporary failure, and the
-sender retries. Each attempt is its own ingress row, so the failure count overstates
-mail that never reached the destination. `sections.forward_failures` reads the same
-1,000-row window as the catalog section and returns:
+Until 2026-11-23 a forward failure usually threw, Email Routing reported a temporary
+failure, and the sender retried. Since then the handler throws only when the original
+was not stored as well
+([delivery and storage boundaries](ingress.md#delivery-and-storage-boundaries)), so a
+failed forward of a stored original stays `unrecovered`: it is in fumi, not in Gmail.
+Each attempt is its own ingress row, so the failure count overstates mail that never
+reached the destination. `sections.forward_failures` reads the same 1,000-row window as
+the catalog section and returns:
 
 ```json
 {

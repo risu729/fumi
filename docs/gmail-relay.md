@@ -83,11 +83,11 @@ Everything else is stored as live mail:
 - A reply has no default sender, because the envelope recipient is fumi's forwarding
   address: `from_address` is required (`reply_sender_unavailable` otherwise).
 - When the original cannot be captured or stored, forwarding mode throws after the
-  receipt is written, as for a failed forward (except `invalid_size` and `oversize`,
-  which fail the same way on every retry), so Email Routing reports a failure to
-  Gmail; whether Gmail retries is not established. Archive-only mode rejects it
-  permanently, and repeated bounces may make Gmail warn about or turn off forwarding.
-  Gmail keeps its copy either way.
+  receipt is written, as for a failed forward whose original was not stored (except
+  `invalid_size` and `oversize`, which fail the same way on every retry), so Email
+  Routing reports a failure to Gmail; whether Gmail retries is not established.
+  Archive-only mode rejects it permanently, and repeated bounces may make Gmail warn
+  about or turn off forwarding. Gmail keeps its copy either way.
 - The `ingest` log line adds `"relay": "gmail"`. A dropped copy logs
   `"archive": "duplicate_of_live"`.
 

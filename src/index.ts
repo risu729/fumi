@@ -493,9 +493,14 @@ export default {
         }),
       );
     }
-    // Preserve successful forwarding across R2 failures. Surface forwarding failure
-    // to Email Routing only after saving whatever recovery evidence was possible.
-    if (forwarding?.status === "failed") throw new Error("Forwarding did not complete");
+    // Gmail forwarding is optional and fumi's archive is the copy that counts (owner,
+    // 2026-11-23 17:53 UTC). A failed forward asks the sender to retry only when the
+    // original is not stored: a retry cannot fix a forward that fails every time (a
+    // DMARC-strict sender) and only archives another copy. Successful forwarding is
+    // preserved across R2 failures, as before.
+    if (forwarding?.status === "failed" && archive.status !== "stored") {
+      throw new Error("Forwarding did not complete");
+    }
     // Gmail keeps its copy, but fumi sees relayed mail nowhere else: ask for a retry like a
     // failed forward. Archive-only mode has already rejected it above.
     // A declared size that cannot be stored fails the same way on every retry.

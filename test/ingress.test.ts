@@ -324,10 +324,13 @@ describe("archive and forward ingress in workerd", () => {
     },
   );
 
-  it("surfaces forwarding failure after preserving the raw mail and failed outcome", async () => {
+  it("accepts a stored message whose forward failed and records the failed outcome", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     const incoming = message();
     incoming.forward.mockRejectedValue(new Error("private SMTP diagnostic"));
-    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    // Gmail forwarding is optional: a stored original never asks the sender to retry.
+    await run(incoming);
+    expect(incoming.setReject).not.toHaveBeenCalled();
     const receipt = (await receipts())[0];
     expect(receipt?.archive.status).toBe("stored");
     expect(receipt?.schemaVersion).toBe(1);
@@ -355,9 +358,7 @@ describe("archive and forward ingress in workerd", () => {
       const bindings: Env = { ...env };
       if (error === "no-target") delete bindings.FORWARD_TO;
       else if (error) incoming.forward.mockRejectedValue(error);
-      const ran = run(incoming, bindings);
-      if (error) await expect(ran).rejects.toThrow("Forwarding did not complete");
-      else await ran;
+      await run(incoming, bindings);
       const [stored] = (await objects()).filter((object) => object.key.endsWith("/receipt.json"));
       const text = await (await env.MAIL_ARCHIVE.get(stored!.key))!.text();
       const receipt = JSON.parse(text) as Receipt;
@@ -390,7 +391,7 @@ describe("archive and forward ingress in workerd", () => {
         "550 5.7.1 private-recipient@example.invalid rejected <private-id@example.invalid>",
       ),
     );
-    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    await run(incoming);
     const receipt = (await receipts())[0]!;
     expect(receipt).toMatchObject({
       schemaVersion: 3,
@@ -425,7 +426,7 @@ describe("archive and forward ingress in workerd", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const incoming = message();
     incoming.forward.mockRejectedValue(new Error(text));
-    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    await run(incoming);
     const receipt = (await receipts())[0]!;
     expect(receipt.schemaVersion).toBe(schemaVersion);
     expect(receipt.forward).toEqual({ status: "failed", ...reason });
@@ -533,10 +534,9 @@ describe("archive and forward ingress in workerd", () => {
     "a@gmail.com,b@gmail.com",
     "a@gmail.com\r\nBcc: x@gmail.com",
   ])("rejects unsafe private forwarding configuration %s and still archives", async (target) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     const incoming = message();
-    await expect(run(incoming, { ...env, FORWARD_TO: target })).rejects.toThrow(
-      "Forwarding did not complete",
-    );
+    await run(incoming, { ...env, FORWARD_TO: target });
     expect(incoming.forward).not.toHaveBeenCalled();
     expect((await receipts())[0]?.archive.status).toBe("stored");
     expect((await receipts())[0]?.forward).toEqual({ status: "failed", code: "invalid_target" });
@@ -546,7 +546,7 @@ describe("archive and forward ingress in workerd", () => {
     const incoming = message();
     incoming.to = env.FORWARD_TO!.toUpperCase();
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    await run(incoming);
     expect(incoming.forward).not.toHaveBeenCalled();
     // The loop guard keeps its own v1 code, distinct from the classified SMTP reasons.
     expect((await receipts())[0]).toMatchObject({
