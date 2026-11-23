@@ -143,6 +143,25 @@ parts ([managed retrieval](managed-mail-search.md)). `copy_attachment` fails wit
 external ID matches more than one catalog source fails with `message_conflict` instead
 of choosing one.
 
+### Thread reads
+
+`read_email_thread` finds its messages by key, so its D1 cost does not grow with the
+archive. A live thread is the anchor plus every live original whose `mime-v1`
+extraction metadata has `messageId` equal to the anchor's `messageId` or `inReplyTo`,
+or `inReplyTo` equal to the anchor's `messageId`. These links come from the stored
+extraction even when it is no longer current; such messages are listed with `null`
+content. Metadata that is not valid JSON matches no link. A Gmail thread is the anchor
+plus the originals of the same account and Gmail thread ID. The lookups use
+[`0020_thread_lookup.sql`](../migrations/0020_thread_lookup.sql): an index on
+`archive_sources.external_id`, which every `mail_` ID read uses, and expression
+indexes on the two metadata fields. The query must repeat the indexed expressions
+exactly.
+
+Evidence, 2026-11-23 00:59 UTC, synthetic local D1 with 2,004 sources: a two-message
+live thread read 8,045 rows before these indexes and 44 after; a two-message Gmail
+thread read 8,074 and 73. Before, each message read scanned every source for its
+external ID and the thread query scanned every source of its kind.
+
 ## Attachment limits
 
 Decision by the owner, 2026-11-18 12:07 UTC: raise the limits for clients that
