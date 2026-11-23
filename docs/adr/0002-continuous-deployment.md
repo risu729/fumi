@@ -144,6 +144,20 @@ configuration and exits before any API request, so it cannot show this compariso
   refused there, that grant is added as the owner allowed. It would let the token change
   or delete every Worker in the account.
 
+### Outcome
+
+The narrow grants were applied in
+[risu729/infra#163](https://github.com/risu729/infra/pull/163). The first synchronizing
+deployment, [run 45238054024](https://github.com/risu729/fumi/actions/runs/45238054024)
+(18:27 UTC), applied the Custom Domain, the Cron schedule and the queue consumer, but
+both Workflow `PUT` requests were refused with code 10105 (`not_entitled`). Account-wide
+Workers Scripts Write was then added in
+[risu729/infra#167](https://github.com/risu729/infra/pull/167), and
+[run 45243046142](https://github.com/risu729/fumi/actions/runs/45243046142) (18:55 UTC)
+synchronized every trigger, including both Workflows (`fumi-mail-processing` and
+`fumi-gmail-takeout`).
+The production token can therefore change or delete every Worker in the account.
+
 ### Consequences
 
 - A change to `triggers`, `domains` or a Workflow export reaches production with the
