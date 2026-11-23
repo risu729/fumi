@@ -92,11 +92,13 @@ The three-dispatch bound is independent of the declared 25-instance
 capacity after acknowledgment; archive progress is not a processing-start or
 search-completion measurement.
 
-Raw import supports originals up to 25 MiB, while the unchanged MIME input limit
-is 4 MiB. Larger originals remain archived with explicit blocked extraction and
-omitted search coverage; immediate dispatch does not make them searchable.
-Gmail internal date is a provider fact; it is not a claimed SMTP receipt date.
-There is no fabricated SMTP envelope or forwarding success for historical sources.
+The API transports hold a whole message in memory, so they accept originals up to 25
+MiB; the Takeout transport has no size limit (below). Imported mail has no common limit:
+Email Routing's 25 MiB applies only to live capture (owner, 2026-11-23 17:55 UTC). The
+unchanged MIME input limit is 4 MiB. Larger originals remain archived with explicit
+blocked extraction and omitted search coverage; immediate dispatch does not make them
+searchable. Gmail internal date is a provider fact; it is not a claimed SMTP receipt
+date. There is no fabricated SMTP envelope or forwarding success for historical sources.
 
 SHA-256 of the trusted namespace and provider message ID produces a deterministic
 UUID-shaped public Fumi identity. Gmail originals use the existing validated
@@ -146,7 +148,8 @@ new run; the runner never silently resets the traversal.
 
 ## Bounds and integration
 
-Raw MIME is bounded at 25 MiB, matching live capture. The transport incrementally
+The API transports bound raw MIME at 25 MiB, a memory bound of these transports, not
+an import limit. The transport incrementally
 decodes the base64 raw field into a bounded buffer, retains at most 32 KiB of JSON
 metadata, and applies a fifteen-second deadline to each attempt. With up to four
 attempts and 1, 2 and 4 second backoff between them, one request that keeps timing
@@ -279,7 +282,7 @@ behaviour:
   `takeout_header_limit`. Where the reads split the stream never changes the entries,
   the code or the offset.
 - The format was measured on the main account's export of 2026-11-23 (40,598 entries and
-  4 over the raw limit, 3,952,532,507 bytes), against the 4,810 messages the connector
+  4 over 25 MiB, 3,952,532,507 bytes), against the 4,810 messages the connector
   had already stored for that account:
   - Takeout folds a long `X-Gmail-Labels` onto lines that start with a space (159
     entries). The splitter unfolds them: it removes the CRLF and keeps the space. A
@@ -304,7 +307,20 @@ behaviour:
     earlier for 38.
   - The owner chose to unfold labels, accept LF endings and remove mboxrd escaping,
     and to keep the added CRLF (2026-11-23 02:36 UTC).
-- The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
+- No entry is too large to import. The splitter returns an entry of at most 25 MiB
+  (the buffer limit, a memory bound) with its bytes, and a larger one as `large`: the
+  same fields with the stream offset and size of its message instead of the bytes. The
+  import reads a large message again from the Takeout objects in 8 MiB ranges, across
+  object boundaries, and removes the mboxrd escaping in a streaming pass that holds at
+  most six bytes between reads. A first pass computes the SHA-256 and size; a second
+  streams the bytes into one conditional R2 put with that length and SHA-256, which R2
+  checks, so bytes that changed between the passes are never stored. A large entry then
+  goes through the same `verified`, `conflict` and `imported` outcomes as any other.
+  Until this change (2026-11-23), an entry over 25 MiB was recorded as `oversize` and
+  not stored. No run had reached the 4 such entries in the main account's export
+  then, so its run imports them; a run that already recorded `oversize` entries needs a
+  new run to store them.
+- The splitter's memory is bounded. Between reads it keeps at most the buffer limit plus
   149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of `From_`
   line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds 25 MiB +
   149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates the buffer at
@@ -312,15 +328,16 @@ behaviour:
   (after short reads at the end of an object) doubles until a read needs more, and is
   then replaced by one of that size. Each entry's raw bytes are a view of the buffer,
   handled before the next read, so the splitter makes no copy of a message. The import
-  makes one unescaped copy, at most the raw limit, only for an entry with an escaped
+  makes one unescaped copy, at most the buffer limit, only for an entry with an escaped
   line, and drops it before the next entry; the R2 binding still copies the bytes it
-  uploads, at most the raw limit, outside the JavaScript heap during the put. A step
-  holds about 41.0 MiB of Takeout data in the JavaScript heap (the buffer and one read),
-  at most 66.0 MiB while an unescaped copy exists, and at most 49.0 MiB while a small
-  buffer is replaced (no copy exists then), of the 128 MB the Worker shares with the
-  rest of the isolate. The buffer is released when the stream ends or fails.
-  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the raw limit that
-  starts 1000 bytes before the end of a read.
+  uploads, at most the buffer limit, outside the JavaScript heap during the put. A large
+  entry adds one 8 MiB read and its unescaped copy while it is hashed or streamed. A
+  step holds about 41.0 MiB of Takeout data in the JavaScript heap (the buffer and one
+  read), at most 66.0 MiB while an unescaped copy exists, and at most 49.0 MiB while a
+  small buffer is replaced (no copy exists then), of the 128 MB the Worker shares with
+  the rest of the isolate. The buffer is released when the stream ends or fails.
+  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the buffer limit
+  that starts 1000 bytes before the end of a read.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference
@@ -345,7 +362,8 @@ behaviour:
     run stops at that entry with `takeout_raw_conflict`. After review, the same run
     resumes with `onConflict: "record"`; a stopped run accepts a changed
     configuration only when its account and objects are unchanged.
-  - `oversize`: over the 25 MiB raw limit, measured before unescaping; not stored.
+  - `oversize`: no longer recorded; until 2026-11-23 an entry over 25 MiB got it and
+    was not stored. The value stays allowed in D1 for older rows.
   - `skipped`: its stream offset is in the configuration's `skip` list; not stored.
 - A stopped run resumes from its checkpoint when the configuration changes. Raise
   `attempt` after a transient failure. For a stop a split entry causes

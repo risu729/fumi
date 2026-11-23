@@ -170,3 +170,13 @@ independent review found two gaps, and the implementation differs from the text 
   `identity_version` is replaced by the backfill.
 
 Details are in [copies of one message](../copy-grouping.md).
+
+## Amendment 2026-11-23: no size limit for imported mail (owner)
+
+Decision 3 bounded Takeout entries at 25 MiB, the Email Routing limit. The owner
+decided on 2026-11-23 at 17:55 UTC that imports, which Email Routing does not carry, get
+no common size limit; 25 MiB stays a limit of live capture only. The Takeout transport
+now streams an entry over its 25 MiB memory buffer from the Takeout objects into the
+archive instead of recording it as `oversize`. The API transports keep their 25 MiB
+memory bound. Details are in
+[historical Gmail import](../gmail-import.md#google-takeout-transport).
