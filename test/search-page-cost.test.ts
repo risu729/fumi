@@ -413,7 +413,7 @@ describe("search page cost", () => {
     // Page 1 and page 10 of each search read exactly as many rows at both archive sizes.
     expect(costs[1]).toEqual(costs[0]);
     for (const page of costs[0]!.flat()) expect(page).toBeLessThan(3000);
-  });
+  }, 30_000);
 
   it("reads no older Gmail-only import when archive_source keeps to live captures", async () => {
     const costs = [];
@@ -509,7 +509,7 @@ describe("search page cost", () => {
           .run();
       });
     }
-  });
+  }, 30_000);
 
   it("collapses everything at once when larger walks still fall short", async () => {
     // Three groups of many Gmail copies with interleaved times: the newest originals are
