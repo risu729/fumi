@@ -73,7 +73,8 @@ const SELECT_MAIL = `SELECT ${MAIL_COLUMNS} FROM archive_sources s ${MAIL_JOINS}
  * copy group: live capture first, then Gmail copies by earliest provider receipt time
  * (the account that received it first, before any forwarding hop), then external ID.
  * A thread read prefers the message it was asked for. Rows without a complete identity
- * row for their current original, or whose row is newer than the snapshot, stand alone.
+ * row for their current, present original (as in CURRENT_EXTRACTION_SQL), or whose row
+ * is newer than the snapshot, stand alone.
  * `copies` counts the originals of the group that matched the same filters.
  */
 function collapsedSql(
@@ -84,7 +85,7 @@ function collapsedSql(
 ) {
   const { after = "", preferRawKey = false } = options;
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND s.raw_state='present' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
@@ -453,9 +454,14 @@ export interface SearchArgs {
   expand_copies?: boolean | undefined;
 }
 interface Cursor {
+  /** 2 since fumi-sent mail joined the search; earlier tokens are rejected. */
+  version: 2;
   snapshot: number;
   /** mail_identity rowid snapshot; copy groups are fixed for the whole traversal. */
   groups: number;
+  /** The largest outbound_operations rowid of this principal when the search started. */
+  sent: number;
+  /** Order key of the last result: its time as an ISO string ('' for none) and public ID. */
   beforeTime: string;
   beforeId: string;
   query: string;
@@ -471,12 +477,13 @@ function decodeCursor(value: string): Cursor {
       ),
     ) as Cursor;
     if (
-      !Number.isSafeInteger(cursor.snapshot) ||
-      cursor.snapshot < 0 ||
-      !Number.isSafeInteger(cursor.groups) ||
-      cursor.groups < 0 ||
+      cursor.version !== 2 ||
+      [cursor.snapshot, cursor.groups, cursor.sent].some(
+        (rowid) => !Number.isSafeInteger(rowid) || rowid < 0,
+      ) ||
       typeof cursor.beforeTime !== "string" ||
       typeof cursor.beforeId !== "string" ||
+      !/^(?:mail|sent)_/.test(cursor.beforeId) ||
       typeof cursor.query !== "string"
     )
       throw new Error();
@@ -490,11 +497,16 @@ const D1_BOUND_PARAMETERS = 100;
 /**
  * The most parameters a caller binds besides the parsed filters. search_mail_semantic binds
  * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
- * and two per label for up to ten labels (33). search_emails binds at most 27 (two snapshots,
- * archive source, 20 for labels, three for the cursor, limit) and search_mail_content 3.
+ * and two per label for up to ten labels (33). search_emails binds at most 27 in its archive
+ * statement (two snapshots, archive source, 20 for labels, three for the cursor, limit) and
+ * 7 in its sent statement (principal, snapshot, four for the cursor, limit), and
+ * search_mail_content 3.
  */
 const CALLER_BOUND_PARAMETERS = 33;
-/** Each filter binds at most two values: a from:, to: or subject: value with uppercase non-ASCII. */
+/**
+ * Each filter binds at most two values: a from:, to: or subject: value with uppercase
+ * non-ASCII, in the archive and the sent statement alike. in: binds none.
+ */
 export const MAX_SEARCH_FILTERS = Math.floor((D1_BOUND_PARAMETERS - CALLER_BOUND_PARAMETERS) / 2);
 /**
  * Joins filters as a balanced AND tree. A flat `a AND b AND c` chain nests one level per
@@ -505,49 +517,217 @@ function balancedAnd(clauses: string[]): string {
   const middle = Math.ceil(clauses.length / 2);
   return `(${balancedAnd(clauses.slice(0, middle))} AND ${balancedAnd(clauses.slice(middle))})`;
 }
-export function parseMailSearch(query: string) {
+type SearchFilter =
+  | { kind: "text"; field: "from" | "to" | "subject"; needles: string[] }
+  | { kind: "date"; operator: "after" | "before"; value: string }
+  | { kind: "attachment" }
+  | { kind: "mailbox"; label: "INBOX" | "SENT" };
+const MAILBOXES: Record<string, "INBOX" | "SENT"> = { inbox: "INBOX", sent: "SENT" };
+/** `in:` is accepted only where sent mail is searched: search_emails and search_email_ids. */
+function parseSearchFilters(query: string, mailbox: boolean): SearchFilter[] {
   if (query.length > 1000) throw new MailReadError("query_too_long");
-  const clauses: string[] = [];
-  const values: (string | number)[] = [];
   const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
   if (tokens.join(" ").replaceAll(" ", "") !== query.replace(/\s/g, ""))
     throw new MailReadError("unsupported_query");
   if (tokens.length > MAX_SEARCH_FILTERS) throw new MailReadError("query_too_long");
-  for (const token of tokens) {
-    const match = /^(from|to|subject|after|before|has):(.+)$/.exec(token);
+  return tokens.map((token): SearchFilter => {
+    const match = /^(from|to|subject|after|before|has|in):(.+)$/.exec(token);
     if (!match) throw new MailReadError("unsupported_query");
     const [, operator, raw] = match;
     const value = raw!.replace(/^"(.*)"$/, "$1");
+    if (operator === "in") {
+      const label =
+        mailbox && Object.hasOwn(MAILBOXES, value.toLowerCase())
+          ? MAILBOXES[value.toLowerCase()]
+          : undefined;
+      if (!label) throw new MailReadError("unsupported_query");
+      return { kind: "mailbox", label };
+    }
     if (operator === "has") {
       if (value !== "attachment") throw new MailReadError("unsupported_query");
-      clauses.push("COALESCE(e.attachment_count,0)>0");
-    } else if (operator === "after" || operator === "before") {
+      return { kind: "attachment" };
+    }
+    if (operator === "after" || operator === "before") {
       if (
         !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
         Number.isNaN(Date.parse(value)) ||
         new Date(value).toISOString().slice(0, 10) !== value
       )
         throw new MailReadError("invalid_search_date");
-      clauses.push(`s.received_at ${operator === "after" ? ">=" : "<"} ?`);
-      values.push(`${value}T00:00:00.000Z`);
+      return { kind: "date", operator, value };
+    }
+    // SQLite LOWER() folds ASCII only, so match non-ASCII as written and, when that
+    // differs, also in lowercase (the form earlier versions matched). Neither needle has
+    // ASCII uppercase, as the LOWER() column has none.
+    const needles = [
+      ...new Set([value.replace(/[A-Z]/g, (letter) => letter.toLowerCase()), value.toLowerCase()]),
+    ];
+    return { kind: "text", field: operator as "from" | "to" | "subject", needles };
+  });
+}
+/** instr() rather than LIKE: D1 rejects LIKE patterns over 50 bytes, and a value has no
+ * wildcards to escape. */
+const containsAny = (column: string, needles: string[]) =>
+  `(${needles.map(() => `instr(${column},?)>0`).join(" OR ")})`;
+const gmailLabel = (label: "INBOX" | "SENT") =>
+  `(s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value='${label}'))`;
+/** Clauses over archive_sources `s`, mail_extractions `e` and gmail_messages `g`. */
+function archiveFilterSql(filters: SearchFilter[]) {
+  const clauses: string[] = [];
+  const values: (string | number)[] = [];
+  for (const filter of filters) {
+    if (filter.kind === "mailbox")
+      // Live ingress is INBOX; imported Gmail keeps its provider label IDs.
+      clauses.push(
+        filter.label === "INBOX"
+          ? `(s.source_kind='email_routing' OR ${gmailLabel("INBOX")})`
+          : gmailLabel("SENT"),
+      );
+    else if (filter.kind === "attachment") clauses.push("COALESCE(e.attachment_count,0)>0");
+    else if (filter.kind === "date") {
+      clauses.push(`s.received_at ${filter.operator === "after" ? ">=" : "<"} ?`);
+      values.push(`${filter.value}T00:00:00.000Z`);
     } else {
-      const path = operator === "from" ? "$.from" : operator === "to" ? "$.to" : "$.subject";
-      // SQLite LOWER() folds ASCII only, so match non-ASCII as written and, when that
-      // differs, also in lowercase (the form earlier versions matched).
-      const needles = [
-        ...new Set([
-          value.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
-          value.toLowerCase(),
-        ]),
-      ];
-      const column = `LOWER(COALESCE(json_extract(e.metadata_json, '${path}'),''))`;
-      // instr() rather than LIKE: D1 rejects LIKE patterns over 50 bytes, and a value has
-      // no wildcards to escape. Both needles have no ASCII uppercase, as the column has none.
-      clauses.push(`(${needles.map(() => `instr(${column},?)>0`).join(" OR ")})`);
-      values.push(...needles);
+      clauses.push(
+        containsAny(
+          `LOWER(COALESCE(json_extract(e.metadata_json, '$.${filter.field}'),''))`,
+          filter.needles,
+        ),
+      );
+      values.push(...filter.needles);
     }
   }
   return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };
+}
+/**
+ * Clauses over outbound_operations `o`, or null when the filters exclude fumi-sent mail.
+ * to: matches To and Cc recipients; Bcc is never searched. An operation whose subject
+ * and attachment count are not projected yet matches no subject: or has:attachment.
+ */
+function sentFilterSql(filters: SearchFilter[]) {
+  const clauses: string[] = [];
+  const values: (string | number)[] = [];
+  for (const filter of filters) {
+    if (filter.kind === "mailbox") {
+      if (filter.label === "INBOX") return null;
+    } else if (filter.kind === "attachment") clauses.push("o.attachment_count>0");
+    else if (filter.kind === "date") {
+      clauses.push(`o.created_at ${filter.operator === "after" ? ">=" : "<"} ?`);
+      values.push(Date.parse(`${filter.value}T00:00:00.000Z`));
+    } else {
+      clauses.push(
+        filter.field === "from"
+          ? containsAny("LOWER(o.from_address)", filter.needles)
+          : filter.field === "subject"
+            ? `(o.subject IS NOT NULL AND ${containsAny("LOWER(o.subject)", filter.needles)})`
+            : `EXISTS(SELECT 1 FROM outbound_recipients r WHERE r.operation_id=o.operation_id AND r.kind IN ('to','cc') AND ${containsAny("LOWER(r.address)", filter.needles)})`,
+      );
+      values.push(...filter.needles);
+    }
+  }
+  return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };
+}
+/** Search filters of search_mail_content and search_mail_semantic, over archive mail only. */
+export function parseMailSearch(query: string) {
+  return archiveFilterSql(parseSearchFilters(query, false));
+}
+/**
+ * Submission states searched as sent mail: provider acceptance, and the uncertain outcomes
+ * that may have reached the provider (a surviving `submitting` claim reads as `unknown`).
+ * `prepared` was never submitted and `rejected` was refused by the provider.
+ */
+const SENT_STATES = ["accepted", "unknown"];
+const SENT_STATES_SQL = "o.state IN ('accepted','unknown','submitting')";
+/** The ISO time of an operation's created_at, so both sources share one order key. */
+const SENT_TIME_SQL =
+  "strftime('%Y-%m-%dT%H:%M:%S',o.created_at/1000,'unixepoch')||printf('.%03dZ',o.created_at%1000)";
+/**
+ * The largest created_at whose ISO time can sort at or before a token time. ISO times of
+ * created_at grow with it, so a time toISOString() writes maps to its millisecond, and ''
+ * (an archive row without a time) sorts after every send. Any other string gets no bound.
+ */
+function sentTimeBound(time: string) {
+  if (time === "") return -1;
+  const milliseconds = Date.parse(time);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === time
+    ? milliseconds
+    : Number.MAX_SAFE_INTEGER;
+}
+interface SentRow {
+  operation_id: string;
+  state: string;
+  created_at: number;
+  sort_time: string;
+  from_address: string;
+  subject: string | null;
+  recipients_json: string;
+}
+function sentSummary(row: SentRow, collapsed: boolean) {
+  const id = `sent_${row.operation_id}`;
+  const recipients = JSON.parse(row.recipients_json) as [string, string][];
+  return {
+    id,
+    thread_id: id,
+    label_ids: ["SENT"],
+    state: row.state === "submitting" ? "unknown" : row.state,
+    operation_id: row.operation_id,
+    created_at: row.created_at,
+    metadata: {
+      subject: row.subject,
+      from_address: row.from_address,
+      to: recipients.filter(([kind]) => kind === "to").map(([, address]) => address),
+      cc: recipients.filter(([kind]) => kind === "cc").map(([, address]) => address),
+    },
+    // A sent record is never grouped with archived copies (ADR 0004 groups originals).
+    ...(collapsed ? { group_id: null, copies: 1 } : {}),
+  };
+}
+async function searchSentMail(
+  env: MailReadEnvironment,
+  principal: MailPrincipal,
+  filters: { clauses: string[]; values: (string | number)[] },
+  snapshot: number,
+  cursor: Cursor | null,
+  limit: number,
+) {
+  const clauses = ["o.principal_id=?", "o.rowid<=?", SENT_STATES_SQL, ...filters.clauses];
+  const values: (string | number)[] = [principal.id, snapshot, ...filters.values];
+  if (cursor) {
+    // The bound lets the index start at the token's position instead of scanning every
+    // newer send of the principal; the ISO comparison keeps the exact merged order.
+    clauses.push(
+      `o.created_at<=? AND (${SENT_TIME_SQL}<? OR (${SENT_TIME_SQL}=? AND 'sent_'||o.operation_id<?))`,
+    );
+    values.push(
+      sentTimeBound(cursor.beforeTime),
+      cursor.beforeTime,
+      cursor.beforeTime,
+      cursor.beforeId,
+    );
+  }
+  const [page, unavailable] = await env.MAIL_CATALOG.batch([
+    env.MAIL_CATALOG.prepare(
+      `SELECT o.operation_id,o.state,o.created_at,${SENT_TIME_SQL} AS sort_time,o.from_address,o.subject,
+       (SELECT json_group_array(json_array(r.kind,r.address)) FROM outbound_recipients r
+         WHERE r.operation_id=o.operation_id AND r.kind IN ('to','cc')) AS recipients_json
+       FROM outbound_operations o WHERE ${clauses.join(" AND ")}
+       ORDER BY o.created_at DESC,o.operation_id DESC LIMIT ?`,
+    ).bind(...values, limit + 1),
+    env.MAIL_CATALOG.prepare(
+      `SELECT COUNT(*) AS count FROM outbound_operations o
+       WHERE o.principal_id=? AND o.rowid<=? AND ${SENT_STATES_SQL}
+       AND (o.attachment_count IS NULL OR o.attachment_count<0)`,
+    ).bind(principal.id, snapshot),
+  ]);
+  return {
+    rows: page!.results as SentRow[],
+    unavailable: (unavailable!.results[0] as { count: number }).count,
+  };
+}
+/** Descending by time, then by public ID; the SQL order of each source agrees with it. */
+function newerFirst(a: { time: string; id: string }, b: { time: string; id: string }) {
+  if (a.time !== b.time) return a.time < b.time ? 1 : -1;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 export async function searchMail(
   env: MailReadEnvironment,
@@ -562,21 +742,33 @@ export async function searchMail(
   if (labels.length > 10 || labels.some((label) => !/^[A-Za-z0-9_-]{1,128}$/.test(label)))
     throw new MailReadError("unsupported_label");
   const query = args.query ?? "";
-  const parsed = parseMailSearch(query);
+  const filters = parseSearchFilters(query, true);
+  const parsed = archiveFilterSql(filters);
+  // fumi-sent mail is not an archive source, so naming archive sources leaves it out;
+  // its only label is SENT.
+  const sentFilters =
+    args.archive_source === undefined && labels.every((label) => label === "SENT")
+      ? sentFilterSql(filters)
+      : null;
   const limit = args.max_results ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
   const cursor = args.next_page_token ? decodeCursor(args.next_page_token) : null;
   const expand = args.expand_copies ?? false;
-  const binding = JSON.stringify([query, source, labels, expand]);
+  const binding = JSON.stringify([query, args.archive_source ?? null, labels, expand]);
   if (cursor && cursor.query !== binding) throw new MailReadError("page_query_mismatch");
-  const maximum =
-    cursor?.snapshot ??
+  const snapshots =
+    cursor ??
     (await env.MAIL_CATALOG.prepare(
-      "SELECT COALESCE(MAX(rowid),0) AS maximum FROM archive_sources",
-    ).first<{ maximum: number }>())!.maximum;
-  const groups = cursor?.groups ?? (await identitySnapshot(env));
+      `SELECT (SELECT COALESCE(MAX(rowid),0) FROM archive_sources) AS snapshot,
+       (SELECT COALESCE(MAX(rowid),0) FROM mail_identity) AS groups,
+       (SELECT COALESCE(MAX(rowid),0) FROM outbound_operations WHERE principal_id=?) AS sent`,
+    )
+      // The token is readable by its holder, so the sent snapshot is this principal's latest
+      // rowid: it moves only with this principal's own sends, never with other principals'.
+      .bind(principal.id)
+      .first<{ snapshot: number; groups: number; sent: number }>())!;
   const clauses = ["s.rowid<=?", ...parsed.clauses];
-  const values: (string | number)[] = [groups, maximum, ...parsed.values];
+  const values: (string | number)[] = [snapshots.groups, snapshots.snapshot, ...parsed.values];
   if (source !== "all") {
     clauses.push("s.source_kind=?");
     values.push(source);
@@ -589,28 +781,44 @@ export async function searchMail(
   }
   // The cursor follows representatives, so it applies after the copies collapse.
   const after = cursor
-    ? "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND s.external_id < ?))"
+    ? "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND 'mail_'||s.external_id < ?))"
     : "";
   if (cursor) values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
-  const rows = (
-    await env.MAIL_CATALOG.prepare(
-      collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, { after }),
-    )
+  const [archived, sent] = await Promise.all([
+    env.MAIL_CATALOG.prepare(collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, { after }))
       .bind(...values, limit + 1)
-      .all<MailRow>()
-  ).results;
-  const more = rows.length > limit;
-  const page = rows.slice(0, limit);
+      .all<MailRow>(),
+    sentFilters ? searchSentMail(env, principal, sentFilters, snapshots.sent, cursor, limit) : null,
+  ]);
+  // Each source returns at most limit + 1 rows after the cursor in the same order, so
+  // the first limit rows of their merge are the page and the next row proves more.
+  const merged = [
+    ...archived.results.map((row) => ({
+      time: row.received_at ?? "",
+      id: inboundMessageId(row.external_id),
+      archived: row,
+    })),
+    ...(sent?.rows ?? []).map((row) => ({
+      time: row.sort_time,
+      id: `sent_${row.operation_id}`,
+      sent: row,
+    })),
+  ].sort(newerFirst);
+  const page = merged.slice(0, limit);
   const last = page.at(-1);
   return {
-    emails: page.map(summary),
+    emails: page.map((entry) =>
+      "archived" in entry ? summary(entry.archived) : sentSummary(entry.sent, !expand),
+    ),
     next_page_token:
-      more && last
+      merged.length > limit && last
         ? encodeCursor({
-            snapshot: maximum,
-            groups,
-            beforeTime: last.received_at ?? "",
-            beforeId: last.external_id,
+            version: 2,
+            snapshot: snapshots.snapshot,
+            groups: snapshots.groups,
+            sent: snapshots.sent,
+            beforeTime: last.time,
+            beforeId: last.id,
             query: binding,
           })
         : null,
@@ -621,6 +829,14 @@ export async function searchMail(
       searches: "extracted_metadata_only",
       incomplete_extractions_visible: true,
       copies: expand ? "every_original" : "one_representative_per_copy_group",
+      sent_operations: sent
+        ? {
+            searched: true,
+            principal: "this_principal_only",
+            states: SENT_STATES,
+            metadata_unavailable: sent.unavailable,
+          }
+        : { searched: false },
     },
     supported_query_operators: [
       "from:",
@@ -629,9 +845,20 @@ export async function searchMail(
       "after:YYYY-MM-DD",
       "before:YYYY-MM-DD",
       "has:attachment",
+      "in:inbox",
+      "in:sent",
     ],
   };
 }
+
+/**
+ * Header links of a live thread. SQLite uses an expression index only for the identical
+ * expression, so these must match migrations/0020_thread_lookup.sql exactly.
+ */
+const headerLink = (path: string) =>
+  `CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'${path}') END`;
+const HEADER_MESSAGE_ID = headerLink("$.messageId");
+const HEADER_IN_REPLY_TO = headerLink("$.inReplyTo");
 
 export async function readMailThread(
   env: MailReadEnvironment,
@@ -656,12 +883,16 @@ export async function readMailThread(
   const expand = args.expand_copies ?? false;
   const groups = await identitySnapshot(env);
   // Header links are untrusted conversation hints; they never grant access or prove identity.
+  // Each thread member is found by key: its raw_key comes from indexed lookups. The unary
+  // `+` keeps the planner from scanning every source of the kind instead.
   const rows =
     row.source_kind === "gmail"
       ? (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              "s.source_kind='gmail' AND ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)",
+              `+s.source_kind='gmail' AND s.raw_key IN (
+    SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND thread_id=?
+    UNION ALL SELECT raw_key FROM archive_sources WHERE external_id=?)`,
               NEWEST_FIRST,
               expand,
               { preferRawKey: true },
@@ -680,9 +911,11 @@ export async function readMailThread(
       : (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              `s.source_kind='email_routing' AND (s.external_id=? OR
-    (? IS NOT NULL AND (json_extract(e.metadata_json,'$.messageId')=? OR json_extract(e.metadata_json,'$.inReplyTo')=?)) OR
-    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))`,
+              `+s.source_kind='email_routing' AND s.raw_key IN (
+    SELECT raw_key FROM archive_sources WHERE external_id=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_IN_REPLY_TO}=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?)`,
               NEWEST_FIRST,
               expand,
               { preferRawKey: true },
@@ -693,8 +926,6 @@ export async function readMailThread(
               row.external_id,
               messageId ?? null,
               messageId ?? null,
-              messageId ?? null,
-              reply ?? null,
               reply ?? null,
               row.raw_key,
               limit + 1,

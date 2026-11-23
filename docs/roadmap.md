@@ -246,6 +246,16 @@ establish production delivery.
       subscriptions, replay and bounded retries.
 - [x] Activate and verify authenticated production MCP reads, sender domains,
       sends/replies, attachment hashes, idempotency and provider delivery events.
+- [x] Search sent mail's metadata over MCP: `search_emails` and `search_email_ids`
+      return the caller's own fumi-sent records beside archived mail, with `in:sent`
+      and `in:inbox` (owner request, 2026-11-23). Migration `0021` adds the subject and
+      attachment count to D1. Synthetic tests only. See
+      [searching sent mail](agent-mail.md#searching-sent-mail).
+- [ ] Search sent mail bodies in `search_mail_content` and `search_mail_semantic`
+      through a principal-owned index (proposed in
+      [searching sent mail](agent-mail.md#searching-sent-mail)).
+- [ ] Find Takeout-imported Gmail SENT mail with `in:sent` once the owner confirms
+      the Takeout label name of Gmail's Sent label.
 - [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known
       client of the draft MCP Events proposal, once the owner's ChatGPT
       subscription resumes. Until then the implementation stays in place, unused,

@@ -705,4 +705,41 @@ describe("collapsed reads", () => {
     );
     expect(expanded.messages.map((mail) => mail.id)).toEqual([first.id, second.id]);
   });
+
+  it("does not let an original that is no longer present represent its group", async () => {
+    const own = await archive(
+      "gmail",
+      "2026-11-07T06:01:20.000Z",
+      mime(headers({ bh: [BH_A], hop: "own" })),
+      { namespace: "forwarding-account" },
+    );
+    const main = await archive(
+      "gmail",
+      "2026-11-07T06:01:30.000Z",
+      mime(headers({ bh: [BH_A], hop: "gmail" })),
+    );
+    await repairMailIdentity(env);
+    expect(
+      (await searchMail(env, principal, {})).emails.map((mail) => [mail.id, mail.copies]),
+    ).toEqual([[own.id, 2]]);
+    // A reconcile pass records a Gmail original whose object is gone, or no longer matches
+    // its provenance, as missing or invalid and keeps the provenance SHA-256. Its identity
+    // row then no longer describes a present original, as CURRENT_EXTRACTION_SQL requires.
+    const collapsedWith = async (state: string) => {
+      await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state=? WHERE raw_key=?")
+        .bind(state, own.key)
+        .run();
+      return (await searchMail(env, principal, {})).emails.map((mail) => [
+        mail.id,
+        mail.group_id,
+        mail.copies,
+      ]);
+    };
+    const expected = [
+      [main.id, expect.any(String), 1],
+      [own.id, null, 1],
+    ];
+    expect(await collapsedWith("missing")).toEqual(expected);
+    expect(await collapsedWith("invalid")).toEqual(expected);
+  });
 });

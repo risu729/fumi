@@ -206,7 +206,7 @@ describe("archive and forward ingress in workerd", () => {
     await expect(worker.scheduled(createScheduledController(), env)).rejects.toThrow(
       "Archive reconciliation did not complete",
     );
-    expect(error).toHaveBeenCalledTimes(6);
+    expect(error).toHaveBeenCalledTimes(7);
     expect(error).toHaveBeenNthCalledWith(
       1,
       JSON.stringify({ event: "archive_reconcile", status: "failed" }),
@@ -229,6 +229,10 @@ describe("archive and forward ingress in workerd", () => {
     );
     expect(error).toHaveBeenNthCalledWith(
       6,
+      JSON.stringify({ event: "sent_search_projection", status: "deferred" }),
+    );
+    expect(error).toHaveBeenNthCalledWith(
+      7,
       JSON.stringify({ event: "event_delivery", status: "deferred" }),
     );
   });

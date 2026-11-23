@@ -33,6 +33,10 @@ data. The optional `filters` argument uses the existing `from:`, `to:`, `subject
 explicitly instead of silently producing empty results. This is lexical retrieval,
 not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains open.
 
+Only archived mail is indexed, and `filters` do not accept `in:`. Bodies of mail sent
+through fumi are not searched yet; see
+[searching sent mail](agent-mail.md#searching-sent-mail) for the proposal.
+
 ## Coverage and resource bounds
 
 Each successful MIME Workflow attempts a separate, retryable lexical index step for its
