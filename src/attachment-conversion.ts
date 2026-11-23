@@ -1,4 +1,4 @@
-import { type MailReadEnvironment } from "./mail-read.ts";
+import { CURRENT_EXTRACTION_SQL, type MailReadEnvironment } from "./mail-read.ts";
 import * as v from "valibot";
 import {
   CONVERSION_LIMITS,
@@ -23,6 +23,7 @@ import {
 import { isEncryptedPdf } from "./attachment-conversion-pdf-encryption.ts";
 import { unlockPdf } from "./attachment-conversion-pdf.ts";
 import { archiveCandidate } from "./archive-key.ts";
+import libpdfPackage from "@libpdf/core/package.json" with { type: "json" };
 
 declare global {
   namespace Cloudflare {
@@ -140,7 +141,8 @@ function attemptReceipt(attempt: PaidAttempt): AttemptReceipt {
     throw new ConversionBlocked("invalid_attempt_receipt");
   }
 }
-const sourceFence = `EXISTS(SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key,json_each(e.attachments_json) p WHERE e.raw_key=attachment_conversions.raw_key AND s.raw_state='present' AND e.status='complete' AND e.raw_sha256=attachment_conversions.mime_sha256 AND e.manifest_key=attachment_conversions.manifest_key AND json_extract(p.value,'$.index')=attachment_conversions.part_index AND json_extract(p.value,'$.key')=attachment_conversions.source_key AND json_extract(p.value,'$.sha256')=attachment_conversions.source_sha256 AND json_extract(p.value,'$.size')=attachment_conversions.source_size AND json_extract(p.value,'$.mimeType')=attachment_conversions.source_mime)`;
+// Only a current extraction (its original still present and unchanged) is processed or listed.
+const sourceFence = `EXISTS(SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key,json_each(e.attachments_json) p WHERE e.raw_key=attachment_conversions.raw_key AND ${CURRENT_EXTRACTION_SQL} AND e.raw_sha256=attachment_conversions.mime_sha256 AND e.manifest_key=attachment_conversions.manifest_key AND json_extract(p.value,'$.index')=attachment_conversions.part_index AND json_extract(p.value,'$.key')=attachment_conversions.source_key AND json_extract(p.value,'$.sha256')=attachment_conversions.source_sha256 AND json_extract(p.value,'$.size')=attachment_conversions.source_size AND json_extract(p.value,'$.mimeType')=attachment_conversions.source_mime)`;
 /** Internal read-only projection for other trusted indexers; grants no HTTP/mail authority. */
 export async function listSearchableAttachmentDerivatives(
   env: Pick<MailReadEnvironment, "MAIL_CATALOG">,
@@ -231,7 +233,7 @@ async function discover(
   const scope = sourceScope(cfg, "e.raw_key");
   const rows = (
     await env.MAIL_CATALOG.prepare(
-      `SELECT e.raw_key,e.manifest_key,e.raw_sha256 AS mime_sha256,e.attachments_json FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key WHERE e.status='complete' AND s.raw_state='present' AND EXISTS(SELECT 1 FROM json_each(e.attachments_json) p WHERE NOT EXISTS(SELECT 1 FROM attachment_conversions a WHERE a.raw_key=e.raw_key AND a.part_index=json_extract(p.value,'$.index') AND a.manifest_key=e.manifest_key AND a.mime_sha256=e.raw_sha256 AND a.policy_hash=?)) AND ${scope.sql} ORDER BY e.raw_key LIMIT 3`,
+      `SELECT e.raw_key,e.manifest_key,e.raw_sha256 AS mime_sha256,e.attachments_json FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key WHERE ${CURRENT_EXTRACTION_SQL} AND EXISTS(SELECT 1 FROM json_each(e.attachments_json) p WHERE NOT EXISTS(SELECT 1 FROM attachment_conversions a WHERE a.raw_key=e.raw_key AND a.part_index=json_extract(p.value,'$.index') AND a.manifest_key=e.manifest_key AND a.mime_sha256=e.raw_sha256 AND a.policy_hash=?)) AND ${scope.sql} ORDER BY e.raw_key LIMIT 3`,
     )
       .bind(policy, ...scope.values)
       .all<{
@@ -480,7 +482,7 @@ async function processRow(
         const saved = await saveConversionObject(env.MAIL_ARCHIVE, clear.bytes, "pdf");
         preprocessing = {
           encrypted_pdf: true,
-          service: "libpdf-0.5.3-isolated",
+          service: `libpdf-${libpdfPackage.version}-isolated`,
           reported_pages: clear.pages,
           object_number_bound: clear.objects,
           members: [{ index: 0, ...saved, status: "decrypted_pdf" }],

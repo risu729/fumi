@@ -32,7 +32,7 @@ not require converting each original into a custom `.txt` before managed ingesti
 | --- | --- | --- |
 | DOCX, XLSX/XLSM/XLSB/XLS, ODT/ODS, CSV, HTML | Workers AI `AI.toMarkdown(original Blob)` with embedded image conversion disabled | `managed_document_text` |
 | PDF, PNG, JPEG, WebP | Dedicated AI Search instance with OCR enabled: upload original Blob, poll item, retrieve indexed chunks | `managed_ocr_indexed_text` |
-| ZIP, including AES and ZipCrypto | Local `@zip.js/zip.js` 2.24.0 custom core; verify authentication/CRC before saving members | `local_zip_text` or `local_zip_manifest` |
+| ZIP, including AES and ZipCrypto | Local `@zip.js/zip.js` custom core at the version locked in `bun.lock`; verify authentication/CRC before saving members | `local_zip_text` or `local_zip_manifest` |
 | Password-protected PDF | Fresh isolated LibPDF child; verify authentication, unencrypted save and reopen before storing; optional OCR on the decrypted derivative | `local_decrypted_pdf`, optionally `managed_ocr_indexed_text` |
 | Other or oversized input | Explicit fixed coverage reason | Blocked, never claimed indexed |
 
@@ -146,7 +146,11 @@ Fixed diagnostics omit provider exception text.
 The ledger distinguishes `pending`, `running`, `submitted`, `complete`, `blocked`
 and `unknown`. Each result records source manifest, original key/hash/size/MIME,
 policy hash, representation, derivative key/hash/size and provider provenance.
-Writes are fenced by the current extraction, exact part identity and lease token.
+Local provenance names the zip.js or LibPDF version that ran, read from the locked
+package metadata at build time.
+Discovery, claims and writes are fenced by the current extraction (complete, with its
+original present and unchanged since extraction), exact part identity and lease token,
+so an attachment of a replaced original is neither processed nor billed.
 A crash after a paid call cannot cause automatic duplicate submission. R2 artifacts
 are content-addressed; D1 exposes them only after durable verification/commit.
 MIME invalidation removes conversion and search projections, preserving originals.
