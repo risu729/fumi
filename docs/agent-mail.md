@@ -129,7 +129,9 @@ It covers archived mail only; its `filters` reject `in:`.
 
 Owner request (2026-11-23, before 00:14 UTC): make sent mail searchable over MCP too.
 Part 1, metadata search, is implemented with synthetic tests; part 2, body search, is
-proposed below.
+proposed below. On 2026-11-23 the owner approved part 1 as designed,
+including sent mail in the default search; `in:inbox` narrows to received mail. The
+legacy `label_ids:["SENT"]` listing stays for now, to be revisited separately.
 
 `search_emails` and `search_email_ids` return mail the caller sent through fumi as
 `sent_` IDs beside archived `mail_` IDs, newest first, in one page:
