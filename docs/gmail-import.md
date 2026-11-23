@@ -414,12 +414,12 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   that mail health showed at 15:06 UTC are not from this run. The newest of each is one
   live-capture source of 2026-11-18 (`input_too_large`, `workflow_failed`). The count
   agrees with the 379 messages counted in the export before it was uploaded.
-- Production had no `fumi-gmail-takeout` Workflow before this run. CI deploys a
+- Production had no `fumi-gmail-takeout` Workflow before the momonga run. CI deploys a
   version with `deploy-triggers: false`, which does not register a new Workflow, so it
-  was created through the Cloudflare API on 2026-11-23 before the run started.
-- risu.minecraft (`gmail-3248302638620a7725a9706e`, started by the owner's go at
-  2026-11-23 18:22 UTC; `GMAIL_TAKEOUT_CONFIG` was replaced at 18:23 UTC, which the
-  finished momonga run ignores): the run is `complete` with no stop code, and
+  was created through the Cloudflare API on 2026-11-23 before the momonga run started.
+- risu.minecraft (`gmail-3248302638620a7725a9706e`, run started about 2026-11-23 18:26
+  UTC after the owner's go at 18:22 UTC; `GMAIL_TAKEOUT_CONFIG` was replaced at about
+  18:23 UTC): the run is `complete` with no stop code, and
   `next_offset` equals `total_bytes`. The 1,137 entries have 1,137 distinct Gmail IDs
   (15,293,276 raw bytes, largest 224,012); `gmail_messages` holds 1,137 rows for the
   namespace (1,047 threads, imported 18:26:17..20:10:11 UTC, about 5.5 s per entry) and
