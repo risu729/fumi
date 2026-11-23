@@ -3,6 +3,7 @@ import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDENTITY_HEADER_BYTES,
+  IDENTITY_VERSION,
   parseHeaderIdentity,
   repairMailIdentity,
 } from "../src/mail-identity.ts";
@@ -464,6 +465,53 @@ describe("header-only mail identity", () => {
     expect(await grouping()).toMatchObject({
       counts: { indexed: 5, pending: 2, unknown: 3, in_multi_copy_groups: 2 },
     });
+  });
+
+  it("reads each copy group in the health window at most once", async () => {
+    // One group of 1,300 originals. Its 300 oldest rows lead the group index but no longer
+    // describe a present original, so finding another member that counts passes them.
+    const statements = [];
+    for (let index = 0; index < 1300; index++) {
+      const key = `ingest/2026-11-07/bulk-${index}/raw.eml`;
+      const digest = index.toString(16).padStart(64, "0");
+      statements.push(
+        env.MAIL_CATALOG.prepare(
+          `INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_size,raw_sha256,observed_pass,observed_revision) VALUES ('gmail',?,?,?,?,'2026-11-07T06:02:00.000Z',?,'missing',1,?,0,0)`,
+        ).bind(
+          `account-${index}`,
+          `bulk-${index}`,
+          key,
+          `${key}.receipt`,
+          index < 300 ? "missing" : "present",
+          digest,
+        ),
+        env.MAIL_CATALOG.prepare(
+          `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at) VALUES (?,?,?,'complete','synthetic-group','message_id_dkim','2026-11-07T06:03:00.000Z')`,
+        ).bind(key, IDENTITY_VERSION, digest),
+      );
+    }
+    for (let start = 0; start < statements.length; start += 500)
+      // oxlint-disable-next-line no-await-in-loop -- Bounded synthetic setup batches.
+      await env.MAIL_CATALOG.batch(statements.slice(start, start + 500));
+    const prepare = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    let sql = "";
+    const spy = vi.spyOn(env.MAIL_CATALOG, "prepare").mockImplementation((query) => {
+      if (query.includes("in_multi_copy_groups")) sql = query;
+      return prepare(query);
+    });
+    try {
+      expect((await getMailHealth(env, principal)).sections.copy_grouping).toMatchObject({
+        window: { records: 1000, truncated: true },
+        counts: { indexed: 1000, pending: 0, unknown: 0, in_multi_copy_groups: 1000 },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const { meta } = await env.MAIL_CATALOG.prepare(sql).all();
+    // Searching from each of the 1,000 originals passes the 300 rows every time (about
+    // 600,000 rows); searching once for the group reads them once (about 10,000 rows with
+    // the window itself).
+    expect(meta.rows_read).toBeLessThan(20_000);
   });
 });
 

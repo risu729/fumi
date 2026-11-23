@@ -135,8 +135,11 @@ catalog's, on an original whose `raw_state` is `present`.
 `indexed`, `blocked`, `pending` and `unknown` add up to the window's records. The
 backfill does not select an original whose current-version row has another SHA-256 (a
 scan recorded a replaced object), so such an original stays in `unknown` and stands
-alone in reads. `in_multi_copy_groups` stops at the first other original of the group,
-so a large group does not make the query read the whole group.
+alone in reads. For `in_multi_copy_groups`, each group with an `indexed` original in the
+window is searched once, in `mail_identity` insertion order, and the search stops at the
+group's second original under the rule. Rows before it that do not count, such as older
+originals that are no longer `present`, are read on the way, so a group costs at most
+its size once, however many of its originals are in the window.
 
 Until this change (2026-11-23 02:00 UTC), `indexed` and `in_multi_copy_groups` also
 counted originals whose row was written for a replaced SHA-256, which reads never group,
