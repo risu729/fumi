@@ -306,7 +306,7 @@ the low-priority web client is not a prerequisite for retirement.
       ([#146](https://github.com/risu729/fumi/issues/146), owner, 2026-11-21 19:44
       UTC). See [link downloads](link-downloads.md) for the design and the open
       owner decisions. Parts, each its own PR:
-  - [ ] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
+  - [x] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
         as library code that production does not call.
   - [x] B: model selection of candidates by index, as library code that production
         does not call. It reuses the routing classifier's model, key and daily
