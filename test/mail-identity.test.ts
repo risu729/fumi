@@ -299,6 +299,53 @@ describe("header-only mail identity", () => {
     });
   });
 
+  it("ignores signatures the forwarding route added after capture", async () => {
+    // An unsigned original: the live capture has no DKIM. fumi forwards it with
+    // X-Fumi-Ingest-ID, and the forwarding route signs it before Gmail receives it.
+    const unsigned = headers({ messageId: "<unsigned-forwarded@example.invalid>" });
+    const live = await archive("email_routing", "2026-11-10T06:08:05.000Z", mime(unsigned));
+    const gmail = await archive(
+      "gmail",
+      "2026-11-10T06:08:06.000Z",
+      mime([
+        "Received: from forwarder.example.invalid by gmail.example.invalid",
+        signature(BH_A),
+        signature(BH_B),
+        "X-Forwarded-To: owner@example.invalid",
+        "X-Fumi-Ingest-ID: 00000000-0000-4000-8000-00000000ffff",
+        ...unsigned,
+      ]),
+    );
+    // A signature below the ingest header belongs to the original and still counts.
+    expect(
+      parseHeaderIdentity(mime(["X-Fumi-Ingest-ID: x", ...headers({ bh: [BH_C] })])),
+    ).toMatchObject({ bodyHashes: [BH_C] });
+    // An original that already carried X-Fumi-Ingest-ID (a loop through fumi, or a
+    // forged header): every copy counts only signatures below the bottom-most one.
+    const original = [signature(BH_A), "X-Fumi-Ingest-ID: one", ...headers({ bh: [BH_C] })];
+    expect(parseHeaderIdentity(mime(original))).toMatchObject({ bodyHashes: [BH_C] });
+    expect(
+      parseHeaderIdentity(mime([signature(BH_B), "X-Fumi-Ingest-ID: two", ...original])),
+    ).toMatchObject({ bodyHashes: [BH_C] });
+    // A row of the previous identity version is replaced by the backfill.
+    await env.MAIL_CATALOG.prepare(
+      `INSERT INTO mail_identity(raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at)
+      SELECT raw_key,'identity-v1',raw_sha256,'complete',?,'single','2026-11-11T00:00:00.000Z' FROM archive_sources WHERE raw_key=?`,
+    )
+      .bind("f".repeat(64), gmail.key)
+      .run();
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 2, blocked: 0 });
+    const rows = await identities();
+    expect(rows).toHaveLength(2);
+    expect(await groupOf(gmail.key)).toBe(await groupOf(live.key));
+    expect(rows.find((row) => row.raw_key === gmail.key)).toMatchObject({
+      group_rule: "message_id_from_date",
+    });
+    expect(
+      (await searchMail(env, principal, {})).emails.map((mail) => [mail.id, mail.copies]),
+    ).toEqual([[live.id, 2]]);
+  });
+
   it("records originals it cannot read as blocked and never rewrites a row", async () => {
     const changed = await archive("email_routing", "2026-11-07T06:00:00.000Z", mime(headers({})), {
       storedSha: "0".repeat(64),

@@ -1378,7 +1378,7 @@ const SENT_PROJECTION_BATCH = 20;
 
 /**
  * Copy the subject and attachment count of operations stored without them (before
- * migration 0019, or by a Worker without those columns) from their verified input.json.
+ * migration 0021, or by a Worker without those columns) from their verified input.json.
  * An input that is missing or fails its digest is marked -1 and not read again.
  */
 export async function projectSentSearch(

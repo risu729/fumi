@@ -248,7 +248,7 @@ establish production delivery.
       sends/replies, attachment hashes, idempotency and provider delivery events.
 - [x] Search sent mail's metadata over MCP: `search_emails` and `search_email_ids`
       return the caller's own fumi-sent records beside archived mail, with `in:sent`
-      and `in:inbox` (owner request, 2026-11-23). Migration `0019` adds the subject and
+      and `in:inbox` (owner request, 2026-11-23). Migration `0021` adds the subject and
       attachment count to D1. Synthetic tests only. See
       [searching sent mail](agent-mail.md#searching-sent-mail).
 - [ ] Search sent mail bodies in `search_mail_content` and `search_mail_semantic`
@@ -316,7 +316,7 @@ the low-priority web client is not a prerequisite for retirement.
       ([#146](https://github.com/risu729/fumi/issues/146), owner, 2026-11-21 19:44
       UTC). See [link downloads](link-downloads.md) for the design and the open
       owner decisions. Parts, each its own PR:
-  - [ ] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
+  - [x] A: deterministic URL extraction, hard-limit URL policy and safe fetcher,
         as library code that production does not call.
   - [x] B: model selection of candidates by index, as library code that production
         does not call. It reuses the routing classifier's model, key and daily

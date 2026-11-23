@@ -16,7 +16,12 @@ import {
 } from "./gmail-provenance.ts";
 import { MAX_RECEIPT_BYTES } from "./reconcile.ts";
 import { GMAIL_IMPORT_RAW_LIMIT, GmailImportError } from "./gmail-transport.ts";
-import { TakeoutMboxError, TakeoutMboxSplitter, type TakeoutItem } from "./gmail-takeout-mbox.ts";
+import {
+  TAKEOUT_READ_BYTES,
+  TakeoutMboxError,
+  TakeoutMboxSplitter,
+  type TakeoutItem,
+} from "./gmail-takeout-mbox.ts";
 
 declare global {
   namespace Cloudflare {
@@ -72,7 +77,6 @@ export type TakeoutConfig = v.InferOutput<typeof configSchema>;
 /** Entries processed per chunk, and the most stream bytes one chunk reads. */
 export const TAKEOUT_CHUNK_ENTRIES = 100;
 export const TAKEOUT_CHUNK_BYTES = 128 * 1024 * 1024;
-const READ_BYTES = 8 * 1024 * 1024;
 const LEASE_MS = 10 * 60 * 1000;
 const hex = (bytes: ArrayBuffer) =>
   Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -168,7 +172,7 @@ async function* readStream(bucket: R2Bucket, config: TakeoutConfig, offset: numb
   for (const object of config.objects) {
     const end = start + object.size;
     for (let position = Math.max(offset, start); position < end;) {
-      const length = Math.min(READ_BYTES, end - position);
+      const length = Math.min(TAKEOUT_READ_BYTES, end - position);
       // oxlint-disable-next-line no-await-in-loop -- One bounded range in memory at a time.
       const part = await bucket.get(object.key, { range: { offset: position - start, length } });
       if (!part) throw new GmailImportError("takeout_object_missing");
@@ -208,8 +212,9 @@ export type TakeoutChunkResult =
   | { status: "stopped"; processed: number; code: string; offset: number };
 
 /**
- * Processes up to TAKEOUT_CHUNK_ENTRIES entries from the run's checkpoint. One raw
- * message is in memory at a time, plus the splitter's buffer and one read range.
+ * Processes up to TAKEOUT_CHUNK_ENTRIES entries from the run's checkpoint. The memory
+ * held is the splitter's bounded buffer and one read range: each raw message is a view
+ * of that buffer, handled before the next push.
  */
 export async function runTakeoutChunk(
   env: TakeoutEnvironment,
@@ -438,7 +443,9 @@ export async function runTakeoutChunk(
     const splitter = new TakeoutMboxSplitter(GMAIL_IMPORT_RAW_LIMIT, offset);
     let read = 0;
     try {
-      // Entries already split are handled before end() can reject the stream's tail.
+      // The splitter returns the entries before an error and throws it on the next call,
+      // so they are handled first and the checkpoint reaches the stop. Every item is
+      // handled or dropped before the next push, which may overwrite its raw bytes.
       const handleAll = async (
         items: TakeoutItem[],
       ): Promise<TakeoutChunkResult | "limit" | null> => {

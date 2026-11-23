@@ -199,7 +199,7 @@ sent mail.
 - **Limits.** The sent statement binds the principal, a snapshot, four cursor values,
   the limit and at most two values per operator, so the 33-operator cap above holds.
 
-Migration `0019` adds nullable `subject` and `attachment_count` columns to
+Migration `0021` adds nullable `subject` and `attachment_count` columns to
 `outbound_operations`, an index for one principal's sends by time, and a partial index
 of unprojected rows. The subject and attachment count were only in each operation's R2
 `input.json`; recipients and the sender were already in D1. The Worker writes both
