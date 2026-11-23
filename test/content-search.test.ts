@@ -97,7 +97,7 @@ describe("bounded content retrieval", () => {
       // oxlint-disable-next-line no-await-in-loop -- Ordered synthetic rows.
       await env.MAIL_CATALOG.prepare(
         `INSERT INTO mail_identity(raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at)
-        VALUES(?,'identity-v1',?,'complete',?,'message_id_dkim','2026-11-11T00:00:00.000Z')`,
+        VALUES(?,'identity-v2',?,'complete',?,'message_id_dkim','2026-11-11T00:00:00.000Z')`,
       )
         .bind(row.raw_key, "a".repeat(64), group)
         .run();
