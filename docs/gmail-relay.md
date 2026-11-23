@@ -1,9 +1,17 @@
 # Mail delivered directly to Gmail
 
 Status: implemented for [#161](https://github.com/risu729/fumi/issues/161), decided in
-[ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md). Verified with
-synthetic mail only. Gmail forwarding is not turned on yet; the
-[operator steps](#operator-steps) and acceptance are pending.
+[ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md). The owner turned on
+Gmail forwarding on 2026-11-23, and production acceptance passed at 02:15 UTC:
+
+- (a) A message from another account to the Gmail address was stored once in fumi with
+  `via: gmail_forwarding` and stayed once in Gmail.
+- (b) A message to an Email Routing address reached Gmail once; fumi stored one
+  original (without `via`) and health counted one `duplicate_of_live` relay.
+
+`get_mail_health` showed `gmail_relay` with two received, one archived and one
+`duplicate_of_live`. The Gmail confirmation message was archived and forwarded as
+ordinary mail.
 
 Mail sent to the Gmail address itself, or forwarded straight to Gmail by another
 provider, never passes through Email Routing. Gmail's own "Forward a copy of incoming

@@ -58,13 +58,15 @@ archive gaps from Gmail, and Gmail inbox management are out of scope.
       the initial keep-all behavior.
 - [x] Complete and record staged production acceptance for selected routes.
 - [ ] Extend capture to remaining routes after checking specialist compatibility.
-- [x] Capture mail delivered directly to Gmail: Gmail forwards every incoming message
-      to fumi, which never forwards it back and drops the copies it already holds
+- [x] Capture mail delivered directly to Gmail: Gmail forwards every incoming message to
+      fumi, which never forwards it back and drops the copies it already holds
       ([#161](https://github.com/risu729/fumi/issues/161),
       [ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md)). See
-      [mail delivered directly to Gmail](gmail-relay.md). Synthetic tests only.
-- [ ] Turn on Gmail forwarding to fumi and record its acceptance; see the
-      [operator steps](gmail-relay.md#operator-steps).
+      [mail delivered directly to Gmail](gmail-relay.md). Accepted in production
+      (below).
+- [x] Turn on Gmail forwarding to fumi and record its acceptance. Accepted in
+      production on 2026-11-23 02:15 UTC; see
+      [mail delivered directly to Gmail](gmail-relay.md).
 
 See the [ingress implementation and runbook](ingress.md). Private route inventory,
 rollback snapshots and real-message acceptance evidence stay outside this public repo.
