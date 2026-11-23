@@ -110,7 +110,9 @@ sends and later replies use the outbound API, not the live Email Routing
 DMARC and reply-count restrictions.
 [Inbound reply API](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/).
 
-fumi stores its own sent records and does not insert its sends into Gmail. Mail
+fumi stores its own sent records and does not insert its sends into Gmail. Their
+metadata is searchable by their owner with `search_emails`
+([searching sent mail](agent-mail.md#searching-sent-mail)). Mail
 the owner sends by hand from Gmail is not in those records; ongoing read-only
 capture of Gmail SENT is planned in the [roadmap](roadmap.md) (owner, 2026-11-17
 17:37 UTC) and is not implemented. Historical Gmail backfill explicitly includes SENT

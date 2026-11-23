@@ -236,7 +236,9 @@ describe("Gmail relay ingress in workerd", () => {
       via: "gmail_forwarding",
     });
     const search = await searchMail(env, reader, {});
-    expect(search.emails.map((email) => email.provenance)).toEqual([read.provenance]);
+    expect(search.emails.map((email) => ("provenance" in email ? email.provenance : null))).toEqual(
+      [read.provenance],
+    );
 
     const health = await getMailHealth(env, reader);
     expect(health.sections.gmail_relay).toMatchObject({

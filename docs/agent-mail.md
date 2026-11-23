@@ -68,7 +68,7 @@ replying never infers reply-all or adds an archive CC/BCC.
 | Tools | Contract |
 | --- | --- |
 | `get_profile` | Scopes, sender addresses/domains, limits and coverage |
-| `search_emails`, `search_email_ids` | Bounded pages, opaque continuation token, one result per [copy group](copy-grouping.md) unless `expand_copies` |
+| `search_emails`, `search_email_ids` | Archived mail and the caller's own [sent mail](#searching-sent-mail); bounded pages, opaque continuation token, one result per [copy group](copy-grouping.md) unless `expand_copies` |
 | `search_mail_content` | Bounded literal body/text-attachment search with source citations |
 | `read_email`, `batch_read_email` | Full, metadata, minimal or raw; per-item batch errors |
 | `read_email_thread` | Account-scoped Gmail threads or direct live header links, explicit truncation, copies collapsed unless `expand_copies` |
@@ -87,30 +87,34 @@ Schema. Results include structured data and machine-readable error codes.
 Mail, headers, attachment filenames and HTML are untrusted data. Tool annotations
 are client hints, not authorization.
 
-Inbound search supports AND combinations of `from:`, `to:`, `subject:`,
-`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive) and `has:attachment`.
-Quote values containing spaces. `from:`, `to:` and `subject:` match literal substrings
-of any length within the query limit, through SQLite `instr()` rather than `LIKE`, whose
-patterns D1 caps at 50 bytes; `%`, `_` and `\` have no special meaning. They ignore
-ASCII letter case. Other characters, such as full-width `ＰＤＦ` or `Ä`, match stored
-text as written in the filter or in lowercase: `subject:Änderung` matches `Änderung` and
-`änderung`, but `subject:änderung` does not match `Änderung`. A query has at most 1,000
-characters and 33 operators, counting repeated ones; a longer query or more operators
-fail with `query_too_long`, and `get_profile` reports the operator cap as
-`limits.search_filters`. The cap keeps every search, including the `filters` of
-`search_mail_content` and `search_mail_semantic`, within D1's 100 bound parameters per
-statement: a `from:`, `to:` or `subject:` value with uppercase non-ASCII binds two
-values, and `search_mail_semantic` binds up to 33 of its own (item key, policy, ten
-approved sources, archive source and two per label). Operators join as a balanced `AND`
-tree, so 33 of them nest six levels deep instead of 33 and stay within D1's expression
-depth limit of 100. It searches extracted metadata, not full bodies or attachments.
-Without a source filter it includes live and imported archive sources. `archive_source`
-can be `all`, `gmail` or `email_routing`. Up to ten `label_ids` are ANDead: imported
-messages retain provider label IDs; live ingress has `INBOX`. Gmail SENT messages
-therefore require `archive_source: "gmail"` or `"all"` with `label_ids: ["SENT"]`. For
-compatibility, `SENT` without `archive_source` still lists the caller's outgoing
-operation records and accepts only an empty query. Continuation tokens bind query,
-source and labels; changing filters requires a new search. Other Gmail query syntax is
+Metadata search supports AND combinations of `from:`, `to:`, `subject:`,
+`after:YYYY-MM-DD` (inclusive), `before:YYYY-MM-DD` (exclusive), `has:attachment` and,
+in `search_emails` and `search_email_ids` only, `in:inbox` and `in:sent` (see
+[searching sent mail](#searching-sent-mail)). Quote values containing spaces. `from:`,
+`to:` and `subject:` match literal substrings of any length within the query limit,
+through SQLite `instr()` rather than `LIKE`, whose patterns D1 caps at 50 bytes; `%`,
+`_` and `\` have no special meaning. They ignore ASCII letter case. Other characters,
+such as full-width `ＰＤＦ` or `Ä`, match stored text as written in the filter or in
+lowercase: `subject:Änderung` matches `Änderung` and `änderung`, but `subject:änderung`
+does not match `Änderung`. A query has at most 1,000 characters and 33 operators,
+counting repeated ones; a longer query or more operators fail with `query_too_long`, and
+`get_profile` reports the operator cap as `limits.search_filters`. The cap keeps every
+search, including the `filters` of `search_mail_content` and `search_mail_semantic`,
+within D1's 100 bound parameters per statement: a `from:`, `to:` or `subject:` value
+with uppercase non-ASCII binds two values (in the archive and the sent statement alike;
+`in:` binds none), and `search_mail_semantic` binds up to 33 of its own (item key,
+policy, ten approved sources, archive source and two per label). Operators join as a
+balanced `AND` tree, so 33 of them nest six levels deep instead of 33 and stay within
+D1's expression depth limit of 100. It searches extracted metadata, not full bodies or
+attachments. Without a source filter it includes live and imported archive sources and
+the caller's own sent mail. `archive_source` can be `all`, `gmail` or `email_routing`;
+giving it searches only those archive sources. Up to ten `label_ids` combine with AND:
+imported messages retain provider label IDs; live ingress has `INBOX` and a `sent_`
+record `SENT`. Gmail SENT messages imported through the Gmail API carry `SENT`;
+`in:sent` finds them together with fumi-sent mail. For compatibility, `SENT` in
+`label_ids` without `archive_source` still lists every outgoing operation of the caller
+over MCP and accepts only an empty query. Continuation tokens bind query, source, labels
+and `expand_copies`; changing filters requires a new search. Other Gmail query syntax is
 rejected. Pending/blocked extraction remains visible. Gmail threads use retained account
 and thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
 direct untrusted header hints. Neither claims a complete conversation model.
@@ -119,6 +123,108 @@ direct untrusted header hints. Neither claims a complete conversation model.
 bodies and supported UTF-8 text attachments. It returns citations and explicit
 indexing/representation coverage. See [content search](content-search.md) for
 limits, phrase syntax and activation. Metadata search semantics are unchanged.
+It covers archived mail only; its `filters` reject `in:`.
+
+## Searching sent mail
+
+Owner request (2026-11-23, before 00:14 UTC): make sent mail searchable over MCP too.
+Part 1, metadata search, is implemented with synthetic tests; part 2, body search, is
+proposed below.
+
+`search_emails` and `search_email_ids` return mail the caller sent through fumi as
+`sent_` IDs beside archived `mail_` IDs, newest first, in one page:
+
+```json
+{
+  "id": "sent_send_0b6c…",
+  "thread_id": "sent_send_0b6c…",
+  "label_ids": ["SENT"],
+  "state": "accepted",
+  "operation_id": "send_0b6c…",
+  "created_at": 1794268800000,
+  "metadata": {
+    "subject": "Quarterly report",
+    "from_address": "owner@example.invalid",
+    "to": ["recipient@example.invalid"],
+    "cc": []
+  },
+  "group_id": null,
+  "copies": 1
+}
+```
+
+This is the `minimal` shape `read_email` returns for a `sent_` ID, plus `metadata`
+from D1. `group_id` and `copies` appear only when copies are collapsed, as for
+`mail_` results: a sent record is never grouped with archived copies. Bcc recipients
+are neither returned nor searched; `read_email` on the `sent_` ID shows them to their
+owner. Coverage adds `sent_operations`: `{ searched, principal: "this_principal_only",
+states, metadata_unavailable }`, or `{ searched: false }` when the filters exclude
+sent mail.
+
+- **Mailboxes.** `in:sent` selects `sent_` records and imported Gmail mail labeled
+  `SENT`. `in:inbox` selects live ingress and Gmail mail labeled `INBOX`. Values ignore
+  case; other values fail with `unsupported_query`. Without `in:` both are searched,
+  as Gmail's search box searches All Mail, Sent included. Imported Gmail SENT already
+  appeared in the default search, so leaving fumi-sent mail out by default would split
+  one person's sent mail by the path it took. Giving `archive_source` excludes sent
+  records, so `archive_source: "all"` keeps returning archived `mail_` IDs only, as
+  before this change; callers that pass search results to `forward_emails`,
+  `copy_attachment`, `read_attachment` or a reply, which take `mail_` IDs, can use it.
+- **Authorization.** `mail:read` is required, as for `read_email` on a `sent_` ID. Sent
+  records are principal-owned: the query filters on the caller's principal ID, so
+  another principal's sends never appear or match. Archived mail keeps its
+  single-owner scope.
+- **States.** Searched: `accepted` (whatever its recipients' delivered, bounced or
+  failed events say) and `unknown`, including a surviving `submitting` claim, which
+  reads as `unknown` everywhere. An uncertain submission may have reached the provider,
+  and fumi never treats it as not sent. Not searched: `prepared` (never submitted),
+  `rejected` (refused by the provider) and drafts, which are not operations. The
+  compatibility listing above still shows every state.
+- **Operators.** `from:` matches the sender address, `to:` To and Cc addresses (the
+  caller addressed both; archived mail matches only the To header), `subject:` the
+  composed subject (with `Re:` or `Fwd:`), `after:` and `before:` the operation's
+  `created_at` (when the send was requested, in UTC), and `has:attachment` any attached
+  file, including a forward's original attachments. Text matching follows the rules
+  above. Sent records have no display names.
+- **Pagination.** One token covers both sources. Each page reads at most
+  `max_results + 1` rows from each source after the token's position and merges them by
+  time, then public ID, both descending; archived mail is ordered by `received_at` and
+  sent mail by `created_at` as an ISO string, so the order is total and a row is never
+  returned twice. The token fixes the archive, copy group and sent operation rowids, so
+  mail that arrives during a traversal is not part of it. Tokens issued before sent mail
+  joined the search fail with `invalid_page_token`; start a new search.
+- **Limits.** The sent statement binds the principal, a snapshot, three cursor values,
+  the limit and at most two values per operator, so the 33-operator cap above holds.
+
+Migration `0019` adds nullable `subject` and `attachment_count` columns to
+`outbound_operations`, an index for one principal's sends by time, and a partial index
+of unprojected rows. The subject and attachment count were only in each operation's R2
+`input.json`; recipients and the sender were already in D1. The Worker writes both
+columns with each new operation. Rows stored before the migration, or by the running
+Worker while the deploy job applies it, stay `NULL` until the scheduled
+`sent_search_projection` step copies them from their SHA-256-verified `input.json`, at
+most 20 rows per five-minute run. An input that is missing or fails its digest gets
+`attachment_count` -1 and is not read again. Until then such a row is still found
+without `subject:` and `has:attachment`, which it never matches, and
+`metadata_unavailable` counts the caller's searchable rows in this state.
+
+Known gaps:
+
+- Mail imported from Google Takeout has no label IDs (Takeout holds localized label
+  names, [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)), so `in:sent`
+  and `label_ids` do not find its sent messages. Proposed, not implemented: match the
+  Takeout label name of Gmail's Sent label once the owner confirms the exact name from
+  their exports.
+- A fumi send that also reached ingress, such as one to an owner address, appears both
+  as its `sent_` record and as the archived `mail_` copy.
+- `read_email_thread` does not accept `sent_` IDs.
+
+Proposed, not implemented (part 2): search sent bodies in `search_mail_content` and
+`search_mail_semantic`. Bodies are only in `input.json`, so this needs a lexical index
+of sent bodies owned by the principal, kept apart from the shared archive index so no
+other principal's search reaches it, with the same `in:` operator in `filters` and
+citations that point at `/api/mail/sent_…/body`. It will be designed and reviewed in its
+own change.
 
 Search pages contain at most 50 records; batches contain at most ten messages; thread
 reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000

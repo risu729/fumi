@@ -301,10 +301,12 @@ describe("bounded private mail reads", () => {
       String.fromCharCode(
         ...new TextEncoder().encode(
           JSON.stringify({
+            version: 2,
             snapshot: Number.MAX_SAFE_INTEGER,
             groups: Number.MAX_SAFE_INTEGER,
+            sent: Number.MAX_SAFE_INTEGER,
             beforeTime: "9999-12-31T00:00:00.000Z",
-            beforeId: "~",
+            beforeId: "mail_~",
             query: JSON.stringify([most, "email_routing", labels, false]),
           }),
         ),
