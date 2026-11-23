@@ -115,7 +115,8 @@ grants first and to add account-wide Workers Scripts Write only if they are not 
 The deploy job ran the shared action with `deploy-triggers: "false"`, so CI never
 applied the `triggers`, `domains` or Workflow `exports` in
 [`cloudflare.config.ts`](../../cloudflare.config.ts). `fumi-mail-processing` existed
-from the 2026-11-09 bootstrap `cf deploy`. `fumi-gmail-takeout`, added in
+from a manual `cf deploy` before CI deployed (Cloudflare reports it created on
+2026-11-09 at 20:43 UTC). `fumi-gmail-takeout`, added in
 [#162](https://github.com/risu729/fumi/pull/162), was never registered: the Worker
 version deployed, but the Workflow was missing in production until it was created by
 hand on 2026-11-23 at 14:15 UTC, without its declared concurrency limit and retention.
@@ -146,7 +147,10 @@ configuration and exits before any API request, so it cannot show this compariso
 ### Consequences
 
 - A change to `triggers`, `domains` or a Workflow export reaches production with the
-  next main deployment. Removing a declared trigger removes it in production.
+  next main deployment. Removal is not symmetric: a removed Cron schedule is removed
+  (the schedules are replaced as a whole), but a removed queue consumer or Workflow
+  stays in production until deleted separately, and a removed Custom Domain makes
+  the domain guard fail the deployment before upload.
 - Synchronization runs after the new version is live. If it fails, the job fails, that
   version stays live and the trigger changes already made are kept; nothing is rolled
   back. Fix the cause and start CI on main again.

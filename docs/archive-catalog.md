@@ -136,14 +136,15 @@ database. Provisioning uses separately authorized credentials.
    CI deployment uses the versions strategy with `deploy-triggers: "true"` (ADR 0002,
    amended 2026-11-23), so it also applies the configured Cron schedule. Verify
    resource resolution and deployment credentials separately.
-5. The Cron schedule has been active since 2026-11-08. A change to `triggers` in
-   `cloudflare.config.ts` reaches production with the next deployment, so review it
-   like any other production change. Trigger synchronization does not alter Email
-   Routing.
+5. The Cron schedule is active (Cloudflare reports it created on 2026-11-08 at
+   03:03 UTC). A change to `triggers` in `cloudflare.config.ts` reaches production
+   with the next deployment, so review it like any other production change. Trigger
+   synchronization does not alter Email Routing.
 6. Verify scheduled runs, checkpoint progress, catalog rows against R2 evidence,
    and unchanged Gmail delivery. Production acceptance remains pending until then.
 
-Rollback disables the new Cron schedule and restores the prior Worker version.
+Rollback restores the prior Worker version. CI synchronizes triggers on every deploy,
+so to keep the Cron schedule off, remove it from `triggers` in the same change.
 Keep R2 originals and additive D1 data. No destructive rollback migration is needed.
 
 ## References
