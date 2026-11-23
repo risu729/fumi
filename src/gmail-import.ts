@@ -206,14 +206,61 @@ async function saveMessage(
 }
 
 /**
+ * A raw message too large to hold in memory: its exact size, and a pass over its bytes
+ * that can be started again. Imports have no size limit of their own (only live capture
+ * has Email Routing's 25 MiB), so a transport streams what it cannot buffer.
+ */
+export type GmailRawStream = { size: number; chunks: () => AsyncIterable<Uint8Array> };
+
+/**
+ * Streams a raw message into one conditional put. R2 checks the length and the SHA-256
+ * in `options`, so bytes that changed since they were hashed are never stored.
+ */
+async function putStream(
+  bucket: R2Bucket,
+  key: string,
+  source: GmailRawStream,
+  options: R2PutOptions,
+): Promise<R2Object | null> {
+  const { readable, writable } = new FixedLengthStream(source.size);
+  const writer = writable.getWriter();
+  const pump = (async () => {
+    try {
+      for await (const chunk of source.chunks()) await writer.write(chunk);
+      await writer.close();
+    } catch (error) {
+      await writer.abort(error).catch(() => undefined);
+      throw error;
+    }
+  })();
+  let stored: R2Object | null;
+  try {
+    stored = await bucket.put(key, readable, options);
+  } catch (error) {
+    await writer.abort(error).catch(() => undefined);
+    await pump.catch(() => undefined);
+    throw error;
+  }
+  // A put whose condition failed may return without reading the body.
+  if (!stored) {
+    await writer.abort(new Error("put precondition failed")).catch(() => undefined);
+    await pump.catch(() => undefined);
+    return null;
+  }
+  await pump;
+  return stored;
+}
+
+/**
  * Writes one Gmail-derived source: raw object and receipt with conditional writes, then
  * the catalog row and provider provenance in one fenced commit. Returns the raw key.
  */
 export async function storeGmailSource(
   env: Pick<GmailImportEnvironment, "MAIL_CATALOG" | "MAIL_ARCHIVE">,
   proposed: GmailProvenance,
-  bytes: Uint8Array,
+  bytes: Uint8Array | GmailRawStream,
 ): Promise<string> {
+  const size = bytes instanceof Uint8Array ? bytes.byteLength : bytes.size;
   const id = proposed.messageId;
   const { rawKey, rawSha256 } = proposed;
   const prefix = rawKey.slice(0, -"/raw.eml".length);
@@ -232,7 +279,7 @@ export async function storeGmailSource(
   if (existing && !gmailRawMatches(existing, proposed))
     throw new GmailImportError("gmail_source_conflict");
   if (!existing) {
-    const stored = await env.MAIL_ARCHIVE.put(rawKey, bytes, {
+    const options = {
       sha256: rawSha256,
       onlyIf: { etagDoesNotMatch: "*" },
       customMetadata: {
@@ -245,7 +292,11 @@ export async function storeGmailSource(
         gmailMessageId: id,
         eventNotifications: "0",
       },
-    });
+    };
+    const stored =
+      bytes instanceof Uint8Array
+        ? await env.MAIL_ARCHIVE.put(rawKey, bytes, options)
+        : await putStream(env.MAIL_ARCHIVE, rawKey, bytes, options);
     if (!stored) {
       const raced = await env.MAIL_ARCHIVE.head(rawKey);
       if (!raced || !gmailRawMatches(raced, proposed))
@@ -271,7 +322,7 @@ export async function storeGmailSource(
     provenance.rawSha256 !== rawSha256 ||
     provenance.accountNamespace !== proposed.accountNamespace ||
     provenance.messageId !== id ||
-    provenance.rawSize !== bytes.byteLength ||
+    provenance.rawSize !== size ||
     provenance.internalDate !== proposed.internalDate
   )
     throw new GmailImportError("gmail_receipt_conflict");
@@ -292,7 +343,7 @@ export async function storeGmailSource(
         forward: null,
         rawState: "present",
         receiptState: "valid",
-        rawSize: bytes.byteLength,
+        rawSize: size,
         rawSha256,
         notifyEvents: false,
         gmail: provenance,

@@ -10,16 +10,20 @@
 //   CRLF (one separator added by Takeout)
 // Body lines are escaped as in mboxrd: a line of one or more ">" followed by "From "
 // gets one more ">". The splitter strips the From_ line, the two added headers and the
-// separator and returns the rest unchanged; `unescapeMboxrd` then removes that one ">".
+// separator and returns the rest unchanged; `unescapeMboxrd` (or `MboxrdUnescaper` for an
+// entry streamed in chunks) then removes that one ">".
 // Anything else stops with a fixed code, so a malformed or cut-off export never yields
 // a silently changed message, with one accepted exception: a message whose first line
 // starts with whitespace (invalid in RFC 5322) has that line read as a label fold. The format was measured on a 40,598-message export on
 // 2026-11-23 (docs/gmail-import.md, "Google Takeout transport").
 
-import { GMAIL_IMPORT_RAW_LIMIT } from "./gmail-transport.ts";
-
 /** The largest chunk the runner pushes: one ranged R2 read. */
 export const TAKEOUT_READ_BYTES = 8 * 1024 * 1024;
+/**
+ * The largest entry returned with its bytes. A larger one is returned as `large`, and the
+ * importer streams it from the object instead. This bounds memory, not what is imported.
+ */
+export const TAKEOUT_BUFFER_BYTES = 25 * 1024 * 1024;
 
 export type TakeoutEntry = {
   kind: "entry";
@@ -40,16 +44,16 @@ export type TakeoutEntry = {
   raw: Uint8Array;
 };
 
-export type TakeoutOversize = {
-  kind: "oversize";
-  offset: number;
-  end: number;
-  messageId: string;
-  /** Raw size after stripping, before unescaping; above the limit when reported. */
+/** An entry over the buffer limit: the same fields, with where its bytes are instead of them. */
+export type TakeoutLarge = Omit<TakeoutEntry, "kind" | "raw"> & {
+  kind: "large";
+  /** Stream offset of the message's first byte, after the From_ line and Gmail headers. */
+  rawOffset: number;
+  /** Message size after stripping, still mboxrd-escaped; above the buffer limit. */
   size: number;
 };
 
-export type TakeoutItem = TakeoutEntry | TakeoutOversize;
+export type TakeoutItem = TakeoutEntry | TakeoutLarge;
 
 export type TakeoutMboxErrorCode =
   | "takeout_invalid_start"
@@ -81,7 +85,7 @@ const encoder = new TextEncoder();
 const NEXT_FROM = encoder.encode("\r\nFrom ");
 const THREAD_PREFIX = encoder.encode("X-GM-THRID: ");
 /**
- * How far an entry may pass the raw limit before its bytes are dropped (149). It covers
+ * How far an entry may pass the buffer limit before its bytes are dropped (149). It covers
  * what a boundary check still needs: from two bytes before a candidate's separator
  * through `X-GM-THRID: `.
  */
@@ -223,11 +227,11 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
  * Splits a Takeout mbox stream. Push chunks in order, then call `end()` once. Each
  * returned entry's `raw` is a view of the splitter's buffer that stays valid until the
  * next `push`, so a caller handles every returned item before it pushes again, or
- * copies `raw`. An entry whose stripped size exceeds `rawLimit` is reported as
- * `oversize` without retaining its bytes. A call that splits entries before an error
+ * copies `raw`. An entry whose stripped size exceeds `bufferLimit` is returned as
+ * `large`, with its position instead of its bytes. A call that splits entries before an error
  * returns them, and the next call throws the error; every later call throws it again.
  *
- * Between pushes the splitter keeps at most max(rawLimit + 149, 131,206) unread bytes:
+ * Between pushes the splitter keeps at most max(bufferLimit + 149, 131,206) unread bytes:
  * an entry up to the limit and what its boundary check needs, or the longest From_ line
  * and Gmail headers. With chunks of at most TAKEOUT_READ_BYTES, its buffer therefore
  * never exceeds that plus one read: 34,603,157 bytes (33.0 MiB) at the 25 MiB limit.
@@ -247,7 +251,7 @@ export class TakeoutMboxSplitter {
   /** Stream offset of the first unread byte. */
   #base = 0;
   #head: (Head & { offset: number }) | null = null;
-  /** Bytes of the current entry discarded because it is oversize. */
+  /** Bytes of the current entry discarded because it is over the buffer limit. */
   #dropped = 0;
   /** Where the next boundary search starts, relative to the unread bytes. */
   #scanFrom = 0;
@@ -255,7 +259,7 @@ export class TakeoutMboxSplitter {
   #failed = false;
   #error: unknown = null;
 
-  readonly #rawLimit: number;
+  readonly #bufferLimit: number;
   /** The buffer bound for chunks of at most TAKEOUT_READ_BYTES (see the class comment). */
   readonly #bound: number;
 
@@ -263,10 +267,10 @@ export class TakeoutMboxSplitter {
    * `startOffset` is the stream offset of the first pushed byte; a run resumed at a
    * checkpoint starts at an entry's From_ line, so offsets stay stream-wide.
    */
-  constructor(rawLimit = GMAIL_IMPORT_RAW_LIMIT, startOffset = 0) {
-    this.#rawLimit = rawLimit;
+  constructor(bufferLimit = TAKEOUT_BUFFER_BYTES, startOffset = 0) {
+    this.#bufferLimit = bufferLimit;
     this.#base = startOffset;
-    this.#bound = Math.max(rawLimit + KEEP, HEAD_LIMIT) + TAKEOUT_READ_BYTES;
+    this.#bound = Math.max(bufferLimit + KEEP, HEAD_LIMIT) + TAKEOUT_READ_BYTES;
   }
 
   /** Bytes allocated for the buffer; tests check it against the bound. */
@@ -364,7 +368,7 @@ export class TakeoutMboxSplitter {
       if (boundary === null) {
         // No boundary yet. An entry already over the limit keeps only the bytes from
         // two before the next possible boundary on, at most KEEP.
-        if (this.#dropped + bytes.length > this.#rawLimit + KEEP) {
+        if (this.#dropped + bytes.length > this.#bufferLimit + KEEP) {
           const drop = Math.max(0, this.#scanFrom - 2);
           this.#dropped += drop;
           this.#consume(drop);
@@ -378,26 +382,18 @@ export class TakeoutMboxSplitter {
         throw new TakeoutMboxError("takeout_missing_separator", head.offset);
       const total = this.#dropped + size;
       const end = this.#base + (boundary >= 0 ? boundary + 2 : bytes.length);
-      if (this.#dropped > 0 || total > this.#rawLimit)
-        items.push({
-          kind: "oversize",
-          offset: head.offset,
-          end,
-          messageId: head.messageId,
-          size: total,
-        });
-      else
-        items.push({
-          kind: "entry",
-          offset: head.offset,
-          end,
-          messageId: head.messageId,
-          threadId: head.threadId,
-          fromDate: head.fromDate,
-          labels: head.labels,
-          // Nothing writes the buffer until the next push, so no copy is needed.
-          raw: bytes.subarray(0, size),
-        });
+      const fields = {
+        offset: head.offset,
+        end,
+        messageId: head.messageId,
+        threadId: head.threadId,
+        fromDate: head.fromDate,
+        labels: head.labels,
+      };
+      if (this.#dropped > 0 || total > this.#bufferLimit)
+        items.push({ kind: "large", ...fields, rawOffset: head.offset + head.size, size: total });
+      // Nothing writes the buffer until the next push, so no copy is needed.
+      else items.push({ kind: "entry", ...fields, raw: bytes.subarray(0, size) });
       this.#head = null;
       if (boundary < 0) {
         this.#consume(bytes.length);
@@ -495,3 +491,87 @@ function escapedFrom(raw: Uint8Array, start: number): boolean {
   while (i < raw.length && raw[i] === GT) i++;
   return startsWith(raw, FROM_SPACE, i);
 }
+
+/**
+ * `unescapeMboxrd` for a message pushed in chunks of any size, in constant memory. At
+ * most six bytes are held back between pushes: the first ">" of a line and the part of
+ * "From " seen after its run of ">". Removing one ">" from a run of them gives the same
+ * bytes whichever one is removed, so the rest of the run is passed on at once.
+ */
+export class MboxrdUnescaper {
+  #lineStart = true;
+  /** The first ">" of the current line is held back. */
+  #held = false;
+  /** Bytes of "From " matched after the held ">" and the rest of its run. */
+  #matched = 0;
+
+  push(chunk: Uint8Array): Uint8Array {
+    const out = new Uint8Array(chunk.length + 1 + FROM_SPACE.length);
+    let to = 0;
+    const emit = (bytes: Uint8Array) => {
+      out.set(bytes, to);
+      to += bytes.length;
+    };
+    for (let i = 0; i < chunk.length;) {
+      if (this.#held) {
+        const byte = chunk[i]!;
+        if (this.#matched === 0 && byte === GT) {
+          emit(chunk.subarray(i, i + 1));
+          i++;
+          continue;
+        }
+        if (byte === FROM_SPACE[this.#matched]) {
+          this.#matched++;
+          i++;
+          if (this.#matched === FROM_SPACE.length) {
+            // An escaped line: the held ">" is dropped.
+            emit(FROM_SPACE);
+            this.#held = false;
+            this.#matched = 0;
+            this.#lineStart = false;
+          }
+          continue;
+        }
+        // Not escaped: give back what was held, then read this byte as usual.
+        this.#flush(emit);
+        continue;
+      }
+      if (this.#lineStart && chunk[i] === GT) {
+        this.#held = true;
+        this.#lineStart = false;
+        i++;
+        continue;
+      }
+      // Copy through the end of the line.
+      const next = chunk.indexOf(LF, i);
+      const end = next < 0 ? chunk.length : next + 1;
+      emit(chunk.subarray(i, end));
+      this.#lineStart = next >= 0;
+      i = end;
+    }
+    return out.subarray(0, to);
+  }
+
+  /** Returns what was held back at the end of the message. */
+  end(): Uint8Array {
+    const out = new Uint8Array(1 + FROM_SPACE.length);
+    let to = 0;
+    this.#flush((bytes) => {
+      out.set(bytes, to);
+      to += bytes.length;
+    });
+    return out.subarray(0, to);
+  }
+
+  #flush(emit: (bytes: Uint8Array) => void) {
+    if (this.#held) {
+      emit(GT_BYTE);
+      emit(FROM_SPACE.subarray(0, this.#matched));
+    }
+    this.#held = false;
+    this.#matched = 0;
+    this.#lineStart = false;
+  }
+}
+
+const GT_BYTE = new Uint8Array([GT]);

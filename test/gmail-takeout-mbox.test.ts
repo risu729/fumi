@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MboxrdUnescaper,
+  TAKEOUT_BUFFER_BYTES,
   TAKEOUT_READ_BYTES,
   TakeoutMboxError,
   TakeoutMboxSplitter,
@@ -7,7 +9,6 @@ import {
   type TakeoutItem,
   unescapeMboxrd,
 } from "../src/gmail-takeout-mbox.ts";
-import { GMAIL_IMPORT_RAW_LIMIT } from "../src/gmail-transport.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -148,10 +149,10 @@ describe("Takeout mbox splitter", () => {
     expect(failed.capacity).toBe(0);
   });
 
-  it("bounds its buffer for an entry at the raw limit that starts late in a read", () => {
-    // The documented bound: the raw limit, the 149-byte margin a boundary check needs,
+  it("bounds its buffer for an entry at the buffer limit that starts late in a read", () => {
+    // The documented bound: the buffer limit, the 149-byte margin a boundary check needs,
     // and one read.
-    const bound = GMAIL_IMPORT_RAW_LIMIT + 149 + TAKEOUT_READ_BYTES;
+    const bound = TAKEOUT_BUFFER_BYTES + 149 + TAKEOUT_READ_BYTES;
     const head = (id: string) =>
       encoder.encode(
         `From ${id}@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: ${id}\r\nX-Gmail-Labels: Inbox\r\n`,
@@ -166,7 +167,7 @@ describe("Takeout mbox splitter", () => {
     // full read follows the one where it ends.
     const late = TAKEOUT_READ_BYTES - 1000;
     const leadRaw = raw("lead", late - head("1").length - 2);
-    const bigRaw = raw("big", GMAIL_IMPORT_RAW_LIMIT);
+    const bigRaw = raw("big", TAKEOUT_BUFFER_BYTES);
     const tailRaw = raw("tail", TAKEOUT_READ_BYTES);
     const crlf = encoder.encode("\r\n");
     const parts = [head("1"), leadRaw, crlf, head("2"), bigRaw, crlf, head("3"), tailRaw, crlf];
@@ -196,7 +197,7 @@ describe("Takeout mbox splitter", () => {
     expect(found).toEqual([
       [0, true],
       [late, true],
-      [late + head("2").length + GMAIL_IMPORT_RAW_LIMIT + 2, true],
+      [late + head("2").length + TAKEOUT_BUFFER_BYTES + 2, true],
     ]);
     expect(Math.max(...capacities)).toBeLessThanOrEqual(bound);
     // The first full read allocates the bound, so the buffer is never grown by copying.
@@ -208,30 +209,38 @@ describe("Takeout mbox splitter", () => {
     expect(split("")).toEqual([]);
   });
 
-  it("reports an entry over the raw limit without its bytes and continues", () => {
+  it("returns an entry over the buffer limit by position, without its bytes, and continues", () => {
     const big = message("big", "x".repeat(2000));
     const small = message("small", "ok");
-    const text = entry({ id: "10", message: big }) + entry({ id: "11", message: small });
+    const bigEntry = entry({ id: "10", thread: "9", labels: "Inbox,Big", message: big });
+    const text = bigEntry + entry({ id: "11", message: small });
     for (const size of [1, 17, 300, 100_000]) {
       const items = split(text, size, 1000);
       expect(items, `chunk ${size}`).toHaveLength(2);
+      const rawOffset = bigEntry.indexOf("Message-ID:");
       expect(items[0]).toEqual({
-        kind: "oversize",
+        kind: "large",
         offset: 0,
         messageId: "a",
+        threadId: "9",
+        fromDate: Date.parse("2025-07-08T09:44:28Z"),
+        labels: "Inbox,Big",
+        rawOffset,
         size: encoder.encode(big).length,
-        end: entry({ id: "10", message: big }).length,
+        end: bigEntry.length,
       });
+      // The position names exactly the message bytes.
+      expect(text.slice(rawOffset, rawOffset + encoder.encode(big).length)).toBe(big);
       expect(items[1]).toMatchObject({
         kind: "entry",
-        offset: entry({ id: "10", message: big }).length,
+        offset: bigEntry.length,
         messageId: "b",
       });
       expect(decoder.decode((items[1] as TakeoutEntry).raw)).toBe(small);
     }
   });
 
-  it("accepts an entry exactly at the raw limit", () => {
+  it("returns the bytes of an entry exactly at the buffer limit", () => {
     const body = message("edge", "y".repeat(100));
     const items = split(entry({ id: "12", message: body }), 7, encoder.encode(body).length);
     expect(items[0]?.kind).toBe("entry");
@@ -375,6 +384,41 @@ describe("Takeout mbox splitter", () => {
         items.map((item) => decoder.decode(item.raw)),
         `chunk ${size}`,
       ).toEqual([lf, second, lf]);
+    }
+  });
+
+  it("unescapes a message pushed in chunks of any size exactly as unescapeMboxrd does", () => {
+    const samples = [
+      "",
+      ">",
+      ">From",
+      ">From ",
+      "From x\n>From y\n>>From z\n>>>From \n",
+      "a\r\n>From b\r\n> From c\r\n>Fro\r\n>>Frum\r\n>From",
+      ">F>From x\n>>>>>>>>>>\n>>F\n\n>From \r\n",
+      "line\n>From end without newline",
+    ];
+    // Synthetic noise over the bytes that matter, with a fixed seed.
+    let seed = 7;
+    const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
+    const alphabet = [">", "F", "r", "o", "m", " ", "\n", "\r", "x"];
+    for (let n = 0; n < 200; n++)
+      samples.push(
+        Array.from({ length: 1 + Math.floor(random() * 60) }, () =>
+          random() < 0.5 ? (random() < 0.5 ? ">From " : "\n>") : alphabet[Math.floor(random() * 9)],
+        ).join(""),
+      );
+    for (const sample of samples) {
+      const bytes = encoder.encode(sample);
+      const want = decoder.decode(unescapeMboxrd(bytes));
+      for (const size of [1, 2, 3, 5, 7, 64]) {
+        const unescaper = new MboxrdUnescaper();
+        let got = "";
+        for (let i = 0; i < bytes.length; i += size)
+          got += decoder.decode(unescaper.push(bytes.subarray(i, i + size)));
+        got += decoder.decode(unescaper.end());
+        expect(got, `${JSON.stringify(sample)} in chunks of ${size}`).toBe(want);
+      }
     }
   });
 

@@ -1,5 +1,4 @@
 import { archiveCandidate, validArchiveTime } from "./archive-key.ts";
-import { MAX_RAW_BYTES } from "./limits.ts";
 
 /** Where a Takeout-imported message came from (ADR 0004). */
 export interface GmailTakeoutSource {
@@ -87,8 +86,8 @@ export function parseGmailProvenance(value: unknown): GmailProvenance | null {
     typeof p.importedAt !== "string" ||
     !validArchiveTime(p.importedAt, p.importedAt.slice(0, 10)) ||
     !Number.isSafeInteger(p.rawSize) ||
+    // No upper bound: imported mail is not limited to what Email Routing accepts.
     (p.rawSize ?? -1) < 0 ||
-    (p.rawSize ?? Infinity) > MAX_RAW_BYTES ||
     typeof p.rawSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(p.rawSha256) ||
     !Array.isArray(p.labelIds) ||
