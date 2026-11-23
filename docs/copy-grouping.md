@@ -2,8 +2,16 @@
 
 Status: implemented (the grouping half of
 [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Production
-acceptance is the 276 live/Gmail Message-ID pairs described in the ADR; until it is
-recorded here, grouping is verified with synthetic mail only.
+acceptance is the 276 live/Gmail Message-ID pairs described in the ADR.
+
+Production check of `identity-v1`, 2026-11-23 01:00 UTC, after the backfill indexed
+all 5,947 originals with none blocked: for `after:2026-11-07 before:2026-11-12`, the
+live side had 309 results, the Gmail side 374 and both together 408, so 275 live/Gmail
+groups collapsed. The live and Gmail results shared 276 Message-IDs. The one pair left
+apart was an unsigned original: its Gmail copy carried two `DKIM-Signature` headers that
+the forwarding route added above `X-Fumi-Ingest-ID` (`d=cloudflare-email.net` and the
+owner's domain), so it fell under the Message-ID/DKIM rule while the live copy fell
+under the Message-ID/From/Date rule. `identity-v2` ignores those signatures (below).
 
 The same mail reaches the archive by several routes: live capture at `takuk.me`,
 the Gmail account that first received it, and every Gmail account it was forwarded to.
@@ -13,18 +21,19 @@ matches. Grouping instead compares a few header values that hops keep.
 
 ## Identity index
 
-`repairMailIdentity` runs in every scheduled invocation (every five minutes). It
-selects up to 200 present originals that have no `mail_identity` row, newest catalog
-row first, so new mail is grouped within one interval and the backlog drains behind
-it. For each one it reads only the first 64 KiB of the original (the MIME header
-budget) with a ranged R2 read and writes one row. Rows are never updated. A read that
-throws (an R2 outage) writes nothing for that original, which stays pending for a later
-run without holding back the others; the run reports it as `deferred`.
+`repairMailIdentity` runs in every scheduled invocation (every five minutes). It selects
+up to 200 present originals that have no `mail_identity` row, newest catalog row first,
+so new mail is grouped within one interval and the backlog drains behind it. For each
+one it reads only the first 64 KiB of the original (the MIME header budget) with a
+ranged R2 read and writes one row. Rows are never updated; a row of an older
+`identity_version` is replaced by the backfill, and reads use only current rows. A read
+that throws (an R2 outage) writes nothing for that original, which stays pending for a
+later run without holding back the others; the run reports it as `deferred`.
 
 | Column | Value |
 | --- | --- |
 | `message_id` | First `Message-ID` header without angle brackets, case kept. A Gmail-added `...SMTPIN_ADDED_MISSING@mx.google.com` or `...SMTPIN_ADDED_BROKEN@mx.google.com` ID is stored as absent, because it differs per account |
-| `dkim_bh_json` | Sorted unique `bh=` values of every `DKIM-Signature`, whitespace removed, at most 16 |
+| `dkim_bh_json` | Sorted unique `bh=` values of every `DKIM-Signature` below the topmost `X-Fumi-Ingest-ID` header (all of them when there is none), whitespace removed, at most 16 |
 | `from_address` | First `From` address, lowercase |
 | `to_json` | Sorted unique lowercase addresses of every `To` header, at most 100 |
 | `subject` | Unfolded raw `Subject` with whitespace runs collapsed (encoded words are not decoded) |
@@ -57,8 +66,13 @@ The insert finds the earliest matching row in the same statement and takes its g
 otherwise the row starts its own group. So an assignment never changes after it is
 written, and concurrent runs cannot split a group. Same Message-ID with conflicting body
 hashes or another From is not grouped and sets `message_id_conflict` on the later row. A
-signed and an unsigned copy with the same Message-ID are not grouped, so an unsigned
-original that a forwarding hop signs stays two results.
+signed and an unsigned copy with the same Message-ID are not grouped. Signatures that
+fumi's own forwarding route adds sit above `X-Fumi-Ingest-ID` and are ignored, so an
+unsigned live capture still groups with its Gmail copy; a signature added by another hop
+before capture (for example a forwarding Gmail account) is on both copies. Any other
+hop that signs only one copy keeps the two results apart. A header named
+`X-Fumi-Ingest-ID` inside the original mail only makes that mail's own signatures count
+less, which an unsigned sender gets anyway.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.

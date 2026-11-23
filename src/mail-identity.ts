@@ -7,7 +7,9 @@ import type { Address } from "postal-mime";
  * Gmail accounts it was forwarded to). Every hop adds headers, so raw bytes differ;
  * the Message-ID, DKIM body hashes and a few header values do not.
  */
-export const IDENTITY_VERSION = "identity-v1";
+export const IDENTITY_VERSION = "identity-v2";
+/** Reads use only rows of the current version; older rows are replaced by the backfill. */
+export const CURRENT_IDENTITY_SQL = `i.identity_version='${IDENTITY_VERSION}'`;
 /** The same header budget as MIME extraction. Only this prefix of an original is read. */
 export const IDENTITY_HEADER_BYTES = 64 * 1024;
 /** Originals indexed per scheduled run: one ranged R2 read each, D1 writes in batches. */
@@ -151,9 +153,17 @@ export function parseHeaderIdentity(
   const first = (name: string) => list.find((header) => header.name === name)?.value;
   const all = (name: string) =>
     list.filter((header) => header.name === name).map((header) => header.value);
+  // fumi forwards live mail with X-Fumi-Ingest-ID on top, and the forwarding route then
+  // signs it again (for example Cloudflare Email Routing with d=cloudflare-email.net and
+  // the owner's domain). Signatures above the topmost X-Fumi-Ingest-ID were added after
+  // capture, so the live copy never has them; counting them would split an unsigned
+  // original from its Gmail copy.
+  const forwarded = list.findIndex((header) => header.name === "x-fumi-ingest-id");
   const bodyHashes = [
     ...new Set(
-      all("dkim-signature")
+      list
+        .filter((header, index) => header.name === "dkim-signature" && index > forwarded)
+        .map((header) => header.value)
         .map(bodyHash)
         .filter((value) => value !== null),
     ),
@@ -212,7 +222,7 @@ function matchSql(rule: GroupRule): {
   sql: string;
   values: (identity: HeaderIdentity) => unknown[];
 } {
-  const base = "SELECT m.group_id FROM mail_identity m WHERE m.status='complete' AND m.group_rule=";
+  const base = `SELECT m.group_id FROM mail_identity m WHERE m.identity_version='${IDENTITY_VERSION}' AND m.status='complete' AND m.group_rule=`;
   switch (rule) {
     case "message_id_dkim":
       return {
@@ -240,7 +250,7 @@ function matchSql(rule: GroupRule): {
   }
 }
 /** Same Message-ID, both signed, no shared body hash or another From: not grouped, and recorded. */
-const CONFLICT_SQL = `EXISTS(SELECT 1 FROM mail_identity m WHERE m.status='complete' AND m.message_id=?
+const CONFLICT_SQL = `EXISTS(SELECT 1 FROM mail_identity m WHERE m.identity_version='${IDENTITY_VERSION}' AND m.status='complete' AND m.message_id=?
   AND m.dkim_bh_json!='[]' AND (NOT ${OVERLAP} OR m.from_address IS NOT ?))`;
 
 export async function identityStatement(
@@ -325,7 +335,7 @@ export async function repairMailIdentity(
   const pending = (
     await env.MAIL_CATALOG.prepare(
       `SELECT s.raw_key,s.raw_sha256 FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
-      WHERE i.raw_key IS NULL AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL
+      WHERE (i.raw_key IS NULL OR NOT ${CURRENT_IDENTITY_SQL}) AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL
       ORDER BY s.rowid DESC LIMIT ?`,
     )
       .bind(limit)
@@ -356,11 +366,17 @@ export async function repairMailIdentity(
     const result = results[index];
     return result ? [{ row, result }] : [];
   });
-  const statements = await Promise.all(
-    written.map(({ row, result }) =>
-      identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
-    ),
-  );
+  const statements = (
+    await Promise.all(
+      written.map(async ({ row, result }) => [
+        // A row of an older identity version is replaced, never read again.
+        env.MAIL_CATALOG.prepare(
+          "DELETE FROM mail_identity WHERE raw_key=? AND identity_version!=?",
+        ).bind(row.raw_key, IDENTITY_VERSION),
+        await identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
+      ]),
+    )
+  ).flat();
   // Batches run in order, so a later original sees the rows of earlier ones.
   for (let start = 0; start < statements.length; start += WRITE_BATCH)
     // oxlint-disable-next-line no-await-in-loop -- Ordered writes keep group assignment deterministic.

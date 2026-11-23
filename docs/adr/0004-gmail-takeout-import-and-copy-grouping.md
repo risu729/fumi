@@ -163,5 +163,9 @@ independent review found two gaps, and the implementation differs from the text 
   receipt time, because forwarding to another account happens after the first account
   received the mail. A thread read keeps the requested message as its group's
   representative.
+- The body hashes every rule compares ignore `DKIM-Signature` headers above the topmost
+  `X-Fumi-Ingest-ID` (`identity-v2`, 2026-11-23): fumi's forwarding route signs the copy
+  it sends to Gmail, which split an unsigned original from its Gmail copy in the
+  production check.
 
 Details are in [copies of one message](../copy-grouping.md).
