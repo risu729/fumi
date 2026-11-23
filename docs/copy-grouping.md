@@ -22,7 +22,8 @@ matches. Grouping instead compares a few header values that hops keep.
 ## Identity index
 
 `repairMailIdentity` runs in every scheduled invocation (every five minutes). It selects
-up to 200 present originals that have no `mail_identity` row, newest catalog row first,
+up to 200 present originals that have no `mail_identity` row of the current
+`identity_version`, newest catalog row first,
 so new mail is grouped within one interval and the backlog drains behind it. For each
 one it reads only the first 64 KiB of the original (the MIME header budget) with a
 ranged R2 read and writes one row. Rows are never updated; a row of an older
@@ -33,7 +34,7 @@ later run without holding back the others; the run reports it as `deferred`.
 | Column | Value |
 | --- | --- |
 | `message_id` | First `Message-ID` header without angle brackets, case kept. A Gmail-added `...SMTPIN_ADDED_MISSING@mx.google.com` or `...SMTPIN_ADDED_BROKEN@mx.google.com` ID is stored as absent, because it differs per account |
-| `dkim_bh_json` | Sorted unique `bh=` values of every `DKIM-Signature` below the topmost `X-Fumi-Ingest-ID` header (all of them when there is none), whitespace removed, at most 16 |
+| `dkim_bh_json` | Sorted unique `bh=` values of every `DKIM-Signature` below the bottom-most `X-Fumi-Ingest-ID` header (all of them when there is none), whitespace removed, at most 16 |
 | `from_address` | First `From` address, lowercase |
 | `to_json` | Sorted unique lowercase addresses of every `To` header, at most 100 |
 | `subject` | Unfolded raw `Subject` with whitespace runs collapsed (encoded words are not decoded) |
@@ -53,7 +54,7 @@ grouping does not wait for MIME extraction or depend on its 4 MiB input bound.
 ## Groups
 
 Each original first gets its own group key, and the group ID is the SHA-256 of
-`["identity-v1", ...key]`:
+`["identity-v2", ...key]` (the current `identity_version`):
 
 | Rule | When | Own key | Joins an earlier row with |
 | --- | --- | --- | --- |
@@ -68,11 +69,13 @@ written, and concurrent runs cannot split a group. Same Message-ID with conflict
 hashes or another From is not grouped and sets `message_id_conflict` on the later row. A
 signed and an unsigned copy with the same Message-ID are not grouped. Signatures that
 fumi's own forwarding route adds sit above `X-Fumi-Ingest-ID` and are ignored, so an
-unsigned live capture still groups with its Gmail copy; a signature added by another hop
-before capture (for example a forwarding Gmail account) is on both copies. Any other
-hop that signs only one copy keeps the two results apart. A header named
-`X-Fumi-Ingest-ID` inside the original mail only makes that mail's own signatures count
-less, which an unsigned sender gets anyway.
+unsigned live capture still groups with its Gmail copy. A signature added by a hop
+before fumi captured the mail (for example a Gmail account that forwards to fumi) is on
+both the live capture and the Gmail copy fumi forwarded. Any other hop that signs only
+one copy keeps the two results apart. Hops only add headers on top, so the bottom-most
+`X-Fumi-Ingest-ID` is the same header in every copy, even when the original already
+carried one. A header named `X-Fumi-Ingest-ID` inside the original mail therefore makes
+every copy ignore the signatures above it, which an unsigned sender gets anyway.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.

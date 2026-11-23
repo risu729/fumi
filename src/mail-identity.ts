@@ -15,7 +15,8 @@ export const IDENTITY_HEADER_BYTES = 64 * 1024;
 /** Originals indexed per scheduled run: one ranged R2 read each, D1 writes in batches. */
 export const IDENTITY_BATCH = 200;
 const READ_CONCURRENCY = 8;
-const WRITE_BATCH = 50;
+/** Originals per D1 batch: up to two statements each. */
+const WRITE_BATCH = 25;
 const MAX_BODY_HASHES = 16;
 const MAX_RECIPIENTS = 100;
 const MAX_VALUE = 4096;
@@ -155,10 +156,11 @@ export function parseHeaderIdentity(
     list.filter((header) => header.name === name).map((header) => header.value);
   // fumi forwards live mail with X-Fumi-Ingest-ID on top, and the forwarding route then
   // signs it again (for example Cloudflare Email Routing with d=cloudflare-email.net and
-  // the owner's domain). Signatures above the topmost X-Fumi-Ingest-ID were added after
-  // capture, so the live copy never has them; counting them would split an unsigned
-  // original from its Gmail copy.
-  const forwarded = list.findIndex((header) => header.name === "x-fumi-ingest-id");
+  // the owner's domain). Signatures above X-Fumi-Ingest-ID were added after capture, so
+  // the live copy never has them; counting them would split an unsigned original from its
+  // Gmail copy. Hops only add headers on top, so the bottom-most X-Fumi-Ingest-ID is the
+  // same header in every copy, even when the original already carried one.
+  const forwarded = list.findLastIndex((header) => header.name === "x-fumi-ingest-id");
   const bodyHashes = [
     ...new Set(
       list
@@ -334,12 +336,12 @@ export async function repairMailIdentity(
 ) {
   const pending = (
     await env.MAIL_CATALOG.prepare(
-      `SELECT s.raw_key,s.raw_sha256 FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
+      `SELECT s.raw_key,s.raw_sha256,i.raw_key IS NOT NULL AS replaced FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
       WHERE (i.raw_key IS NULL OR NOT ${CURRENT_IDENTITY_SQL}) AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL
       ORDER BY s.rowid DESC LIMIT ?`,
     )
       .bind(limit)
-      .all<{ raw_key: string; raw_sha256: string }>()
+      .all<{ raw_key: string; raw_sha256: string; replaced: number }>()
   ).results;
   const results: (HeaderIdentity | IdentityFailure | null)[] = Array.from({
     length: pending.length,
@@ -366,21 +368,24 @@ export async function repairMailIdentity(
     const result = results[index];
     return result ? [{ row, result }] : [];
   });
-  const statements = (
-    await Promise.all(
-      written.map(async ({ row, result }) => [
-        // A row of an older identity version is replaced, never read again.
-        env.MAIL_CATALOG.prepare(
-          "DELETE FROM mail_identity WHERE raw_key=? AND identity_version!=?",
-        ).bind(row.raw_key, IDENTITY_VERSION),
-        await identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
-      ]),
-    )
-  ).flat();
-  // Batches run in order, so a later original sees the rows of earlier ones.
+  const statements = await Promise.all(
+    written.map(async ({ row, result }) => [
+      // A row of an older identity version is replaced, never read again.
+      ...(row.replaced
+        ? [
+            env.MAIL_CATALOG.prepare(
+              "DELETE FROM mail_identity WHERE raw_key=? AND identity_version!=?",
+            ).bind(row.raw_key, IDENTITY_VERSION),
+          ]
+        : []),
+      await identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
+    ]),
+  );
+  // Batches run in order, so a later original sees the rows of earlier ones. An
+  // original's DELETE and INSERT always share one atomic batch.
   for (let start = 0; start < statements.length; start += WRITE_BATCH)
     // oxlint-disable-next-line no-await-in-loop -- Ordered writes keep group assignment deterministic.
-    await env.MAIL_CATALOG.batch(statements.slice(start, start + WRITE_BATCH));
+    await env.MAIL_CATALOG.batch(statements.slice(start, start + WRITE_BATCH).flat());
   const blocked = written.filter(({ result }) => typeof result === "string").length;
   return {
     indexed: written.length - blocked,

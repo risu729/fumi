@@ -320,6 +320,13 @@ describe("header-only mail identity", () => {
     expect(
       parseHeaderIdentity(mime(["X-Fumi-Ingest-ID: x", ...headers({ bh: [BH_C] })])),
     ).toMatchObject({ bodyHashes: [BH_C] });
+    // An original that already carried X-Fumi-Ingest-ID (a loop through fumi, or a
+    // forged header): every copy counts only signatures below the bottom-most one.
+    const original = [signature(BH_A), "X-Fumi-Ingest-ID: one", ...headers({ bh: [BH_C] })];
+    expect(parseHeaderIdentity(mime(original))).toMatchObject({ bodyHashes: [BH_C] });
+    expect(
+      parseHeaderIdentity(mime([signature(BH_B), "X-Fumi-Ingest-ID: two", ...original])),
+    ).toMatchObject({ bodyHashes: [BH_C] });
     // A row of the previous identity version is replaced by the backfill.
     await env.MAIL_CATALOG.prepare(
       `INSERT INTO mail_identity(raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at)
