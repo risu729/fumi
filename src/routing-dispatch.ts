@@ -1278,27 +1278,28 @@ export async function repairRoutingDispatch(
   type Row = { raw_key: string; raw_sha256: string; updated_at: number };
   let rows: Row[];
   let uncovered = 0;
-  if (!sweep) {
+  if (rawKey !== undefined) {
+    // The Workflow hook names one source: read it by key. A `? IS NULL OR e.raw_key=?`
+    // filter cannot use the key and read every extraction for each hook call.
     rows = (
       await db
         .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
       LEFT JOIN routing_dispatch_jobs j ON j.raw_key=e.raw_key
-      WHERE ${DISPATCH_SOURCE_SQL}
-      AND (? IS NULL OR e.raw_key=?) AND COALESCE(j.lease_until,0)<=?
-      AND (${STALE_JOB_SQL}
-        OR (j.state IN ('waiting','held') AND (? IS NOT NULL OR j.next_attempt_at<=?))
-        OR (? IS NOT NULL AND j.state='ignored'))
+      WHERE e.raw_key=? AND ${DISPATCH_SOURCE_SQL} AND COALESCE(j.lease_until,0)<=?
+      AND (${STALE_JOB_SQL} OR j.state IN ('waiting','held','ignored'))
+      LIMIT ?`)
+        .bind(rawKey, Date.now(), config.artifact.revision, LIMIT)
+        .all<Row>()
+    ).results;
+  } else if (!sweep) {
+    rows = (
+      await db
+        .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+      LEFT JOIN routing_dispatch_jobs j ON j.raw_key=e.raw_key
+      WHERE ${DISPATCH_SOURCE_SQL} AND COALESCE(j.lease_until,0)<=?
+      AND (${STALE_JOB_SQL} OR (j.state IN ('waiting','held') AND j.next_attempt_at<=?))
       ORDER BY COALESCE(j.next_attempt_at,0),e.raw_key LIMIT ?`)
-        .bind(
-          rawKey ?? null,
-          rawKey ?? null,
-          Date.now(),
-          config.artifact.revision,
-          rawKey ?? null,
-          now,
-          rawKey ?? null,
-          LIMIT,
-        )
+        .bind(Date.now(), config.artifact.revision, now, LIMIT)
         .all<Row>()
     ).results;
   } else {
