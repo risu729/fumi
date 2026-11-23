@@ -59,9 +59,11 @@ written, and concurrent runs cannot split a group. Matching is pairwise, not tra
 a row that shares a body hash with two earlier rows of the same Message-ID that share
 none (`[a]`, `[b]`, then `[a, b]`) joins the earlier one only, while the order `[a, b]`,
 `[a]`, `[b]` puts all three in one group. Which originals end up together can then
-depend on indexing order, which is newest catalog row first within each run. Same
-Message-ID, both signed, with conflicting body hashes or another From is not grouped and
-sets `message_id_conflict` on the later row. A signed and an unsigned copy with the same
+depend on indexing order, which is newest catalog row first within each run. A row with
+the same Message-ID as an earlier one, both signed, but no shared body hash or another
+From does not match that row and has `message_id_conflict` set. It can still join that
+row's group through a third row, as `[b]` does in the second order above, so the flag
+does not mean the row stands alone. A signed and an unsigned copy with the same
 Message-ID are not grouped, so an unsigned original that a forwarding hop signs stays
 two results.
 
@@ -94,9 +96,12 @@ and `mail_identity` rowids, and identity rows written after the first page are i
 for the rest of the traversal, so new grouping never moves a representative between
 pages. A change in which originals match the filters (for example an extraction
 finishing, so a `from:` filter starts matching another copy) can still change a
-representative and repeat or skip that group on a later page. A token from before this
-change is rejected with `invalid_page_token`, and changing `expand_copies` between pages
-is `page_query_mismatch`.
+representative and repeat or skip that group on a later page. So can a change in an
+original's catalog `raw_state` or SHA-256 between pages, which the snapshots do not
+cover: an original that a reconcile pass marks `missing` leaves its group, and one
+restored to `present` (by an import replay, for example) rejoins it. A token from before
+this change is rejected with `invalid_page_token`, and changing `expand_copies` between
+pages is `page_query_mismatch`.
 
 `search_mail_content` and `search_mail_semantic` add `group_id` to each match and,
 within one page or call, drop a match whose group, part and text digest were already
