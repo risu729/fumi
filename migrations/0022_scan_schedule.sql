@@ -11,3 +11,10 @@ CREATE TABLE catalog_scans (
 -- Projection retries due between full content-search passes.
 CREATE INDEX mail_search_documents_retry ON mail_search_documents (next_attempt_at)
   WHERE status = 'retry';
+-- Messages whose search projection was removed, by an extraction or attachment
+-- conversion change, and that the content-search repair indexes again between full
+-- passes. A scheduled pass drops a row once its message needs no projection work.
+CREATE TABLE mail_search_pending (raw_key TEXT PRIMARY KEY);
+CREATE TRIGGER mail_search_document_removed AFTER DELETE ON mail_search_documents BEGIN
+  INSERT OR IGNORE INTO mail_search_pending(raw_key) VALUES (old.raw_key);
+END;

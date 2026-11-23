@@ -87,3 +87,11 @@ export async function closeScan(
       .run();
   }
 }
+
+/** Makes the next scheduled run of `name` a full pass. */
+export async function requestFullScan(db: Database, name: ScanName) {
+  await db
+    .prepare("UPDATE catalog_scans SET next_full_at=0 WHERE name=? AND next_full_at!=0")
+    .bind(name)
+    .run();
+}

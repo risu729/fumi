@@ -293,50 +293,89 @@ export async function indexContentSearchSource(
 }
 
 const REPAIR_LIMIT = 3;
+/** Messages without a current projection. */
+const MISSING_PROJECTION_SQL = `${CURRENT_EXTRACTION_SQL} AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key)`;
+/** Messages without a current projection or with a projection retry due. */
+const PROJECTION_WORK_SQL = `${CURRENT_EXTRACTION_SQL} AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))`;
+const PROJECTION_COLUMNS =
+  "e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json";
+const PROJECTION_ORDER = `ORDER BY CASE s.source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(d.next_attempt_at,0),e.raw_key LIMIT ?`;
 
 /**
  * The MIME Workflow indexes each message itself; this pass repairs what it missed. A
- * scheduled run between full passes (scan-schedule.ts) reads only the due retry rows.
+ * scheduled run reads the messages whose projection a trigger removed
+ * (`mail_search_pending`) and the retries that are due; a full pass (scan-schedule.ts)
+ * first looks for messages without a projection across the whole catalog.
  */
 export async function repairContentSearch(
   env: MailReadEnvironment,
   now = Date.now(),
   scheduled = false,
 ) {
-  const window = scheduled
-    ? await openScan(env.MAIL_CATALOG, "content_search", "", now)
-    : FULL_SCAN;
-  const rows = (
-    await (
-      window.full
-        ? env.MAIL_CATALOG
-            .prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json
+  const db = env.MAIL_CATALOG;
+  let rows: Extraction[];
+  let missing = 0;
+  const window = scheduled ? await openScan(db, "content_search", "", now) : FULL_SCAN;
+  if (!scheduled) {
+    rows = (
+      await db
+        .prepare(`SELECT ${PROJECTION_COLUMNS}
     FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
     LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
-    WHERE ${CURRENT_EXTRACTION_SQL} AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key OR (d.status='retry' AND d.next_attempt_at<=?))
-    ORDER BY CASE s.source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(d.next_attempt_at,0),e.raw_key LIMIT ?`)
-        : env.MAIL_CATALOG
-            .prepare(`SELECT e.raw_key,e.manifest_key,e.body_text_key,e.body_html_key,e.attachments_json
-    FROM mail_search_documents d CROSS JOIN mail_extractions e ON e.raw_key=d.raw_key CROSS JOIN archive_sources s ON s.raw_key=e.raw_key
-    WHERE d.status='retry' AND d.next_attempt_at<=? AND ${CURRENT_EXTRACTION_SQL}
-    ORDER BY CASE s.source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,d.next_attempt_at,e.raw_key LIMIT ?`)
-    )
-      .bind(now, REPAIR_LIMIT)
-      .all<Extraction>()
-  ).results;
+    WHERE ${PROJECTION_WORK_SQL} ${PROJECTION_ORDER}`)
+        .bind(now, REPAIR_LIMIT)
+        .all<Extraction>()
+    ).results;
+  } else {
+    // Due retries are left to the indexed query below, so they cannot keep a full pass
+    // from ever coming back below its limit.
+    rows = window.full
+      ? (
+          await db
+            .prepare(`SELECT ${PROJECTION_COLUMNS}
+    FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+    WHERE ${MISSING_PROJECTION_SQL} ${PROJECTION_ORDER}`)
+            .bind(REPAIR_LIMIT)
+            .all<Extraction>()
+        ).results
+      : [];
+    missing = rows.length;
+    if (rows.length < REPAIR_LIMIT) {
+      const chosen = new Set(rows.map((row) => row.raw_key));
+      const due = (
+        await db
+          .prepare(`SELECT DISTINCT ${PROJECTION_COLUMNS}
+    FROM (SELECT raw_key FROM mail_search_pending
+      UNION ALL SELECT raw_key FROM mail_search_documents WHERE status='retry' AND next_attempt_at<=?) c
+    CROSS JOIN mail_extractions e ON e.raw_key=c.raw_key CROSS JOIN archive_sources s ON s.raw_key=e.raw_key
+    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+    WHERE ${PROJECTION_WORK_SQL} ${PROJECTION_ORDER}`)
+          .bind(now, now, REPAIR_LIMIT)
+          .all<Extraction>()
+      ).results;
+      rows.push(
+        ...due.filter((row) => !chosen.has(row.raw_key)).slice(0, REPAIR_LIMIT - rows.length),
+      );
+    }
+  }
   let indexed = 0;
   let deferred = 0;
-  let unrecorded = 0;
   for (const row of rows) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- Bound decoded mail memory to one message.
       if (await indexMailContent(env, row)) indexed += 1;
-      // The extraction or conversion changed after this pass read it, and its trigger
-      // removed the projection. Nothing was published, and the next full pass selects
-      // the source again while its extraction stays complete.
       else {
+        // The extraction or conversion changed after this pass read it, and its trigger
+        // removed the projection. Nothing was published, and the next pass selects the
+        // source again while its extraction stays complete.
         deferred += 1;
-        unrecorded += 1;
+        // oxlint-disable-next-line no-await-in-loop -- Keep the source visible to the next cheap pass.
+        await env.MAIL_CATALOG.prepare(
+          "INSERT OR IGNORE INTO mail_search_pending(raw_key) VALUES(?)",
+        )
+          .bind(row.raw_key)
+          .run();
       }
     } catch {
       deferred += 1;
@@ -344,9 +383,17 @@ export async function repairContentSearch(
       await deferContentIndex(env, row, now);
     }
   }
-  // A recorded retry is due through the index; a removed projection needs a full pass.
-  if (scheduled && window.full && rows.length < REPAIR_LIMIT && unrecorded === 0)
-    await closeScan(env.MAIL_CATALOG, "content_search", "", window, now);
+  if (scheduled) {
+    // A pending message with a current projection, a recorded retry or no current
+    // extraction needs nothing from this list.
+    await env.MAIL_CATALOG.prepare(`DELETE FROM mail_search_pending WHERE NOT EXISTS (
+      SELECT 1 FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+      LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key
+      WHERE e.raw_key=mail_search_pending.raw_key AND ${CURRENT_EXTRACTION_SQL}
+      AND (d.raw_key IS NULL OR d.manifest_key!=e.manifest_key))`).run();
+    if (window.full && missing < REPAIR_LIMIT)
+      await closeScan(db, "content_search", "", window, now);
+  }
   return { indexed, deferred };
 }
 

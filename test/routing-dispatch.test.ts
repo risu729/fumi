@@ -1496,6 +1496,20 @@ describe("durable routing dispatch in workerd", () => {
     await repairRoutingDispatch(env, run);
     expect(destination.requests).toHaveLength(1);
   });
+  it("makes the first scheduled pass after a drain full", async () => {
+    await env.MAIL_CATALOG.prepare("DELETE FROM catalog_scans").run();
+    await configure(artifact());
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    const scheduled = () => repairRoutingDispatch(env, run, undefined, true);
+    expect((await scheduled()).processed).toBe(0);
+    await drainRoutingDispatch(env.MAIL_CATALOG);
+    await source();
+    expect((await scheduled()).status).toBe("paused");
+    expect(await activateRoutingDispatch(env)).toBe("active");
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(1);
+  });
   it("only one concurrent administrative receipt can resolve an uncertain operation", async () => {
     await configure(artifact());
     await source();

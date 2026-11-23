@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { repairProcessing } from "../src/processing-jobs.ts";
+import { PROCESSING_REPAIR_LIMIT, repairProcessing } from "../src/processing-jobs.ts";
 import { repairMailIdentity } from "../src/mail-identity.ts";
 import { closeScan, FULL_SCAN_INTERVAL, openScan } from "../src/scan-schedule.ts";
 
@@ -93,6 +93,74 @@ describe("scheduled scan cadence", () => {
     await env.MAIL_CATALOG.prepare("DELETE FROM processing_jobs WHERE raw_key=?").bind(old).run();
     expect(await repairProcessing(env.MAIL_CATALOG, workflow, t0 + 3)).toMatchObject({
       discovered: 1,
+    });
+  });
+
+  it("keeps the ledger window open while a run hits its limit", async () => {
+    const workflow = { createBatch: vi.fn().mockRejectedValue(new Error("offline")), get: vi.fn() };
+    for (let index = 0; index <= PROCESSING_REPAIR_LIMIT; index++)
+      // oxlint-disable-next-line no-await-in-loop -- Synthetic rows in rowid order.
+      await catalogSource();
+    expect(await repairProcessing(env.MAIL_CATALOG, workflow, t0, true)).toMatchObject({
+      discovered: PROCESSING_REPAIR_LIMIT,
+    });
+    expect(await scanState("processing_ledger")).toBeNull();
+    expect(await repairProcessing(env.MAIL_CATALOG, workflow, t0 + 1, true)).toMatchObject({
+      discovered: 1,
+    });
+    expect(await scanState("processing_ledger")).toMatchObject({
+      next_full_at: t0 + 1 + FULL_SCAN_INTERVAL,
+    });
+  });
+
+  it("keeps the identity window open after a deferred read", async () => {
+    const key = await catalogSource();
+    const failing = {
+      MAIL_CATALOG: env.MAIL_CATALOG,
+      MAIL_ARCHIVE: {
+        get: async () => {
+          throw new Error("synthetic outage");
+        },
+      } as unknown as R2Bucket,
+    };
+    expect(await repairMailIdentity(failing, 10, new Date(t0), true)).toMatchObject({
+      deferred: 1,
+    });
+    expect(await scanState("mail_identity")).toBeNull();
+    expect(await repairMailIdentity(env, 10, new Date(t0 + 1), true)).toMatchObject({
+      blocked: 1,
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM mail_identity").first("raw_key"),
+    ).toBe(key);
+    expect(await scanState("mail_identity")).not.toBeNull();
+  });
+
+  it("ignores a late cheap pass that would move the mark backwards or across versions", async () => {
+    await catalogSource();
+    const full = await openScan(env.MAIL_CATALOG, "mail_identity", "v1", t0);
+    await closeScan(env.MAIL_CATALOG, "mail_identity", "v1", full, t0);
+    await catalogSource();
+    await catalogSource();
+    const cheap = await openScan(env.MAIL_CATALOG, "mail_identity", "v1", t0 + 1);
+    await closeScan(env.MAIL_CATALOG, "mail_identity", "v1", cheap, t0 + 1);
+    await closeScan(
+      env.MAIL_CATALOG,
+      "mail_identity",
+      "v1",
+      { full: false, after: full.through, through: full.through + 1 },
+      t0 + 2,
+    );
+    await closeScan(
+      env.MAIL_CATALOG,
+      "mail_identity",
+      "v0",
+      { full: false, after: 0, through: cheap.through + 5 },
+      t0 + 3,
+    );
+    expect(await scanState("mail_identity")).toMatchObject({
+      scanned_rowid: cheap.through,
+      fingerprint: "v1",
     });
   });
 
