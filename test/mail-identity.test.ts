@@ -293,6 +293,7 @@ describe("header-only mail identity", () => {
         indexed: 12,
         blocked: 0,
         pending: 0,
+        unknown: 0,
         message_id_conflicts: 3,
         in_multi_copy_groups: 6,
       },
@@ -402,6 +403,67 @@ describe("header-only mail identity", () => {
       [changed.key, "blocked", "source_changed", null],
       [unreadable.key, "complete", null, expect.any(String)],
     ]);
+  });
+
+  it("reports in health only the identity rows that collapsed reads group", async () => {
+    const copies = async (messageId: string, count: number) => {
+      const originals = [];
+      for (let index = 0; index < count; index++) {
+        // oxlint-disable-next-line no-await-in-loop -- Archive order decides catalog rowids.
+        const original = await archive(
+          "gmail",
+          `2026-11-07T06:02:0${index}.000Z`,
+          mime(headers({ messageId, bh: [BH_A], hop: `hop-${index}` })),
+          { namespace: `account-${index}` },
+        );
+        originals.push(original);
+      }
+      return originals;
+    };
+    await copies("<both-present@example.invalid>", 2);
+    const absent = await copies("<one-present@example.invalid>", 3);
+    const [replaced] = await copies("<replaced@example.invalid>", 2);
+    const [leftover] = await copies("<leftover@example.invalid>", 2);
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 9, blocked: 0 });
+    await archive("email_routing", "2026-11-07T06:03:00.000Z", mime(headers({})));
+    // A scan that finds the object replaced records its new SHA-256; the row keeps the old
+    // one, and the backfill selects only originals without a current-version row.
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+      .bind("1".repeat(64), replaced!.key)
+      .run();
+    // A row an older identity version wrote. The counts must not rely on its group ID
+    // differing from the current version's.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_identity SET identity_version='identity-v1' WHERE raw_key=?",
+    )
+      .bind(leftover!.key)
+      .run();
+    const grouping = async () => (await getMailHealth(env, principal)).sections.copy_grouping;
+    // Every original matches an unfiltered read, so the window and the read agree.
+    const read = (await searchMail(env, principal, { expand_copies: true })).emails;
+    expect(read).toHaveLength(10);
+    expect(await grouping()).toMatchObject({
+      status: "observed",
+      window: { records: 10, truncated: false },
+      counts: {
+        indexed: read.filter((mail) => mail.group_id !== null).length,
+        blocked: 0,
+        pending: 2,
+        unknown: 1,
+        message_id_conflicts: 0,
+        in_multi_copy_groups: read.filter((mail) => (mail.copies ?? 0) > 1).length,
+      },
+    });
+    expect(await grouping()).toMatchObject({ counts: { indexed: 7, in_multi_copy_groups: 5 } });
+    // Reads group only present originals, as for current extractions; health already does.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET raw_state=CASE raw_key WHEN ? THEN 'missing' ELSE 'invalid' END WHERE raw_key IN (?,?)",
+    )
+      .bind(absent[0]!.key, absent[0]!.key, absent[1]!.key)
+      .run();
+    expect(await grouping()).toMatchObject({
+      counts: { indexed: 5, pending: 2, unknown: 3, in_multi_copy_groups: 2 },
+    });
   });
 });
 
