@@ -10,9 +10,10 @@
 //   CRLF (one separator added by Takeout)
 // Body lines are escaped as in mboxrd: a line of one or more ">" followed by "From "
 // gets one more ">". The splitter strips the From_ line, the two added headers and the
-// separator, removes that one ">", and returns the bytes otherwise unchanged. Anything
-// else stops with a fixed code, so a malformed or cut-off export never yields a
-// silently changed message. The format was measured on a 40,598-message export on
+// separator and returns the rest unchanged; `unescapeMboxrd` then removes that one ">".
+// Anything else stops with a fixed code, so a malformed or cut-off export never yields
+// a silently changed message, with one accepted exception: a message whose first line
+// starts with whitespace (invalid in RFC 5322) has that line read as a label fold. The format was measured on a 40,598-message export on
 // 2026-11-23 (docs/gmail-import.md, "Google Takeout transport").
 
 import { GMAIL_IMPORT_RAW_LIMIT } from "./gmail-transport.ts";
@@ -33,9 +34,8 @@ export type TakeoutEntry = {
   /** X-Gmail-Labels value, unfolded; may be localized or RFC 2047 encoded. */
   labels: string;
   /**
-   * The message bytes with mboxrd escaping removed: a view of the splitter's buffer,
-   * or a copy when a line was unescaped. A view is valid until the next `push`; copy
-   * it to keep it.
+   * The message bytes still mboxrd-escaped, as a view of the splitter's buffer that is
+   * valid until the next `push`. Pass it to `unescapeMboxrd` for the original message.
    */
   raw: Uint8Array;
 };
@@ -395,9 +395,8 @@ export class TakeoutMboxSplitter {
           threadId: head.threadId,
           fromDate: head.fromDate,
           labels: head.labels,
-          // Nothing writes the buffer until the next push, so no copy is needed
-          // unless a line is unescaped.
-          raw: unescapeMboxrd(bytes.subarray(0, size)),
+          // Nothing writes the buffer until the next push, so no copy is needed.
+          raw: bytes.subarray(0, size),
         });
       this.#head = null;
       if (boundary < 0) {
@@ -468,26 +467,31 @@ const FROM_SPACE = encoder.encode("From ");
  * Returns the same view when no line is escaped, otherwise a copy.
  */
 export function unescapeMboxrd(raw: Uint8Array): Uint8Array {
-  const drops: number[] = [];
-  for (let start = 0; start < raw.length;) {
-    if (raw[start] === GT) {
-      let i = start + 1;
-      while (i < raw.length && raw[i] === GT) i++;
-      if (startsWith(raw, FROM_SPACE, i)) drops.push(start);
-    }
+  // Count first, so an unescaped message costs one copy and no list of positions.
+  let count = 0;
+  for (let start = 0; start >= 0 && start < raw.length;) {
+    if (escapedFrom(raw, start)) count++;
     const next = raw.indexOf(LF, start);
-    if (next < 0) break;
-    start = next + 1;
+    start = next < 0 ? -1 : next + 1;
   }
-  if (drops.length === 0) return raw;
-  const out = new Uint8Array(raw.length - drops.length);
-  let from = 0;
+  if (count === 0) return raw;
+  const out = new Uint8Array(raw.length - count);
   let to = 0;
-  for (const drop of drops) {
-    out.set(raw.subarray(from, drop), to);
-    to += drop - from;
-    from = drop + 1;
+  for (let start = 0; start >= 0 && start < raw.length;) {
+    const next = raw.indexOf(LF, start);
+    const end = next < 0 ? raw.length : next + 1;
+    const from = escapedFrom(raw, start) ? start + 1 : start;
+    out.set(raw.subarray(from, end), to);
+    to += end - from;
+    start = next < 0 ? -1 : end;
   }
-  out.set(raw.subarray(from), to);
   return out;
+}
+
+/** True when the line at `start` is one or more ">" followed by "From ". */
+function escapedFrom(raw: Uint8Array, start: number): boolean {
+  if (raw[start] !== GT) return false;
+  let i = start + 1;
+  while (i < raw.length && raw[i] === GT) i++;
+  return startsWith(raw, FROM_SPACE, i);
 }

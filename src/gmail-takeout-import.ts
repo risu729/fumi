@@ -21,6 +21,7 @@ import {
   TakeoutMboxError,
   TakeoutMboxSplitter,
   type TakeoutItem,
+  unescapeMboxrd,
 } from "./gmail-takeout-mbox.ts";
 
 declare global {
@@ -213,8 +214,8 @@ export type TakeoutChunkResult =
 
 /**
  * Processes up to TAKEOUT_CHUNK_ENTRIES entries from the run's checkpoint. The memory
- * held is the splitter's bounded buffer and one read range: each raw message is a view
- * of that buffer, handled before the next push.
+ * held is the splitter's bounded buffer, one read range and at most one unescaped copy
+ * of a message: each entry is a view of that buffer, handled before the next push.
  */
 export async function runTakeoutChunk(
   env: TakeoutEnvironment,
@@ -349,8 +350,10 @@ export async function runTakeoutChunk(
         if (!(lag >= 0 && lag < 1000)) return halt("takeout_id_date_mismatch");
       }
       if (!takeoutLabelsFit(item.labels)) return halt("takeout_labels_too_long");
-      const rawSha256 = hex(await crypto.subtle.digest("SHA-256", item.raw));
-      const details = { rawSha256, size: item.raw.byteLength, fromDate: item.fromDate };
+      // One unescaped copy at a time: made here, per entry, not for a whole push.
+      const raw = unescapeMboxrd(item.raw);
+      const rawSha256 = hex(await crypto.subtle.digest("SHA-256", raw));
+      const details = { rawSha256, size: raw.byteLength, fromDate: item.fromDate };
       const existing = await db
         .prepare(`SELECT g.raw_key,s.raw_sha256,s.raw_state,s.receipt_state,l.run_id,l.entry_offset
           FROM gmail_messages g JOIN archive_sources s ON s.raw_key=g.raw_key
@@ -388,7 +391,7 @@ export async function runTakeoutChunk(
               item.offset,
               item.messageId,
               item.fromDate,
-              item.raw.byteLength,
+              raw.byteLength,
               rawSha256,
               rawKey,
             )
@@ -412,7 +415,7 @@ export async function runTakeoutChunk(
         labelIds: [],
         importedAt: new Date().toISOString(),
         rawKey,
-        rawSize: item.raw.byteLength,
+        rawSize: raw.byteLength,
         rawSha256,
         takeout: {
           runId: config.runId,
@@ -424,7 +427,7 @@ export async function runTakeoutChunk(
       if (!proposed) return halt("takeout_invalid_provenance");
       if (new TextEncoder().encode(JSON.stringify(proposed)).length > MAX_RECEIPT_BYTES)
         return halt("takeout_receipt_too_large");
-      await storeGmailSource(env, proposed, item.raw);
+      await storeGmailSource(env, proposed, raw);
       await requestProcessing(db, env.MAIL_PROCESSING, rawKey);
       await record(item, "imported", { ...details, rawKey });
       return null;

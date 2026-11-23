@@ -5,6 +5,7 @@ import {
   TakeoutMboxSplitter,
   type TakeoutEntry,
   type TakeoutItem,
+  unescapeMboxrd,
 } from "../src/gmail-takeout-mbox.ts";
 import { GMAIL_IMPORT_RAW_LIMIT } from "../src/gmail-transport.ts";
 
@@ -355,6 +356,13 @@ describe("Takeout mbox splitter", () => {
       });
   });
 
+  it("returns the same view when no line is escaped", () => {
+    const raw = encoder.encode(first);
+    expect(unescapeMboxrd(raw)).toBe(raw);
+    expect(decoder.decode(unescapeMboxrd(encoder.encode(">From")))).toBe(">From");
+    expect(decoder.decode(unescapeMboxrd(encoder.encode("x\n>From y")))).toBe("x\nFrom y");
+  });
+
   it("accepts a message that ends in a bare LF, which gets only the separator CRLF", () => {
     const lf = "Subject: lf\r\n\r\nbody\n";
     const text =
@@ -370,7 +378,7 @@ describe("Takeout mbox splitter", () => {
     }
   });
 
-  it("removes one > from mboxrd-escaped From lines and keeps other lines", () => {
+  it("returns mboxrd-escaped bytes that unescapeMboxrd restores, keeping other lines", () => {
     const escaped =
       ">From the start\r\nSubject: x\r\n\r\n>From here\r\n>>From there\n>>>From far\r\n" +
       "> From spaced\r\n>x From\r\nFrom unescaped\r\n>From\r\n";
@@ -383,7 +391,11 @@ describe("Takeout mbox splitter", () => {
       expect(
         items.map((item) => decoder.decode(item.raw)),
         `chunk ${size}`,
-      ).toEqual([original, first]);
+      ).toEqual([escaped, first]);
+      expect(items.map((item) => decoder.decode(unescapeMboxrd(item.raw)))).toEqual([
+        original,
+        first,
+      ]);
       expect(items[1]!.offset).toBe(entry({ id: "1", message: escaped }).length);
     }
   });
