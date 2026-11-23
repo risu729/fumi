@@ -5,6 +5,7 @@ import { reconcileArchive } from "./reconcile.ts";
 import { repairProcessing, requestProcessing } from "./processing-jobs.ts";
 import { handleHttp } from "./http.ts";
 import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.ts";
+import { projectSentSearch } from "./outbound.ts";
 import { deliverEvents } from "./event-delivery.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { repairContentSearch } from "./content-search.ts";
@@ -321,6 +322,13 @@ export default {
       console.log(JSON.stringify({ event: "outbound_reconcile", ...outbound }));
     } catch {
       console.error(JSON.stringify({ event: "outbound_reconcile", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const sent = await projectSentSearch(env);
+      console.log(JSON.stringify({ event: "sent_search_projection", ...sent }));
+    } catch {
+      console.error(JSON.stringify({ event: "sent_search_projection", status: "deferred" }));
       failed = true;
     }
     try {

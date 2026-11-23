@@ -1173,7 +1173,7 @@ async function submit(
     await session.batch([
       session
         .prepare(
-          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,request_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,'prepared',?,?,?,? WHERE 1=1${draftFence}`,
+          `INSERT OR IGNORE INTO outbound_operations (operation_id,principal_id,idempotency_key,input_hash,request_hash,from_address,input_key,receipt_key,state,draft_id,draft_revision,created_at,updated_at,subject,attachment_count) SELECT ?,?,?,?,?,?,?,?,'prepared',?,?,?,?,?,? WHERE 1=1${draftFence}`,
         )
         .bind(
           operationId,
@@ -1188,6 +1188,9 @@ async function submit(
           draft?.revision ?? null,
           now,
           now,
+          // Search fields of the composed message, as archived in input.json.
+          input.subject,
+          input.payload.attachments.length,
           ...(draft ? [draft.id, principal.id, draft.revision] : []),
         ),
       ...(["to", "cc", "bcc"] as const).flatMap((kind) =>
@@ -1368,6 +1371,61 @@ async function reconcileOutboundReceiptsImpl(ctx: OutboundContext) {
     ]);
   }
   return { checked: rows.results.length };
+}
+
+/** Operations projected per scheduled run; each reads one input.json of at most 6 MiB. */
+const SENT_PROJECTION_BATCH = 20;
+
+/**
+ * Copy the subject and attachment count of operations stored without them (before
+ * migration 0021, or by a Worker without those columns) from their verified input.json.
+ * An input that is missing or fails its digest is marked -1 and not read again.
+ */
+export async function projectSentSearch(
+  ctx: Pick<OutboundContext, "MAIL_CATALOG" | "MAIL_ARCHIVE">,
+) {
+  const session = ctx.MAIL_CATALOG.withSession("first-primary");
+  const rows = await session
+    .prepare(
+      "SELECT operation_id,input_key,input_hash FROM outbound_operations WHERE attachment_count IS NULL ORDER BY created_at LIMIT ?",
+    )
+    .bind(SENT_PROJECTION_BATCH)
+    .all<{ operation_id: string; input_key: string; input_hash: string }>();
+  let projected = 0;
+  let unavailable = 0;
+  for (const row of rows.results) {
+    // oxlint-disable-next-line no-await-in-loop -- Hold at most one bounded input in memory.
+    const fields = await sentSearchFields(ctx.MAIL_ARCHIVE, row.input_key, row.input_hash);
+    if (fields) projected++;
+    else unavailable++;
+    // oxlint-disable-next-line no-await-in-loop -- One small update per projected operation.
+    await session
+      .prepare(
+        "UPDATE outbound_operations SET subject=?,attachment_count=? WHERE operation_id=? AND attachment_count IS NULL",
+      )
+      .bind(fields?.subject ?? null, fields?.attachments ?? -1, row.operation_id)
+      .run();
+  }
+  return { projected, unavailable };
+}
+
+async function sentSearchFields(archive: R2Bucket, key: string, hash: string) {
+  const object = await archive.get(key);
+  if (!object) return null;
+  if (object.size > 6 * 1024 * 1024) {
+    await object.body.cancel();
+    return null;
+  }
+  const json = await object.text();
+  if ((await digest(json)) !== hash) return null;
+  try {
+    const input = (JSON.parse(json) as { input?: Partial<NormalizedMail> }).input;
+    const attachments = input?.payload?.attachments;
+    if (typeof input?.subject !== "string" || !Array.isArray(attachments)) return null;
+    return { subject: input.subject, attachments: attachments.length };
+  } catch {
+    return null;
+  }
 }
 
 export const previewMail = withOutboundErrors(previewMailImpl);
