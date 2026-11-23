@@ -546,4 +546,83 @@ describe("search page cost", () => {
       await expectSameTraversal({ archive_source: "gmail", max_results: 7, expand_copies: true }),
     ).toHaveLength(240);
   });
+
+  it("returns the old pages when groups larger than every walk span the archive", async () => {
+    for (let seed = 1; seed <= 20; seed++) {
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await clear();
+      const random = generator(seed * 7919);
+      const span = 10_000 * random.pick([1, 60, 3600]);
+      // Coarse times make ties within and across groups.
+      const coarse = random.next() < 0.3;
+      const time = () => {
+        if (random.next() < 0.03) return null;
+        const at = Math.floor(random.next() * span);
+        return iso(BASE + (coarse ? Math.floor(at / 600_000) * 600_000 : at));
+      };
+      let serialId = 0;
+      const original = (group: string | undefined, live: boolean, account: string): Original => ({
+        kind: live ? "email_routing" : "gmail",
+        namespace: live ? "ingress-v1" : account,
+        id: `00000000-0000-4000-8000-${(serialId++).toString(16).padStart(12, "0")}`,
+        receivedAt: time(),
+        from: random.pick(SENDERS),
+        subject: random.pick(["Invoice", "Meeting", "Report"]),
+        labels: live ? [] : random.pick(LABEL_SETS),
+        attachments: random.int(2),
+        ...(group
+          ? {
+              group,
+              identity:
+                random.next() < 0.15
+                  ? random.pick(["stale", "blocked", "previous"] as const)
+                  : "complete",
+            }
+          : {}),
+      });
+      // Up to four groups of up to 300 copies at random times across the archive, so
+      // representatives lie anywhere relative to the walked copies, among singletons.
+      const originals: Original[] = [];
+      for (let group = 1 + random.int(4); group > 0; group--)
+        for (let copy = 0, size = random.pick([5, 40, 150, 300]); copy < size; copy++)
+          originals.push(
+            original(`huge-${group}`, random.next() < (copy === 0 ? 0.5 : 0.02), `account-${copy}`),
+          );
+      for (let single = random.int(200); single > 0; single--)
+        originals.push(
+          original(
+            random.next() < 0.5 ? `single-${single}` : undefined,
+            random.next() < 0.3,
+            "account-single",
+          ),
+        );
+      // Rowids in another order than the times; some identity rows land after page 1.
+      for (let index = originals.length - 1; index > 0; index--) {
+        const other = random.int(index + 1);
+        [originals[index], originals[other]] = [originals[other]!, originals[index]!];
+      }
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await insertOriginals(originals);
+      const late = originals.slice(0, random.int(Math.ceil(originals.length / 5)));
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await insertIdentities(originals.slice(late.length));
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await expectSameTraversal(
+        {
+          query: random.pick(Object.keys(OLD_FILTERS)),
+          max_results: 1 + random.int(4),
+          expand_copies: random.next() < 0.2,
+          ...(random.next() < 0.5
+            ? { archive_source: random.pick(["all", "gmail", "email_routing"] as const) }
+            : {}),
+          ...(random.next() < 0.3
+            ? { label_ids: random.pick([["INBOX"], ["Label_1"], ["INBOX", "Label_1"], ["SENT"]]) }
+            : {}),
+        },
+        async (page) => {
+          if (page === 1) await insertIdentities(late);
+        },
+      );
+    }
+  }, 30_000);
 });
