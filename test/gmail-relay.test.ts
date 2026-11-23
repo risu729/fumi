@@ -124,7 +124,7 @@ async function catalogOriginal(
   ingestId: string,
   rawKey: string,
   messageId?: string | null,
-  identityVersion = "identity-v1",
+  identityVersion = IDENTITY_VERSION,
 ) {
   await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,
     receipt_key,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision)
@@ -304,17 +304,21 @@ describe("Gmail relay ingress in workerd", () => {
     });
   });
 
-  it("checks a cataloged original by its identity row without reading R2", async () => {
-    const ingestId = crypto.randomUUID();
-    const rawKey = `ingest/2026-11-01/${ingestId}/raw.eml`;
-    await catalogOriginal(ingestId, rawKey, "cataloged@example.invalid");
-    const get = vi.spyOn(env.MAIL_ARCHIVE, "get");
-    await run(message(relayed(mime("cataloged@example.invalid"), [ingestId])));
-    expect(get).not.toHaveBeenCalled();
-    expect(await relayRows()).toEqual([
-      expect.objectContaining({ outcome: "duplicate_of_live", original_raw_key: rawKey }),
-    ]);
-  });
+  // An identity-v1 row stays until the identity backfill replaces it.
+  it.each(["identity-v1", IDENTITY_VERSION])(
+    "checks a cataloged original by its %s row without reading R2",
+    async (identityVersion) => {
+      const ingestId = crypto.randomUUID();
+      const rawKey = `ingest/2026-11-01/${ingestId}/raw.eml`;
+      await catalogOriginal(ingestId, rawKey, "cataloged@example.invalid", identityVersion);
+      const get = vi.spyOn(env.MAIL_ARCHIVE, "get");
+      await run(message(relayed(mime("cataloged@example.invalid"), [ingestId])));
+      expect(get).not.toHaveBeenCalled();
+      expect(await relayRows()).toEqual([
+        expect.objectContaining({ outcome: "duplicate_of_live", original_raw_key: rawKey }),
+      ]);
+    },
+  );
 
   it("reads a cataloged original's header when it has no identity row yet", async () => {
     const ingestId = crypto.randomUUID();
@@ -374,7 +378,7 @@ describe("Gmail relay ingress in workerd", () => {
       const ingestId = crypto.randomUUID();
       const original = mime("lost-original@example.invalid");
       const rawKey = await putOriginal(ingestId, original);
-      await catalogOriginal(ingestId, rawKey, "lost-original@example.invalid", IDENTITY_VERSION);
+      await catalogOriginal(ingestId, rawKey, "lost-original@example.invalid");
       // The identity row and the R2 header still name the same Message-ID; only raw_state differs.
       await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state=? WHERE external_id=?")
         .bind(rawState, ingestId)
