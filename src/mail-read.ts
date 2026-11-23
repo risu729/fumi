@@ -498,8 +498,8 @@ const D1_BOUND_PARAMETERS = 100;
  * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
  * and two per label for up to ten labels (33). search_emails binds at most 32 in its archive
  * collapse (two snapshots, archive source, 20 for labels, two key lists, three for the
- * cursor, three for the walk's last row, limit), 27 in its archive walk (snapshot, archive
- * source, 20 for labels, four for the cursor, limit) and 7 in its sent statement
+ * cursor, three for the walk's last row, limit), 28 in its archive walk (snapshot, archive
+ * source twice, 20 for labels, four for the cursor, limit) and 7 in its sent statement
  * (principal, snapshot, four for the cursor, limit), and search_mail_content 3.
  */
 const CALLER_BOUND_PARAMETERS = 33;
@@ -728,10 +728,13 @@ async function searchSentMail(
 /** Walk sizes as multiples of limit + 1. Past the last, one statement collapses everything. */
 const WALK_WINDOWS = [4, 32];
 interface ArchivePage {
+  /** The index the walk follows: the page order, or the page order within one source kind. */
+  index: "archive_sources_search_order" | "archive_sources_search_kind_order";
   /** Filters over `s`, `e` and `g`, and their values starting with the archive snapshot. */
   where: string;
   values: (string | number)[];
-  /** Bounds of the order key that the filters and the cursor imply, for the walk. */
+  /** The walk's source kind and the bounds of the order key that the filters and the
+   * cursor imply. */
   range: string[];
   rangeValues: string[];
   /** The cursor condition and its values; empty on the first page. */
@@ -752,7 +755,8 @@ interface WalkedRow {
  * originals) after the cursor, newest first, as collapsedSql returns them over every
  * matching original. Collapsing all of them reads the whole archive on every page, so
  * this walks a window of matching originals newest first from the cursor through
- * archive_sources_search_order, then collapses only the walked originals and every
+ * archive_sources_search_order (with an archive_source, archive_sources_search_kind_order
+ * within that kind), then collapses only the walked originals and every
  * original that shares an identity group_id with one, and keeps results no older than
  * the last walked original.
  *
@@ -813,7 +817,7 @@ async function archivePage(env: MailReadEnvironment, page: ArchivePage): Promise
         // Without INDEXED BY, a source_kind filter (archive_source, label_ids, in:inbox)
         // makes SQLite read every source of that kind through the primary key and sort.
         `SELECT COALESCE(s.received_at,'') AS time,s.external_id,s.raw_key,i.group_id
-         FROM archive_sources s INDEXED BY archive_sources_search_order ${MAIL_JOINS}
+         FROM archive_sources s INDEXED BY ${page.index} ${MAIL_JOINS}
          LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
          WHERE ${[page.where, ...page.range, ...(page.after ? [page.after] : [])].join(" AND ")}
          ORDER BY ${NEWEST_FIRST} LIMIT ?`,
@@ -903,8 +907,16 @@ export async function searchMail(
     range.push("COALESCE(s.received_at,'')<=?");
     rangeValues.push(cursor.beforeTime);
   }
+  // An archive_source walks the order within its kind, so a search of live captures
+  // never reads the Gmail copies around and below them.
+  if (source !== "all") {
+    range.unshift("s.source_kind=?");
+    rangeValues.unshift(source);
+  }
   const [archived, sent] = await Promise.all([
     archivePage(env, {
+      index:
+        source === "all" ? "archive_sources_search_order" : "archive_sources_search_kind_order",
       where: clauses.join(" AND "),
       values,
       range,

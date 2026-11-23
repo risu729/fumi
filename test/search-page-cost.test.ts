@@ -415,6 +415,40 @@ describe("search page cost", () => {
     for (const page of costs[0]!.flat()) expect(page).toBeLessThan(3000);
   });
 
+  it("reads no older Gmail-only import when archive_source keeps to live captures", async () => {
+    const costs = [];
+    for (const older of [1500, 3000]) {
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await clear();
+      const recent = archiveMessages(generator(1), 300, {
+        start: BASE,
+        step: 3_600_000,
+        copyRate: 0.15,
+        spread: 120_000,
+      });
+      // An older Gmail import below every live capture, as a Takeout import leaves it.
+      const history = archiveMessages(generator(2), older, {
+        start: BASE - 400 * 3_600_000,
+        step: 3_600_000,
+        copyRate: 0.15,
+        spread: 120_000,
+      }).map((original) =>
+        original.kind === "gmail"
+          ? original
+          : { ...original, kind: "gmail" as const, namespace: "account-0", labels: ["INBOX"] },
+      );
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await insertOriginals([...history, ...recent]);
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      await insertIdentities([...recent, ...history]);
+      // Every page, including the last, which finds no older live capture.
+      // oxlint-disable-next-line no-await-in-loop -- One archive at a time.
+      costs.push(await pageCosts({ archive_source: "email_routing" }, 100));
+    }
+    expect(costs[0]!.length).toBeGreaterThan(1);
+    expect(costs[1]).toEqual(costs[0]);
+  });
+
   it("returns the old pages for random archives, filters and page sizes", async () => {
     for (let seed = 1; seed <= 60; seed++) {
       // oxlint-disable-next-line no-await-in-loop -- One archive at a time.

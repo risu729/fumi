@@ -123,8 +123,10 @@ to the page size:
 
 1. A walk reads the next `4 × (max_results + 1)` matching originals after the token's
    position, newest first, through the `archive_sources_search_order` index on
-   `(COALESCE(received_at,''), external_id)`, the page order. `after:`, `before:` and
-   the token bound where the walk starts and stops in that index.
+   `(COALESCE(received_at,''), external_id)`, the page order. With `archive_source`,
+   it walks `archive_sources_search_kind_order` on
+   `(source_kind, COALESCE(received_at,''), external_id)` within that kind instead.
+   `after:`, `before:` and the token bound where the walk starts and stops in the index.
 2. A collapse runs the same SQL as before over only the walked originals and every
    original whose `mail_identity` row has the `group_id` of a walked one, then keeps
    representatives no older than the last walked original.
@@ -140,26 +142,35 @@ its representative and `copies` are the same. `test/search-page-cost.test.ts` co
 full traversals against the previous statement on random archives with groups across
 page boundaries, Gmail labels, `archive_source`, `in:` and `expand_copies`.
 
-Measured with the local D1 of the test runtime (`meta.rows_read` summed over every
-statement of a page, 20 results per page, about 15% of messages in groups of two to
-four copies):
+Measured on 2026-11-23 at 02:00 UTC with the local D1 of the test runtime
+(`meta.rows_read` summed over every statement of a page, 20 results per page), over
+`archiveMessages(generator(1), n, …)` of `test/search-page-cost.test.ts` with 1,530 and
+3,100 messages, about 15% of them in groups of two to four copies:
 
 | Archive | Search | Page 1 before | Page 10 before | Page 1 after | Page 10 after |
 | --- | --- | --- | --- | --- | --- |
-| 1,990 originals | empty query | 24,374 | 23,908 | 1,713 | 1,757 |
-| 1,990 originals | `from:alpha` | 11,719 | 11,229 | 2,227 | 2,201 |
-| 1,990 originals | `in:inbox` | 17,334 | 16,891 | 2,057 | 2,046 |
-| 1,990 originals | `archive_source: gmail` | 16,817 | 16,287 | 1,840 | 1,823 |
-| 4,033 originals | empty query | 49,006 | 48,527 | 1,689 | 1,684 |
-| 4,033 originals | `from:alpha` | 23,826 | 23,365 | 2,094 | 2,183 |
-| 4,033 originals | `in:inbox` | 35,596 | 35,142 | 2,119 | 2,040 |
-| 4,033 originals | `archive_source: gmail` | 33,635 | 33,099 | 1,799 | 1,866 |
+| 1,996 originals | empty query | 24,374 | 23,896 | 1,757 | 1,720 |
+| 1,996 originals | `from:alpha` | 11,856 | 11,359 | 2,076 | 2,144 |
+| 1,996 originals | `in:inbox` | 17,457 | 17,018 | 2,251 | 2,065 |
+| 1,996 originals | `archive_source: gmail` | 17,266 | 16,733 | 1,840 | 1,759 |
+| 1,996 originals | `archive_source: email_routing` | 7,551 | 7,189 | 1,746 | 1,806 |
+| 4,011 originals | empty query | 49,035 | 48,557 | 1,757 | 1,720 |
+| 4,011 originals | `from:alpha` | 23,516 | 23,019 | 2,076 | 2,144 |
+| 4,011 originals | `in:inbox` | 35,107 | 34,668 | 2,251 | 2,065 |
+| 4,011 originals | `archive_source: gmail` | 34,245 | 33,712 | 1,840 | 1,759 |
+| 4,011 originals | `archive_source: email_routing` | 15,659 | 15,297 | 1,746 | 1,806 |
 
 The test asserts that pages 1 and 10 read exactly as many rows whether the older
-archive below them holds 1,500 or 3,000 more messages. Limits:
+archive below them holds 1,500 or 3,000 more messages, and that every page of an
+`archive_source: email_routing` traversal reads as many rows whether a Gmail-only import
+below the live captures holds 1,500 or 3,000 messages. Walked through the page-order
+index alone, the last pages of that traversal read every older Gmail original (4,095
+and 8,018 rows on the last page with 3,000 and 6,000 older messages, against 151 through
+the kind index). Limits:
 
-- A filter that matches few originals (a rare `from:`) still walks every newer original
-  until it finds enough matches; no index covers extracted metadata.
+- A filter that matches few originals (a rare `from:` or `in:sent`) still walks every
+  original between the token and enough matches, and the last page of a traversal walks
+  every older original; no index covers extracted metadata or Gmail labels.
 - A page whose walks reach mostly copies whose representative lies outside them (many
   copies per group spread over time) falls back to collapsing everything.
 - The walk and the collapse are two statements, so a write that lands between them
@@ -169,8 +180,8 @@ archive below them holds 1,500 or 3,000 more messages. Limits:
   carry a unary `+`: otherwise SQLite reads every source of that kind through the
   primary key and sorts it.
 
-Migration `0022` adds the index. It changes no table, so the running Worker reads the
-same rows while the deploy job applies it, and its inserts maintain the index.
+Migration `0022` adds both indexes. It changes no table, so the running Worker reads the
+same rows while the deploy job applies it, and its inserts maintain the indexes.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
 rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a
