@@ -18,9 +18,10 @@ conventions as the owner's other repositories, scaled to one Email Worker.
   cancelled once running. The deploy job skips a commit that is no longer the main head,
   verifies the catalog database, records pending migrations and a Time Travel bookmark,
   applies them and requires none to remain. The versions strategy then verifies the
-  uploaded version at 100 percent traffic, preserves existing secrets and leaves
-  triggers alone. Version/deployment IDs, commit SHA and run URL appear in the job
-  summaries.
+  uploaded version at 100 percent traffic and preserves existing secrets. It then
+  synchronizes the configured triggers (Cron, Workflows, queue consumer and Custom
+  Domain), as ADR 0002 was amended on 2026-11-23. Version/deployment IDs, commit SHA and
+  run URL appear in the job summaries.
 - [Pateat's CodeQL setup](https://github.com/risu729/pateat/blob/cf2be052bb580a65b92379f268252129bd8637c3/.github/workflows/codeql.yml)
   supplies the JavaScript/TypeScript and Actions analyses with extended security
   queries, no dependency or TRAP cache, and SHA-pinned actions. Fumi runs them on

@@ -7,7 +7,8 @@ automatic as in the other repositories
 look at the other repos"). Implemented in the PR that adds this ADR. It replaces the
 manual-dispatch rule in
 [repository conventions](../repository-conventions.md#intentional-differences).
-Date: 2026-11-17
+Date: 2026-11-17. Amended on 2026-11-23 to synchronize triggers; see
+[the amendment](#amendment-2026-11-23-trigger-synchronization).
 
 ## Context
 
@@ -81,10 +82,11 @@ bookmark, and the migration-compatibility rule exists.
   starts CI on main with `workflow_dispatch`, which always uses the current main
   head. Re-running an older main run instead joins the queue last, replaces a
   newer waiting run and then skips, so it deploys nothing.
-- Provisioning D1, Email Routing changes, Cron activation (`deploy-triggers` stays
-  `false`) and the archive-only cutover in
+- Provisioning D1, Email Routing changes and the archive-only cutover in
   [standalone ingress](../standalone-ingress.md) stay separate, explicitly
-  authorized operations.
+  authorized operations. Cron, Workflows, the queue consumer and the Custom Domain
+  were separate operations too until the
+  [2026-11-23 amendment](#amendment-2026-11-23-trigger-synchronization).
 - D1 Time Travel can restore the database to the recorded bookmark. A restore
   also reverts every write made after the bookmark, so it is a last resort,
   not a rollback step.
@@ -99,3 +101,55 @@ bookmark, and the migration-compatibility rule exists.
 - A `workflow_run` trigger as in Kogane: needs `secrets: inherit` or a
   privileged trigger, plus a check of `workflow_run.head_sha`. A job inside CI,
   as in Pateat, needs neither.
+
+## Amendment 2026-11-23: trigger synchronization
+
+Status: accepted. On 2026-11-23 at 14:39 UTC the owner approved enabling trigger
+deployment in CI ("CI でトリガーの反映を有効にする" / "これでいい", "enable trigger
+deployment in CI" / "that's fine"). At 14:48 UTC the owner chose to try narrow token
+grants first and to add account-wide Workers Scripts Write only if they are not enough
+("狭い権限でダメならscripts writeで", "if narrow permissions fail, use Scripts Write").
+
+### Context
+
+The deploy job ran the shared action with `deploy-triggers: "false"`, so CI never
+applied the `triggers`, `domains` or Workflow `exports` in
+[`cloudflare.config.ts`](../../cloudflare.config.ts). `fumi-mail-processing` existed
+from the 2026-11-09 bootstrap `cf deploy`. `fumi-gmail-takeout`, added in
+[#162](https://github.com/risu729/fumi/pull/162), was never registered: the Worker
+version deployed, but the Workflow was missing in production until it was created by
+hand on 2026-11-23 at 14:15 UTC, without its declared concurrency limit and retention.
+
+A read-only comparison at about 14:50 UTC found production equal to the configuration
+for the Cron `*/5 * * * *`, workers.dev and preview URLs (both off), `fumi.takuk.me`
+and the `fumi-delivery-events` consumer (batch 10, 5 retries,
+`fumi-delivery-events-dlq`). The Workflow concurrency limits and retention cannot be
+read back through the API. `cf workers triggers deploy --dry-run` validates the
+configuration and exits before any API request, so it cannot show this comparison.
+
+### Decision
+
+- The deploy step sets `deploy-triggers: "true"`. After verifying the new version at
+  100 percent, the action runs `cf workers triggers deploy --prebuilt --mode production
+  --worker fumi`. That sets the Worker's workers.dev and preview settings and its Cron
+  schedules, attaches the Custom Domain, updates the queue consumer and `PUT`s both
+  Workflows with their class, concurrency limit and retention. The action checks the
+  Custom Domain changeset before upload, before synchronization and after it, and
+  refuses removals, conflicts or a domain attached to another Worker.
+- The production token gets account-wide Queues Write and Workers Routes Write on
+  `takuk.me` in [risu729/infra](https://github.com/risu729/infra), the grants Kogane and
+  Pateat already hold for the same steps. The Workflow `PUT` is documented with
+  account-wide Workers Scripts Write only. If the first synchronizing deployment is
+  refused there, that grant is added as the owner allowed. It would let the token change
+  or delete every Worker in the account.
+
+### Consequences
+
+- A change to `triggers`, `domains` or a Workflow export reaches production with the
+  next main deployment. Removing a declared trigger removes it in production.
+- Synchronization runs after the new version is live. If it fails, the job fails, that
+  version stays live and the trigger changes already made are kept; nothing is rolled
+  back. Fix the cause and start CI on main again.
+- Setting a Workflow's retention applies to its instance history; the concurrency limit
+  of 1 on `fumi-gmail-takeout` matches the import's one-instance-at-a-time design.
+- Email Routing is not touched: the configuration declares no `addresses`.
