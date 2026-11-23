@@ -5,8 +5,8 @@ Status: accepted by the owner on 2026-11-22 at 21:29 UTC
 design in an issue"). The design is [#161](https://github.com/risu729/fumi/issues/161).
 Implemented; the owner asked for the implementation on 2026-11-22 at 23:29 UTC
 ("161やって", "do 161"). See [mail delivered directly to Gmail](../gmail-relay.md) for
-the behavior and the operator steps. Gmail forwarding has not been turned on, so
-production acceptance is pending.
+the behavior and the operator steps. The owner turned on Gmail forwarding on
+2026-11-23, and production acceptance passed at 02:15 UTC.
 
 Date: 2026-11-22
 

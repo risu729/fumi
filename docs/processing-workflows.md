@@ -35,13 +35,79 @@ start using `waitUntil`. Neither D1 nor Workflows changes the forwarding result.
 This best-effort start is not the durable recovery mechanism: the existing R2
 sweep discovers raw-only and receipt-only sources if invocation time runs out.
 Every scheduled invocation also discovers up to 10 catalog sources without jobs
-and checks up to 10 due jobs. A failed scan does not suppress repair of known jobs.
+(among sources added since the last clean pass, and across the whole catalog at the
+[scan cadence](#scheduled-scan-cadence)) and checks up to 10 due jobs. A failed scan
+does not suppress repair of known jobs.
 More generally, every stage of the scheduled handler, from the archive sweep through
 outbound delivery-event reconciliation and MCP Events delivery, is isolated: a failed
 stage logs only its event name and a fixed status, later stages still run, and the
 run is reported failed.
 Failed dispatches move behind other due jobs before remote calls, with a five-minute
 check interval. These bounds are for the small live archive, not bulk import.
+
+### Scheduled scan cadence
+
+Four scheduled repairs look for catalog rows that lack a derived row: sources without
+a processing job, present originals without a current `mail_identity` row, extracted
+messages without a current search projection, and live sources without a current
+routing dispatch job. When such a query finds nothing, SQLite reads its whole driving
+table, so at 6,210 sources these four queries read about 3.4 million D1 rows every
+five hours while the archive was idle (D1 query insights, 2026-11-23 08:00 to 13:00
+UTC), and the Gmail Takeout backfill multiplies the table size.
+
+`src/scan-schedule.ts` therefore keeps one `catalog_scans` row per scan (migration
+`0022`). A scheduled run makes a full pass only when one is due: no row yet, the scan's
+fingerprint changed (the pipeline version, the identity version or the routing
+configuration revision), the last full pass is an hour old (`FULL_SCAN_INTERVAL`), or
+the highest `archive_sources` rowid is below the recorded mark (a rebuilt table).
+Routing dispatch also makes its next pass full whenever the Workflow hook or Cron finds
+its configuration disabled, or dispatch paused, draining or stale, and when dispatch is
+activated, because sources that arrive meanwhile get no job row. A full pass that
+started before such a request does not cancel it. A missing or invalid configuration
+object touches no D1, so sources that arrive then wait for the hourly pass. Between full
+passes a run reads only the cheap part:
+
+| Scan | Between full passes |
+| --- | --- |
+| `repairProcessing` | sources with `rowid` above `scanned_rowid` |
+| `repairMailIdentity` | sources with `rowid` above `scanned_rowid` |
+| `repairContentSearch` | messages in `mail_search_pending` and `mail_search_documents` retries that are due, through the `mail_search_documents_retry` index |
+| `repairRoutingDispatch` | `routing_dispatch_jobs` rows in `waiting` or `held` that are due, through `routing_dispatch_jobs_due` |
+
+A full content-search or routing pass looks only for rows without a current derived row
+(no projection or another manifest; no job or a stale one) and fills its remaining
+budget from the cheap query, so retries that stay due cannot keep every pass full.
+
+An attachment conversion or extraction change removes a message's search projection
+through the existing triggers; the `mail_search_document_removed` trigger then adds the
+message to `mail_search_pending`, so it is indexed again within five minutes. Each
+scheduled content-search pass drops pending rows whose message has a current
+projection, a recorded retry or no current extraction.
+
+A pass records itself only when it comes back below its limit and left nothing
+unrecorded behind: a full pass sets the next full pass an hour later and `scanned_rowid`
+to the highest source rowid it covered, and a cheap processing or identity pass only
+moves `scanned_rowid` forward. Cheap content-search and routing passes record nothing. A
+pass that hit its limit, or an identity read that was deferred, records nothing, so the
+next run repeats the same window and a backlog drains every five minutes as before.
+
+The live paths do not wait for these passes: ingress, the Gmail imports and the Takeout
+import create the processing job, and the MIME Workflow indexes content and dispatches
+routing for each message itself. What only a full pass finds now waits up to an hour
+instead of five minutes: a source whose job creation failed at ingress and that the R2
+sweep catalogued below the mark, an older catalog row that changed after its pass, a
+message the MIME Workflow never indexed without recording a retry, and a live source
+whose Workflow dispatch never ran. The operator repair route (`POST
+/api/admin/archive/repair`) always runs the full processing and content-search queries,
+and the Workflow hooks read only their own source.
+
+Production evidence (D1 analytics for `fumi-catalog`, rows read per hour, 2026-11-23):
+675,372 to 739,780 per hour from 08:00 to 13:00 UTC, before this cadence was deployed
+at 15:12 UTC ([#184](https://github.com/risu729/fumi/pull/184)); 134,551 at 16:00 and
+128,403 at 17:00 UTC after it. The 14:00 and 18:00 UTC hours read about 3.1 million rows
+each, nearly all of it from the routing dispatch hook query, which read every extraction
+for each MIME completion (382 calls at 18:00) until it read its source by key
+([routing dispatch](routing-dispatch.md#runtime-and-ownership)).
 
 The catalog Workflow has three checkpointed stages: begin, observe/catalog, complete.
 MIME jobs insert a separate extraction stage before completion. Only small outcome
@@ -86,9 +152,11 @@ account limit. This is not a live/backfill priority mechanism or measured throug
 claim. Verify queue age, completion rate and catalog failures after an authorized
 rollout. Local development does not enforce concurrency limits: the artifact check
 asserts that the native build emits the exact Workflow identity, limit and retention,
-not that local scheduling reproduces production capacity. Apply changes through the
-Workflow resource configuration, not just a Worker version upload, and read back
-the applied limit; a successful version deployment alone does not establish 25.
+not that local scheduling reproduces production capacity. The CI
+deployment applies the Workflow resource configuration (limit and retention) through
+trigger synchronization since 2026-11-23 (ADR 0002). The Workflow GET API does not
+return the limit, so a successful synchronizing deployment is the evidence that 25 was
+sent.
 
 States are `pending`, `running`, `complete`, and `failed`. A catalog operation may
 complete while recording missing or invalid R2 evidence: inspect catalog issues
@@ -151,11 +219,11 @@ scope before production activation. For a new environment or configuration rollo
    `0002_processing_jobs.sql` migration with separately authorized access and
    verify its table and indexes. Preserve all existing archive data.
 2. Provision/verify `fumi-mail-processing`, exported class `MailProcessing`, the
-   `MAIL_PROCESSING` binding, and three-day success/error retention through an
-   authorized bootstrap/configuration deployment. Routine deployment uploads a
-   version without synchronizing triggers; it is not proof that Workflow resources
-   exist. Only the local `deploy:bootstrap` task explicitly uses `--no-provision`.
-   Do not assume the Worker-scoped deploy token grants resource creation.
+   `MAIL_PROCESSING` binding, and three-day success/error retention. Since
+   2026-11-23 the CI deployment registers every declared Workflow with its limit and
+   retention after the version is live (ADR 0002). Before that, routine deployment
+   never created Workflows, so `fumi-gmail-takeout` was missing until it was created
+   by hand. Only the local `deploy:bootstrap` task explicitly uses `--no-provision`.
 3. Verify the active Worker version, binding and unchanged email routes. Run an
    approved synthetic acceptance message; independently verify forwarding, R2
    bytes, immediate catalog registration and the completed D1 job/Workflow.

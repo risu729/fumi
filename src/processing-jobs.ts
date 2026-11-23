@@ -1,6 +1,7 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import { archiveCandidate } from "./archive-key.ts";
 import { eventStatement, type EventName } from "./event-store.ts";
+import { closeScan, FULL_SCAN, openScan } from "./scan-schedule.ts";
 
 function processingEvent(
   db: D1DatabaseSession,
@@ -257,23 +258,34 @@ export async function requestProcessing(
   return dispatchJob(session, workflow, rawKey, now, pipelineVersion);
 }
 
-/** The R2 sweep supplies sources absent from the ledger, including orphan pairs. */
+/**
+ * The R2 sweep supplies sources absent from the ledger, including orphan pairs. A
+ * scheduled run looks for them among new sources only, and across the whole catalog at
+ * the cadence in scan-schedule.ts; an operator repair always looks everywhere.
+ */
 export async function repairProcessing(
   db: D1Database,
   workflow: WorkflowBinding,
   now = Date.now(),
+  scheduled = false,
 ) {
   const session = db.withSession("first-primary");
+  const window = scheduled
+    ? await openScan(session, "processing_ledger", PIPELINE_VERSION, now)
+    : FULL_SCAN;
   const missing = await session
     .prepare(`SELECT s.raw_key FROM archive_sources s
     LEFT JOIN processing_jobs j ON j.raw_key = s.raw_key AND j.pipeline_version = ?
-    WHERE j.raw_key IS NULL ORDER BY s.raw_key LIMIT ?`)
-    .bind(PIPELINE_VERSION, PROCESSING_REPAIR_LIMIT)
+    WHERE j.raw_key IS NULL AND s.rowid > ? AND s.rowid <= ? ORDER BY s.rowid LIMIT ?`)
+    .bind(PIPELINE_VERSION, window.after, window.through, PROCESSING_REPAIR_LIMIT)
     .all<{ raw_key: string }>();
   for (const source of missing.results) {
     // oxlint-disable-next-line no-await-in-loop -- Bound ledger creation per scheduled run.
     await ensureProcessingJob(session, source.raw_key, now, PIPELINE_VERSION);
   }
+  // Every source in the window now has a job: none was missing past the limit.
+  if (scheduled && missing.results.length < PROCESSING_REPAIR_LIMIT)
+    await closeScan(session, "processing_ledger", PIPELINE_VERSION, window, now);
   const pending = await session
     .prepare(`SELECT raw_key, pipeline_version FROM processing_jobs
     WHERE pipeline_version IN ('catalog-v1', 'mime-v1') AND state IN ('pending', 'running') AND next_check_at <= ?

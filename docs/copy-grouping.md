@@ -1,8 +1,17 @@
 # Copies of one message
 
-Status: implemented (the grouping half of
-[ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Production
-acceptance is the 276 live/Gmail Message-ID pairs described in the ADR.
+Status: implemented and accepted in production (the grouping half of
+[ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Acceptance is the 276
+live/Gmail Message-ID pairs described in the ADR: with `identity-v2` all 276 collapse
+by default and expand to both copies.
+
+Production check of `identity-v2`, 2026-11-23 04:10 UTC, after the backfill indexed
+every original again: for `after:2026-11-07 before:2026-11-12`, the live side had 309
+results, the Gmail side 374 and both together 407, so all 276 live/Gmail groups
+collapsed. Every live result stayed its group's representative, and no ID repeated
+within a traversal. With `expand_copies: true` the same search returned 689 originals:
+the 683 live and Gmail results plus 6 copies of other source kinds that the collapse had
+hidden.
 
 Production check of `identity-v1`, 2026-11-23 01:00 UTC, after the backfill indexed
 all 5,947 originals with none blocked: for `after:2026-11-07 before:2026-11-12`, the
@@ -23,13 +32,16 @@ matches. Grouping instead compares a few header values that hops keep.
 
 `repairMailIdentity` runs in every scheduled invocation (every five minutes). It selects
 up to 200 present originals that have no `mail_identity` row of the current
-`identity_version`, newest catalog row first,
-so new mail is grouped within one interval and the backlog drains behind it. For each
-one it reads only the first 64 KiB of the original (the MIME header budget) with a
-ranged R2 read and writes one row. Rows are never updated; a row of an older
-`identity_version` is replaced by the backfill, and reads use only current rows. A read
-that throws (an R2 outage) writes nothing for that original, which stays pending for a
-later run without holding back the others; the run reports it as `deferred`.
+`identity_version`, newest catalog row first, among sources added since its last clean
+pass, and across the whole catalog at the
+[scan cadence](processing-workflows.md#scheduled-scan-cadence) (hourly, and at once
+after an `identity_version` change), so new mail is grouped within one interval and the
+backlog drains behind it. For each one it reads only the first 64 KiB of the original
+(the MIME header budget) with a ranged R2 read and writes one row. Rows are never
+updated; a row of an older `identity_version` is replaced by the backfill, and reads use
+only current rows. A read that throws (an R2 outage) writes nothing for that original,
+which stays pending for a later run without holding back the others; the run reports it
+as `deferred`.
 
 | Column | Value |
 | --- | --- |

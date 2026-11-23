@@ -18,6 +18,7 @@ import { extractArchiveMail } from "../src/mime-extraction.ts";
 import { indexArchiveSource } from "../src/reconcile.ts";
 import { encryptedPdf, syntheticPdfPassword } from "./fixtures/encrypted-pdf.ts";
 import { resolveAttachmentPasswords } from "../src/attachment-passwords.ts";
+import zipPackage from "@zip.js/zip.js/package.json" with { type: "json" };
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
 const base = "https://mail.example.invalid";
@@ -477,6 +478,10 @@ describe("private bounded attachment conversion", () => {
     const converted = await row();
     expect(converted).toMatchObject({ state: "complete", representation: "local_zip_text" });
     expect(JSON.stringify(converted)).not.toContain(password);
+    // Provenance names the zip.js version that actually ran, not a stale literal.
+    expect(JSON.parse(converted!["provenance_json"] as string)).toMatchObject({
+      service: `zip.js-${zipPackage.version}`,
+    });
     const stored = await env.MAIL_ARCHIVE.get(converted!["result_key"] as string);
     expect(await stored!.text()).not.toContain(password);
     await repairContentSearch(env);
@@ -673,6 +678,48 @@ describe("private bounded attachment conversion", () => {
         { read_attachment_supported: false, conversion: { state: "not_enabled_or_pending" } },
       ],
     });
+  });
+  it("discovers and converts attachments only while the original is unchanged", async () => {
+    for (const id of ["current-0", "current-1", "current-2", "changed-before-discovery"])
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic catalog rows.
+      await source(undefined, undefined, id);
+    const change = (id: string) =>
+      env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+        .bind("c".repeat(64), `synthetic/raw/${id}`)
+        .run();
+    await change("changed-before-discovery");
+    const toMarkdown = vi.fn(async (file: { name: string }) => ({
+      name: file.name,
+      format: "text",
+      data: "synthetic converted content",
+    }));
+    // Discovery examines three messages and processes two parts per run.
+    expect(await repairAttachmentConversions(runtime({ AI: { toMarkdown } }), now)).toEqual({
+      enabled: true,
+      processed: 2,
+    });
+    await change("current-2");
+    expect(await repairAttachmentConversions(runtime({ AI: { toMarkdown } }), now + 1)).toEqual({
+      enabled: true,
+      processed: 0,
+    });
+    expect(toMarkdown).toHaveBeenCalledTimes(2);
+    expect(
+      (
+        await env.MAIL_CATALOG.prepare(
+          "SELECT raw_key,state FROM attachment_conversions ORDER BY raw_key",
+        ).all()
+      ).results,
+    ).toEqual([
+      { raw_key: "synthetic/raw/current-0", state: "complete" },
+      { raw_key: "synthetic/raw/current-1", state: "complete" },
+      { raw_key: "synthetic/raw/current-2", state: "pending" },
+    ]);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS calls FROM attachment_conversion_calls",
+      ).first(),
+    ).toEqual({ calls: 2 });
   });
   it("automatically resolves a separate authorized related mail hint and verifies ZIP decryption", async () => {
     const password = crypto.randomUUID();
