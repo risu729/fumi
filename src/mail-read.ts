@@ -72,7 +72,8 @@ const SELECT_MAIL = `SELECT ${MAIL_COLUMNS} FROM archive_sources s ${MAIL_JOINS}
  * copy group: live capture first, then Gmail copies by earliest provider receipt time
  * (the account that received it first, before any forwarding hop), then external ID.
  * A thread read prefers the message it was asked for. Rows without a complete identity
- * row for their current original, or whose row is newer than the snapshot, stand alone.
+ * row for their current, present original (as in CURRENT_EXTRACTION_SQL), or whose row
+ * is newer than the snapshot, stand alone.
  * `copies` counts the originals of the group that matched the same filters.
  */
 function collapsedSql(
@@ -83,7 +84,7 @@ function collapsedSql(
 ) {
   const { after = "", preferRawKey = false } = options;
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND i.status='complete' AND s.raw_state='present' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)

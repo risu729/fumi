@@ -55,10 +55,15 @@ Each original first gets its own group key, and the group ID is the SHA-256 of
 
 The insert finds the earliest matching row in the same statement and takes its group ID;
 otherwise the row starts its own group. So an assignment never changes after it is
-written, and concurrent runs cannot split a group. Same Message-ID with conflicting body
-hashes or another From is not grouped and sets `message_id_conflict` on the later row. A
-signed and an unsigned copy with the same Message-ID are not grouped, so an unsigned
-original that a forwarding hop signs stays two results.
+written, and concurrent runs cannot split a group. Matching is pairwise, not transitive:
+a row that shares a body hash with two earlier rows of the same Message-ID that share
+none (`[a]`, `[b]`, then `[a, b]`) joins the earlier one only, while the order `[a, b]`,
+`[a]`, `[b]` puts all three in one group. Which originals end up together can then
+depend on indexing order, which is newest catalog row first within each run. Same
+Message-ID, both signed, with conflicting body hashes or another From is not grouped and
+sets `message_id_conflict` on the later row. A signed and an unsigned copy with the same
+Message-ID are not grouped, so an unsigned original that a forwarding hop signs stays
+two results.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.
@@ -79,7 +84,8 @@ forwarding to another account happens after the first account received it (the A
 says "the account's own Gmail"; earliest receipt time is how the code decides it). A
 thread read always keeps the message it was asked for as its group's representative.
 Each result carries `group_id` (null for an original without a complete identity row
-for its current SHA-256, or whose row is newer than the page snapshot) and
+for its current SHA-256, for one whose catalog `raw_state` is not `present`, as for
+current extractions, or whose row is newer than the page snapshot) and
 `copies`, the number of the group's originals that matched the same filters.
 `expand_copies: true` returns every original with the same two fields.
 
