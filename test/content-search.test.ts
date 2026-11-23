@@ -745,3 +745,243 @@ describe("bounded content retrieval", () => {
     ).toMatchObject({ matches: [{ message_id: "mail_mcp" }] });
   });
 });
+
+interface SyntheticMessage {
+  id: string;
+  subject: string;
+  receivedAt: string;
+  attachments: number;
+  current: boolean;
+  ready: boolean;
+}
+// Writes catalog rows directly: search reads only D1, and indexing thousands of
+// messages through repair would take three per pass.
+async function catalog(messages: SyntheticMessage[]) {
+  const statements = messages.flatMap((message) => {
+    const rawKey = `ingest/2026-11-11/${message.id}/raw.eml`;
+    const manifestKey = `synthetic/manifest/${message.id}`;
+    return [
+      env.MAIL_CATALOG.prepare(
+        `INSERT INTO archive_sources(source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision) VALUES('email_routing','ingress-v1',?,?,?,?,?,'missing',?,0,0)`,
+      ).bind(
+        message.id,
+        rawKey,
+        `${rawKey}.receipt`,
+        message.receivedAt,
+        message.current ? "present" : "missing",
+        "a".repeat(64),
+      ),
+      env.MAIL_CATALOG.prepare(`INSERT INTO mail_extractions(raw_key,extractor_version,raw_sha256,raw_size,instance_id,status,metadata_json,attachments_json,attachment_count,body_json_key,body_text_key,body_html_key,manifest_key,updated_at)
+        VALUES(?,'mime-v1',?,1,?,'complete',?,'[]',?,'synthetic/body-json',NULL,NULL,?,0)`).bind(
+        rawKey,
+        "a".repeat(64),
+        message.id,
+        JSON.stringify({ subject: message.subject }),
+        message.attachments,
+        manifestKey,
+      ),
+      env.MAIL_CATALOG.prepare(
+        "INSERT INTO mail_search_documents(raw_key,manifest_key,status,coverage_json,next_attempt_at) VALUES(?,?,?,'{}',0)",
+      ).bind(rawKey, manifestKey, message.ready ? "ready" : "retry"),
+    ];
+  });
+  for (let start = 0; start < statements.length; start += 300)
+    // oxlint-disable-next-line no-await-in-loop -- Keep each synthetic batch small.
+    await env.MAIL_CATALOG.batch(statements.slice(start, start + 300));
+}
+async function chunkRows(rows: { id: string; ordinal: number; text: string }[]) {
+  const statements = rows.map((row) =>
+    env.MAIL_CATALOG.prepare(
+      "INSERT INTO mail_search_chunks(raw_key,part,ordinal,text,sha256) VALUES(?,'body',?,?,?)",
+    ).bind(`ingest/2026-11-11/${row.id}/raw.eml`, row.ordinal, row.text, "b".repeat(64)),
+  );
+  for (let start = 0; start < statements.length; start += 300)
+    // oxlint-disable-next-line no-await-in-loop -- Keep each synthetic batch small.
+    await env.MAIL_CATALOG.batch(statements.slice(start, start + 300));
+}
+// The search statement as searchMailContent prepared and bound it.
+async function searchStatement(input: Parameters<typeof searchMailContent>[2]) {
+  const prepare = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+  let captured: { sql: string; values: unknown[] } | undefined;
+  const spy = vi.spyOn(env.MAIL_CATALOG, "prepare").mockImplementation((sql) => {
+    const statement = prepare(sql);
+    if (!sql.includes("mail_search_fts MATCH")) return statement;
+    const bind = statement.bind.bind(statement);
+    statement.bind = (...values: unknown[]) => {
+      captured = { sql, values };
+      return bind(...values);
+    };
+    return statement;
+  });
+  try {
+    const result = await searchMailContent(env, reader, input, base);
+    return { result, ...captured! };
+  } finally {
+    spy.mockRestore();
+  }
+}
+// The continuation token format every earlier version issued and accepted.
+function pageToken(before: number, query: string, filter: string) {
+  return btoa(
+    String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ before, query, filter }))),
+  );
+}
+describe("content search paging", () => {
+  it("lets FTS5 walk matches in descending rowid order with the cursor as its bound", async () => {
+    await catalog([
+      {
+        id: "plan",
+        subject: "Synthetic plan",
+        receivedAt: "2026-11-11T00:00:00.000Z",
+        attachments: 1,
+        current: true,
+        ready: true,
+      },
+    ]);
+    await chunkRows([{ id: "plan", ordinal: 0, text: "synthetic plan needle" }]);
+    for (const filters of ["", "subject:plan after:2026-11-01 has:attachment"]) {
+      // oxlint-disable-next-line no-await-in-loop -- One filter at a time keeps the spy scoped.
+      const { sql, values } = await searchStatement({
+        query: "needle",
+        filters,
+        next_page_token: pageToken(Number.MAX_SAFE_INTEGER, "needle", filters),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- Same as above.
+      const plan = await env.MAIL_CATALOG.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .bind(...values)
+        .all<{ detail: string }>();
+      const details = plan.results.map((row) => row.detail);
+      expect(details.filter((detail) => detail.includes("TEMP B-TREE"))).toEqual([]);
+      // FTS5 sets idxNum flags 0x40 (ORDER BY rowid) and 0x80 (DESC) when it consumes the
+      // ORDER BY, and puts "<" in idxStr when it applies the rowid upper bound itself.
+      const scan = /^SCAN mail_search_fts VIRTUAL TABLE INDEX (\d+):(\S*)$/.exec(details[0]!);
+      expect(scan).not.toBeNull();
+      expect(Number(scan![1]) & 0xc0).toBe(0xc0);
+      expect(scan![2]).toContain("<");
+    }
+  });
+  it("reads a bounded number of rows per page however many chunks match", async () => {
+    const messages = Array.from({ length: 2000 }, (_, index) => ({
+      id: `bulk-${index}`,
+      subject: "Synthetic bulk",
+      receivedAt: "2026-11-11T00:00:00.000Z",
+      attachments: 0,
+      current: true,
+      ready: true,
+    }));
+    await catalog(messages);
+    await chunkRows(messages.map(({ id }) => ({ id, ordinal: 0, text: "the common needle" })));
+    const first = await searchStatement({ query: "the" });
+    expect(first.result.matches).toHaveLength(20);
+    const second = await searchStatement({
+      query: "the",
+      next_page_token: first.result.next_page_token!,
+    });
+    expect(second.result.matches).toHaveLength(20);
+    expect(second.result.matches[0]!.message_id).toBe("mail_bulk-1979");
+    for (const { sql, values } of [first, second]) {
+      // oxlint-disable-next-line no-await-in-loop -- Measure one page at a time.
+      const { meta } = await env.MAIL_CATALOG.prepare(sql)
+        .bind(...values)
+        .all();
+      // Sorting every match reads each of the 2,000 matches and its joined rows (about
+      // 12,000 rows); walking rowids in order stops after the 21 rows the page needs.
+      expect(meta.rows_read).toBeLessThan(500);
+    }
+  });
+  it("returns the same pages and continuation tokens as ordering by chunk ID", async () => {
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      id: `page-${String(index).padStart(2, "0")}`,
+      subject: index % 2 ? `Beta ${index}` : `Alpha ${index}`,
+      receivedAt: `2026-11-0${1 + (index % 9)}T00:00:00.000Z`,
+      attachments: index % 3 === 0 ? 1 : 0,
+      current: index % 7 !== 3,
+      ready: index % 11 !== 5,
+    }));
+    await catalog(messages);
+    // Interleave messages so that consecutive chunk IDs belong to different messages.
+    await chunkRows(
+      [0, 1, 2].flatMap((ordinal) =>
+        messages.map(({ id }, index) => ({
+          id,
+          ordinal,
+          text: (index + ordinal) % 3 ? `synthetic ${ordinal} Needle text` : "no match here",
+        })),
+      ),
+    );
+    // Removed chunks leave gaps in the ID sequence and in the FTS rowids.
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_search_chunks WHERE id%5=0").run();
+    const stored = (
+      await env.MAIL_CATALOG.prepare(
+        "SELECT c.id,s.external_id,c.ordinal,c.text FROM mail_search_chunks c JOIN archive_sources s ON s.raw_key=c.raw_key ORDER BY c.id DESC",
+      ).all<{ id: number; external_id: string; ordinal: number; text: string }>()
+    ).results;
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    const cases: [string, (message: SyntheticMessage) => boolean][] = [
+      ["", () => true],
+      ["subject:alpha", (message) => message.subject.startsWith("Alpha")],
+      [
+        "has:attachment after:2026-11-04",
+        (message) => message.attachments > 0 && message.receivedAt >= "2026-11-04",
+      ],
+    ];
+    for (const [filters, accepts] of cases) {
+      // The order every earlier version returned: chunk ID descending.
+      const expected = stored.filter((row) => {
+        const message = byId.get(row.external_id)!;
+        return (
+          row.text.toLowerCase().includes("needle") &&
+          message.current &&
+          message.ready &&
+          accepts(message)
+        );
+      });
+      expect(expected.length).toBeGreaterThan(7);
+      const pages: { ids: string[]; token: string | null }[] = [];
+      let token: string | undefined;
+      do {
+        // oxlint-disable-next-line no-await-in-loop -- Each page needs the previous token.
+        const page = await searchMailContent(
+          env,
+          reader,
+          { query: "needle", filters, max_results: 7, next_page_token: token },
+          base,
+        );
+        pages.push({
+          ids: page.matches.map((match) => `${match.message_id}#${match.citation.chunk}`),
+          token: page.next_page_token,
+        });
+        token = page.next_page_token ?? undefined;
+      } while (token);
+      const expectedPages = [];
+      for (let start = 0; start < expected.length; start += 7) {
+        const rows = expected.slice(start, start + 7);
+        expectedPages.push({
+          ids: rows.map((row) => `mail_${row.external_id}#${row.ordinal}`),
+          token: start + 7 < expected.length ? pageToken(rows.at(-1)!.id, "needle", filters) : null,
+        });
+      }
+      expect(pages).toEqual(expectedPages);
+      // A token can name a chunk that was removed since; the next page starts below it.
+      const removed = expected[3]!.id - (expected[3]!.id % 5);
+      // oxlint-disable-next-line no-await-in-loop -- One filter at a time.
+      const resumed = await searchMailContent(
+        env,
+        reader,
+        {
+          query: "needle",
+          filters,
+          max_results: 3,
+          next_page_token: pageToken(removed, "needle", filters),
+        },
+        base,
+      );
+      expect(resumed.matches.map((match) => `${match.message_id}#${match.citation.chunk}`)).toEqual(
+        expected
+          .filter((row) => row.id < removed)
+          .slice(0, 3)
+          .map((row) => `mail_${row.external_id}#${row.ordinal}`),
+      );
+    }
+  });
+});
