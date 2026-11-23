@@ -369,6 +369,9 @@ export async function searchMailContent(
       throw new MailReadError("invalid_page_token");
     }
   }
+  // The FTS rowid is the chunk ID (content_rowid='id', set by the insert trigger). Ordering
+  // and bounding on it lets FTS5 return matches in descending order and stop at LIMIT,
+  // instead of sorting every match; results and cursors are those of the chunk ID.
   const rows = (
     await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,c.original_sha256,c.representation,c.source_part,
     snippet(mail_search_fts,0,'','','…',48) AS excerpt,d.coverage_json,i.group_id
@@ -377,8 +380,8 @@ export async function searchMailContent(
     JOIN archive_sources s ON s.raw_key=c.raw_key
     JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=d.manifest_key
     LEFT JOIN mail_identity i ON i.raw_key=c.raw_key AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND i.raw_sha256=s.raw_sha256
-    WHERE mail_search_fts MATCH ? AND c.id<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
-    ORDER BY c.id DESC LIMIT ?`)
+    WHERE mail_search_fts MATCH ? AND mail_search_fts.rowid<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
+    ORDER BY mail_search_fts.rowid DESC LIMIT ?`)
       .bind(`"${query.replaceAll('"', '""')}"`, before, ...parsed.values, limit + 1)
       .all<{
         id: number;
