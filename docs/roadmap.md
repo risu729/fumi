@@ -84,10 +84,13 @@ establish production delivery.
 - [ ] Complete and independently verify the historical scope from Google Takeout
       per account, and group copies of one message across accounts and live capture
       ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Grouping is
-      implemented ([copies of one message](copy-grouping.md)); its production check of
-      the 276 live/Gmail pairs is pending. The connector
+      implemented ([copies of one message](copy-grouping.md)); its production check
+      passed on 2026-11-23, with all 276 live/Gmail pairs collapsed. The connector
       transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
-      before it stopped on 2026-11-12. No Gmail writes are supported.
+      before it stopped on 2026-11-12. No Gmail writes are supported. Per account
+      ([production runs](gmail-import.md#production-takeout-runs)): momonga is done
+      and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23); the main
+      account and risu.minecraft wait for the owner's go (2026-11-23 14:34 UTC).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See

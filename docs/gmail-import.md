@@ -234,8 +234,8 @@ read and the query plan. They do not establish production import coverage.
 
 ## Google Takeout transport
 
-Status: implemented and tested with synthetic mbox files; no Takeout run has been
-configured in production. It follows
+Status: implemented, tested with synthetic mbox files, and run in production for one
+account (see [production runs](#production-takeout-runs)). It follows
 [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md).
 
 An operator stores each account's Takeout mbox files in the private R2 bucket
@@ -376,6 +376,30 @@ separately: the raw SHA-256 and the entry offset identify the entry.
 Progress and outcomes are D1 rows. The run's `status`, `stop_code` and `stop_offset`,
 and the per-outcome counts and `from_date` range in `gmail_takeout_items`, are the
 evidence for the per-account verification in the ADR.
+
+### Production Takeout runs
+
+One row per account, checked with read-only queries on the production D1 catalog. The
+namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address.
+
+| Account | Run | Entries | Outcomes | `from_date` range (UTC) | Checked |
+| --- | --- | --- | --- | --- | --- |
+| momonga | `takeout-d592e62e-2026-11-22` | 379 (17,012,473 bytes, one object) | 379 `imported` | 2022-07-11 01:04:54 .. 2026-11-08 08:24:05 | 2026-11-23 18:12 UTC |
+
+- momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
+  run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
+  entries have 379 distinct Gmail IDs; `gmail_messages` holds 379 rows for the
+  namespace (342 threads, imported 14:16:15..14:52:43 UTC, about 5.8 s per entry) and
+  `gmail_takeout_labels` 379. All 379 have a complete `mime-v1` extraction and a
+  complete processing job, so the one blocked extraction and one failed processing job
+  that mail health showed at 15:06 UTC are not from this run. The newest of each is one
+  live-capture source of 2026-11-18 (`input_too_large`, `workflow_failed`). The count
+  agrees with the 379 messages counted in the export before it was uploaded.
+- Production had no `fumi-gmail-takeout` Workflow before this run. CI deploys a
+  version with `deploy-triggers: false`, which does not register a new Workflow, so it
+  was created through the Cloudflare API on 2026-11-23 before the run started.
+- The other accounts (the main account and risu.minecraft) are not started; the owner
+  asked to stop after momonga (2026-11-23 14:34 UTC).
 
 ## Primary references
 
