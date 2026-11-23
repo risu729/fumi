@@ -154,7 +154,8 @@ both Workflow `PUT` requests were refused with code 10105 (`not_entitled`). Acco
 Workers Scripts Write was then added in
 [risu729/infra#167](https://github.com/risu729/infra/pull/167), and
 [run 45243046142](https://github.com/risu729/fumi/actions/runs/45243046142) (18:55 UTC)
-synchronized all of them, including `fumi-mail-processing` and `fumi-gmail-takeout`.
+synchronized every trigger, including both Workflows (`fumi-mail-processing` and
+`fumi-gmail-takeout`).
 The production token can therefore change or delete every Worker in the account.
 
 ### Consequences
