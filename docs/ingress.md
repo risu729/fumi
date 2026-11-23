@@ -183,15 +183,17 @@ applies pending catalog migrations, and skips a commit that is no longer the mai
 ([ADR 0002](adr/0002-continuous-deployment.md)). The SHA-pinned shared deploy action
 validates that exact build, uploads a version, activates it, and verifies the returned
 deployment and active version at 100 percent traffic. It preserves existing secrets and
-leaves trigger synchronization disabled. See
+then synchronizes the configured Cron, Workflows, queue consumer and `fumi.takuk.me`
+Custom Domain (ADR 0002, amended 2026-11-23). See
 [repository conventions](repository-conventions.md) for the comparison with other
 repositories.
 
 `mise run deploy:bootstrap` retains the full `cf deploy --no-provision` path for
-explicit initial setup or maintenance. Routine production publishing uses the
-workflow's versions strategy and its deployment readback. Deploying code does
-not certify that Email Routing, Gmail delivery or archival succeeded; record
-their acceptance separately.
+explicit initial setup or maintenance. Routine production publishing uses the workflow's
+versions strategy, its deployment readback and trigger synchronization. The
+configuration declares no Email Routing rules, so deployment never changes them.
+Deploying code does not certify that Email Routing, Gmail delivery or archival
+succeeded; record their acceptance separately.
 
 ## Migrating the remaining routes
 

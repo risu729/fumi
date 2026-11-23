@@ -143,9 +143,11 @@ account limit. This is not a live/backfill priority mechanism or measured throug
 claim. Verify queue age, completion rate and catalog failures after an authorized
 rollout. Local development does not enforce concurrency limits: the artifact check
 asserts that the native build emits the exact Workflow identity, limit and retention,
-not that local scheduling reproduces production capacity. Apply changes through the
-Workflow resource configuration, not just a Worker version upload, and read back
-the applied limit; a successful version deployment alone does not establish 25.
+not that local scheduling reproduces production capacity. The CI
+deployment applies the Workflow resource configuration (limit and retention) through
+trigger synchronization since 2026-11-23 (ADR 0002). The Workflow GET API does not
+return the limit, so a successful synchronizing deployment is the evidence that 25 was
+sent.
 
 States are `pending`, `running`, `complete`, and `failed`. A catalog operation may
 complete while recording missing or invalid R2 evidence: inspect catalog issues
@@ -208,11 +210,11 @@ scope before production activation. For a new environment or configuration rollo
    `0002_processing_jobs.sql` migration with separately authorized access and
    verify its table and indexes. Preserve all existing archive data.
 2. Provision/verify `fumi-mail-processing`, exported class `MailProcessing`, the
-   `MAIL_PROCESSING` binding, and three-day success/error retention through an
-   authorized bootstrap/configuration deployment. Routine deployment uploads a
-   version without synchronizing triggers; it is not proof that Workflow resources
-   exist. Only the local `deploy:bootstrap` task explicitly uses `--no-provision`.
-   Do not assume the Worker-scoped deploy token grants resource creation.
+   `MAIL_PROCESSING` binding, and three-day success/error retention. Since
+   2026-11-23 the CI deployment registers every declared Workflow with its limit and
+   retention after the version is live (ADR 0002). Before that, routine deployment
+   never created Workflows, so `fumi-gmail-takeout` was missing until it was created
+   by hand. Only the local `deploy:bootstrap` task explicitly uses `--no-provision`.
 3. Verify the active Worker version, binding and unchanged email routes. Run an
    approved synthetic acceptance message; independently verify forwarding, R2
    bytes, immediate catalog registration and the completed D1 job/Workflow.

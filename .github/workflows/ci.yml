@@ -177,6 +177,9 @@ jobs:
             "${cf[@]}" d1 migrations apply "${FUMI_CATALOG_DATABASE_ID}"
           fi
           "${cf[@]}" d1 migrations list "${FUMI_CATALOG_DATABASE_ID}" | jq -e 'length == 0' > /dev/null
+      # After the version is live, synchronize the configured Cron, Workflows, queue
+      # consumer and Custom Domain (ADR 0002, amended 2026-11-23). A failure there leaves
+      # the new version live and fails the job.
       - name: Deploy the checked Worker
         if: ${{ steps.current.outputs.release == 'true' }}
         uses: risu729/wrangler-deploy-action@52b0bb0f6c0969897cb84b47f4d5ebc3650f2d0c # v4.0.1
@@ -185,7 +188,7 @@ jobs:
           worker: fumi
           build-mode: production
           production-strategy: versions
-          deploy-triggers: "false"
+          deploy-triggers: "true"
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           cloudflare-account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       - name: Record the deployed commit
@@ -195,7 +198,7 @@ jobs:
             printf '### Worker deployment\n\n'
             printf 'Commit: %s\n\n' "${GITHUB_SHA}"
             printf 'Run: %s/%s/actions/runs/%s\n\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
-            printf 'The shared action verified the uploaded Worker version at 100%% traffic. Email routes and message delivery require separate verification.\n'
+            printf 'The shared action verified the uploaded Worker version at 100%% traffic and synchronized its triggers. Email routes and message delivery require separate verification.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
   actions-timeline:
     name: Generate Actions Timeline
