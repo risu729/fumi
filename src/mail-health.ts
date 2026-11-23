@@ -1,4 +1,5 @@
 import { CURRENT_EXTRACTION_SQL, inboundMessageId, MailReadError } from "./mail-read.ts";
+import { CURRENT_IDENTITY_SQL } from "./mail-identity.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { FORWARD_FAILURE_CODES, SMTP_ENHANCED_STATUS } from "./receipt-schema.ts";
 
@@ -364,7 +365,7 @@ export async function getMailHealth(
         section(
           ["archive_sources", "mail_identity"],
           `${catalogWindow}, identity AS (SELECT s.raw_state,i.status,i.group_id,i.message_id_conflict FROM sample s
-        LEFT JOIN mail_identity i ON i.raw_key=s.raw_key)
+        LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND ${CURRENT_IDENTITY_SQL})
         SELECT ${windowCount},COALESCE(SUM(status='complete'),0) AS indexed,COALESCE(SUM(status='blocked'),0) AS blocked,
         COALESCE(SUM(status IS NULL AND raw_state='present'),0) AS pending,
         COALESCE(SUM(message_id_conflict=1),0) AS message_id_conflicts,
