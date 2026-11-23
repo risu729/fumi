@@ -317,7 +317,9 @@ behaviour:
   checks, so bytes that changed between the passes are never stored. A large entry then
   goes through the same `verified`, `conflict` and `imported` outcomes as any other.
   Until this change (2026-11-23), an entry over 25 MiB was recorded as `oversize` and
-  not stored; the 4 such entries in the main account's export are imported now.
+  not stored. No run had reached the 4 such entries in the main account's export
+  then, so its run imports them; a run that already recorded `oversize` entries needs a
+  new run to store them.
 - The splitter's memory is bounded. Between reads it keeps at most the buffer limit plus
   149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of `From_`
   line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds 25 MiB +

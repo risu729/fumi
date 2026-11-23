@@ -254,7 +254,8 @@ export type TakeoutChunkResult =
 /**
  * Processes up to TAKEOUT_CHUNK_ENTRIES entries from the run's checkpoint. The memory
  * held is the splitter's bounded buffer, one read range and at most one unescaped copy
- * of a message: each entry is a view of that buffer, handled before the next push.
+ * of a message: each entry is a view of that buffer, handled before the next push. A
+ * large entry adds one more read range and its unescaped copy while it is streamed.
  */
 export async function runTakeoutChunk(
   env: TakeoutEnvironment,

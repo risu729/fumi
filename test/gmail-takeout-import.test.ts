@@ -353,6 +353,29 @@ describe("Google Takeout import", () => {
     expect(await outcomes("big-again")).toEqual({ verified: 3 });
   }, 60_000);
 
+  it("stores nothing and reports the read error when a large entry's object fails mid-stream", async () => {
+    const big = entry(0, "x".repeat(TAKEOUT_BUFFER_BYTES + 1));
+    const objects = await upload(big, ["a/fail-1.mbox", "a/fail-2.mbox"]);
+    const run = config("fail", objects);
+    await startTakeoutRun(env.MAIL_CATALOG, run);
+    // The splitter's read and the hash pass succeed; the put pass loses the second object.
+    const get = env.TAKEOUT_ARCHIVE.get.bind(env.TAKEOUT_ARCHIVE);
+    let reads = 0;
+    vi.spyOn(env.TAKEOUT_ARCHIVE, "get").mockImplementation(((
+      key: string,
+      options?: R2GetOptions,
+    ) =>
+      key === "a/fail-2.mbox" && ++reads > 2
+        ? Promise.resolve(null)
+        : get(key, options)) as typeof get);
+    await expect(runTakeoutChunk(env, run)).rejects.toThrow("takeout_object_missing");
+    vi.restoreAllMocks();
+    expect((await env.MAIL_ARCHIVE.list({ prefix: "ingest/" })).objects).toEqual([]);
+    // The checkpoint did not move, so the next chunk stores the entry.
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    expect(await outcomes("fail")).toEqual({ imported: 1 });
+  }, 60_000);
+
   it("records an entry stored just before a lost commit as imported, not verified", async () => {
     const objects = await upload(mbox(2), ["a/crash.mbox"]);
     const run = config("crash", objects);

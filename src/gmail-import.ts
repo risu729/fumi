@@ -224,13 +224,16 @@ async function putStream(
 ): Promise<R2Object | null> {
   const { readable, writable } = new FixedLengthStream(source.size);
   const writer = writable.getWriter();
-  const pump = (async () => {
+  // Settles to the source's error, or null: handled from the start, so a source that fails
+  // while the put is in flight is never an unhandled rejection.
+  const pumped = (async () => {
     try {
       for await (const chunk of source.chunks()) await writer.write(chunk);
       await writer.close();
+      return null;
     } catch (error) {
       await writer.abort(error).catch(() => undefined);
-      throw error;
+      return error instanceof Error ? error : new Error(String(error));
     }
   })();
   let stored: R2Object | null;
@@ -238,16 +241,13 @@ async function putStream(
     stored = await bucket.put(key, readable, options);
   } catch (error) {
     await writer.abort(error).catch(() => undefined);
-    await pump.catch(() => undefined);
-    throw error;
+    // The source's own error explains a put that failed because the body was aborted.
+    throw (await pumped) ?? error;
   }
   // A put whose condition failed may return without reading the body.
-  if (!stored) {
-    await writer.abort(new Error("put precondition failed")).catch(() => undefined);
-    await pump.catch(() => undefined);
-    return null;
-  }
-  await pump;
+  if (!stored) await writer.abort(new Error("put precondition failed")).catch(() => undefined);
+  const failure = await pumped;
+  if (stored && failure) throw failure;
   return stored;
 }
 
