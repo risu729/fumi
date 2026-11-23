@@ -293,13 +293,32 @@ describe("Takeout mbox splitter", () => {
     });
   });
 
-  it("stops when a line after the labels starts with whitespace", () => {
-    // A folded label line and a message whose first line starts with a space look the same.
-    for (const size of [1, 64, 10_000])
+  it("unfolds X-Gmail-Labels continued on lines that start with whitespace", () => {
+    // Takeout folds a long label list, for example 2026-11-23's export: "…,Category" + CRLF + " updates".
+    const text =
+      "From 1@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 1\r\n" +
+      `X-Gmail-Labels: Inbox,Category\r\n updates,More\r\n\tlabels\r\n${first}\r\n` +
+      entry({ id: "2", message: second });
+    for (const size of [1, 7, 64, 10_000]) {
+      const items = split(text, size) as TakeoutEntry[];
       expect(
-        failure(() => split(entry({ id: "1", message: ` leading\r\n${first}` }), size)),
-      ).toEqual({
-        code: "takeout_invalid_gmail_headers",
+        items.map((item) => item.labels),
+        `chunk ${size}`,
+      ).toEqual(["Inbox,Category updates,More\tlabels", "Inbox"]);
+      expect(decoder.decode(items[0]!.raw)).toBe(first);
+      expect(items[1]!.offset).toBe(text.length - entry({ id: "2", message: second }).length);
+    }
+  });
+
+  it("applies the header limit to a folded label header as a whole", () => {
+    const fold = `\r\n ${"L".repeat(1000)}`;
+    const head = "From 1@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 1\r\n";
+    const within = `X-Gmail-Labels: ${fold.repeat(60)}`;
+    expect(split(`${head}${within}\r\n${first}\r\n`, 4096)).toHaveLength(1);
+    const over = `X-Gmail-Labels: ${fold.repeat(70)}`;
+    for (const size of [4096, 1_000_000])
+      expect(failure(() => split(`${head}${over}\r\n${first}\r\n`, size))).toEqual({
+        code: "takeout_header_limit",
         offset: 0,
       });
   });
@@ -334,6 +353,39 @@ describe("Takeout mbox splitter", () => {
         code: "takeout_missing_separator",
         offset: head.length - 2,
       });
+  });
+
+  it("accepts a message that ends in a bare LF, which gets only the separator CRLF", () => {
+    const lf = "Subject: lf\r\n\r\nbody\n";
+    const text =
+      `${entry({ id: "1", message: first }).slice(0, -first.length - 2)}${lf}\r\n` +
+      entry({ id: "2", message: second }) +
+      `${entry({ id: "3", message: first }).slice(0, -first.length - 2)}${lf}\r\n`;
+    for (const size of [1, 3, 10_000]) {
+      const items = split(text, size) as TakeoutEntry[];
+      expect(
+        items.map((item) => decoder.decode(item.raw)),
+        `chunk ${size}`,
+      ).toEqual([lf, second, lf]);
+    }
+  });
+
+  it("removes one > from mboxrd-escaped From lines and keeps other lines", () => {
+    const escaped =
+      ">From the start\r\nSubject: x\r\n\r\n>From here\r\n>>From there\n>>>From far\r\n" +
+      "> From spaced\r\n>x From\r\nFrom unescaped\r\n>From\r\n";
+    const original =
+      "From the start\r\nSubject: x\r\n\r\nFrom here\r\n>From there\n>>From far\r\n" +
+      "> From spaced\r\n>x From\r\nFrom unescaped\r\n>From\r\n";
+    const text = entry({ id: "1", message: escaped }) + entry({ id: "2", message: first });
+    for (const size of [1, 5, 10_000]) {
+      const items = split(text, size) as TakeoutEntry[];
+      expect(
+        items.map((item) => decoder.decode(item.raw)),
+        `chunk ${size}`,
+      ).toEqual([original, first]);
+      expect(items[1]!.offset).toBe(entry({ id: "1", message: escaped }).length);
+    }
   });
 
   it("stops at a stream cut off inside the last entry", () => {
