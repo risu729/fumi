@@ -63,7 +63,8 @@ const CR = 13;
 const LF = 10;
 const SP = 32;
 const HT = 9;
-// Longest accepted From_ line, and the longest X-Gmail-Labels line (labels can be long).
+// Longest accepted From_ line and Gmail header line, in bytes before the CRLF (labels can
+// be long). A valid From_ line has at most 60 bytes; the limit only ends the search.
 const FROM_LINE_LIMIT = 128;
 const GMAIL_HEADERS_LIMIT = 64 * 1024;
 const encoder = new TextEncoder();
@@ -169,7 +170,9 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
   while (lines.length < 2) {
     const end = lineEnd(bytes, cursor, GMAIL_HEADERS_LIMIT);
     if (end < 0) {
-      if (bytes.length - cursor > GMAIL_HEADERS_LIMIT)
+      // A line of exactly the limit whose CR ends the bytes may still get its LF, so
+      // before the end of the stream the limit is passed only with one more byte.
+      if (bytes.length - cursor > GMAIL_HEADERS_LIMIT + (final ? 0 : 1))
         throw new TakeoutMboxError("takeout_header_limit", offset);
       if (final) throw new TakeoutMboxError("takeout_invalid_gmail_headers", offset);
       return null;
