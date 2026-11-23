@@ -123,8 +123,8 @@ to the page size:
 
 1. A walk reads the next `4 × (max_results + 1)` matching originals after the token's
    position, newest first, through the `archive_sources_search_order` index on
-   `(COALESCE(received_at,''), external_id)`, the page order. With `archive_source`,
-   it walks `archive_sources_search_kind_order` on
+   `(COALESCE(received_at,''), external_id)`, the page order. With `archive_source`
+   `gmail` or `email_routing`, it walks `archive_sources_search_kind_order` on
    `(source_kind, COALESCE(received_at,''), external_id)` within that kind instead.
    `after:`, `before:` and the token bound where the walk starts and stops in the index.
 2. A collapse runs the same SQL as before over only the walked originals and every
