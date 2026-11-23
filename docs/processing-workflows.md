@@ -98,14 +98,16 @@ instead of five minutes: a source whose job creation failed at ingress and that 
 sweep catalogued below the mark, an older catalog row that changed after its pass, a
 message the MIME Workflow never indexed without recording a retry, and a live source
 whose Workflow dispatch never ran. The operator repair route (`POST
-/api/admin/archive/repair`) and the Workflow hooks always run full queries.
+/api/admin/archive/repair`) always runs the full processing and content-search queries,
+and the Workflow hooks read only their own source.
 
-Production evidence (D1 analytics for `fumi-catalog`, rows read per hour): 675,372 to
-739,780 between 08:00 and 14:00 UTC on 2026-11-23 before the change, deployed at 15:12
-UTC; 134,551 at 16:00 and 128,403 at 17:00 UTC after it. The 14:00 and 18:00 UTC hours
-read about 3.1 million rows each, nearly all of it from the routing dispatch hook query,
-which read every extraction for each MIME completion (382 calls at 18:00) until it read
-its source by key ([routing dispatch](routing-dispatch.md#runtime-and-ownership)).
+Production evidence (D1 analytics for `fumi-catalog`, rows read per hour, 2026-11-23):
+675,372 to 739,780 per hour from 08:00 to 13:00 UTC, before this cadence was deployed
+at 15:12 UTC ([#184](https://github.com/risu729/fumi/pull/184)); 134,551 at 16:00 and
+128,403 at 17:00 UTC after it. The 14:00 and 18:00 UTC hours read about 3.1 million rows
+each, nearly all of it from the routing dispatch hook query, which read every extraction
+for each MIME completion (382 calls at 18:00) until it read its source by key
+([routing dispatch](routing-dispatch.md#runtime-and-ownership)).
 
 The catalog Workflow has three checkpointed stages: begin, observe/catalog, complete.
 MIME jobs insert a separate extraction stage before completion. Only small outcome
