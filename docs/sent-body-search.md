@@ -69,9 +69,12 @@ These facts, from the code on main at
 - Sent records belong to one principal (`outbound_operations.principal_id`). The
   archive is single-owner: `mail:read` reads every archived message.
 
-- `/api/mail/sent_<id>/body` answers the whole sent record as JSON, including Bcc, after
-  `publicResult` rewrites `reply_message_id`. Its bytes are not `input.json` and can
-  change with the catalog. No other download exists for `sent_` IDs.
+- `/api/mail/sent_<id>/body` answers `{"input": …}` as JSON: the composed message,
+  including Bcc, with attachment object keys removed and `reply_message_id` rewritten to
+  a `mail_` ID (or `null`) by `publicResult` in `src/mcp.ts`. It has no state, draft or
+  `forward_message_id`, its bytes are not `input.json`, and they can change with the
+  catalog. Any other download of a `sent_` ID, `/text` included, answers HTTP 404
+  `mail_unavailable` (`handleMailResource`).
 
 - The archive index (`0007_content_search.sql`) is an external-content FTS5 table,
   `mail_search_fts(text, content='mail_search_chunks', content_rowid='id',
@@ -128,8 +131,9 @@ Example rows:
 | 42 | `send_7d2e…` | `body` | 0 | `Please find the minutes below.…` | `9c40…` |
 | 43 | `send_7d2e…` | `body` | 1 | `…action items for next week…` | `9c40…` |
 
-`sha256` is the digest of the whole indexed body text, as in the archive index, so every
-chunk of one body carries the same value.
+`sha256` is the digest of the UTF-8 bytes of the whole `payload.text`, before the
+100,000-unit cut, as the archive index stores the digest of the whole body text object
+its `/text` download serves. Every chunk of one body carries the same value.
 
 `outbound_operations.body_search_json` records each operation's indexing outcome:
 
@@ -252,7 +256,8 @@ cap bounds this per operation.
 A new scheduled stage, `sent_body_search`, runs in the five-minute scheduled handler
 after `sent_search_projection`, with its own `try` block: its failure marks the run
 failed but does not skip later stages. It logs only counts:
-`{"event":"sent_body_search","indexed":3,"unavailable":0,"skipped":1,"deferred":0}`.
+`{"event":"sent_body_search","indexed":3,"unavailable":0,"skipped":1,"deferred":0}`,
+where `skipped` counts `rejected` rows marked `not_sent`.
 
 1. Select at most five operations, newest first, so a new send is indexed in the next
    run even while older sends are being backfilled:
@@ -270,8 +275,9 @@ failed but does not skip later stages. It logs only counts:
    `input_hash`, as `sentSearchFields` does. Missing, oversized, mismatched or malformed
    input gets `unavailable` and is not read again.
 
-4. Chunk `payload.text` with the archive's chunking (`chunks()` and `truncateCodeUnits`
-   in `src/content-search.ts`, moved to a shared module).
+4. Chunk `payload.text` with the archive's chunking: `chunks()` in
+   `src/content-search.ts`, moved to a shared module, and `truncateCodeUnits` from
+   `src/utf16.ts`.
 
 5. Publish in one D1 batch, which commits atomically:
 
@@ -318,8 +324,10 @@ into an error. The cost is a delay of up to one scheduled run (question 5).
   matches To and Cc, `after:` and `before:` the operation's `created_at`.
 - The archive statement gains `LEFT JOIN gmail_messages g` so the `in:` clauses of
   `archiveFilterSql` can read labels; its other clauses are unchanged.
-- The tool description and `get_profile`'s description drop "over archived mail only"
-  for this tool.
+- `get_profile`'s `search_coverage` text, which today says `search_mail_content` and
+  `search_mail_semantic` are "both over archived mail only", names the caller's sent
+  bodies for `search_mail_content`. The `search_mail_content` tool description mentions
+  sent mail and `in:`.
 
 Order and pages: matches are not ordered by relevance or time today; they follow index
 entries. Sent and archive chunk IDs are separate sequences and cannot be merged into one
@@ -435,9 +443,10 @@ Estimates, not measurements; the implementation PR measures them with synthetic 
 - **D1 rows written.** At most 31 chunk rows per operation, each with the FTS5 rows
   its trigger writes, and one update. For example, 30 sends a day of about 3,000 UTF-16
   units each add 30 chunk rows a day, about 11,000 a year.
-- **Storage.** Chunk text is at most 100,000 UTF-16 code units per operation, about
-  300 KB of UTF-8 at worst for Japanese text. A trigram index is larger than the text
-  it indexes; the size ratio for fumi's mail has not been measured.
+- **Storage.** Chunk text is at most 100,000 UTF-16 code units per operation plus the
+  200-unit overlaps, and never more than the 256 KiB body limit plus those overlaps:
+  about 280 KB of UTF-8 at worst, for example for Japanese text. A trigram index is
+  larger than the text it indexes; the size ratio for fumi's mail has not been measured.
 - **D1 rows read per search.** The sent walk reads two primary-key rows per visited
   match. The coverage counts read the caller's own operations through
   `outbound_operations_sent` (`0021`), so they grow with the caller's sends, as part
@@ -470,8 +479,10 @@ Estimates, not measurements; the implementation PR measures them with synthetic 
 - **Bcc.** Bcc addresses are never indexed or matched by `to:`, and the `/text`
   download and citations contain no recipients. Text the author typed into the body is
   indexed as written.
-- **Downloads.** `/text` is served with `Content-Disposition: attachment`,
-  `Cache-Control: private, no-store`, `nosniff` and the sandbox CSP, as `/body` is.
+- **Downloads.** `/text` is served with `Content-Disposition: attachment`, `nosniff`
+  and the sandbox CSP, as `/body` is. `/body` sets `Cache-Control: private, no-store`,
+  and `secured()` in `src/http.ts` replaces it with `no-store` on every `/api/mail/`
+  response.
 
 ## Deletion and retention
 
