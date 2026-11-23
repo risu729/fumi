@@ -192,6 +192,25 @@ describe("Google Takeout import", () => {
     );
   });
 
+  it("stores a message with mboxrd-escaped From lines unescaped", async () => {
+    const escaped = entry(0, ">From the start\r\n>>From a quote");
+    const objects = await upload(escaped + entry(1), ["a/escaped.mbox"]);
+    expect(await drain(config("escaped", objects))).toMatchObject({ status: "complete" });
+    const key = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_key FROM gmail_takeout_items WHERE run_id='escaped' AND entry_offset=0",
+    ).first<string>("raw_key");
+    const stored = await (await env.MAIL_ARCHIVE.get(key!))!.arrayBuffer();
+    expect(decoder.decode(stored)).toBe(message(0, "From the start\r\n>From a quote"));
+    const sha = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_sha256,raw_size FROM gmail_takeout_items WHERE run_id='escaped' AND entry_offset=0",
+    ).first<{ raw_sha256: string; raw_size: number }>();
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", stored));
+    expect(sha).toEqual({
+      raw_sha256: Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join(""),
+      raw_size: stored.byteLength,
+    });
+  });
+
   it("stops at a changed copy of an existing message, then records it when told to", async () => {
     const first = await upload(mbox(3), ["a/first.mbox"]);
     await drain(config("first", first));

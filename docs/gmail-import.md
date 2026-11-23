@@ -268,42 +268,70 @@ behaviour:
   `takeout_import_failed`), so a broken run does not restart every five minutes. Only
   the instance the run last started can stop it; a step that timed out may still
   hold the lease, so every entry write is also fenced on the run still `running`.
-- [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The
-  stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
-  and Takeout's separator removed. A malformed or cut-off stream stops the run with
-  the splitter's fixed code and stream offset, once every entry split before the error
-  is processed. An `X-GM-THRID` or `X-Gmail-Labels` line may have at most 65,536 bytes
-  before its CRLF; a longer one stops with `takeout_header_limit`. Where the reads
-  split the stream never changes the entries, the code or the offset.
+- [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The stored
+  raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels` and
+  Takeout's separator removed, and with one `>` removed from each line of one or more
+  `>` followed by `From` and a space (mboxrd escaping; the splitter returns the escaped
+  bytes and the import calls `unescapeMboxrd` per entry). A malformed or cut-off stream
+  stops the run with the splitter's fixed code and stream offset, once every entry split
+  before the error is processed. An `X-GM-THRID` or `X-Gmail-Labels` header may have at
+  most 65,536 bytes before its last CRLF, folds included; a longer one stops with
+  `takeout_header_limit`. Where the reads split the stream never changes the entries,
+  the code or the offset.
+- The format was measured on the main account's export of 2026-11-23 (40,598 entries and
+  4 over the raw limit, 3,952,532,507 bytes), against the 4,810 messages the connector
+  had already stored for that account:
+  - Takeout folds a long `X-Gmail-Labels` onto lines that start with a space (159
+    entries). The splitter unfolds them: it removes the CRLF and keeps the space. A
+    valid message cannot start with a space or tab, so every line after the labels
+    that starts with one is read as a fold. An invalid message that does start with
+    one would lose that line to the labels, and stops only if the labels then fail a
+    check (UTF-8, the header limit or `takeout_labels_too_long`); this risk is
+    accepted with the owner's choice below.
+  - A message that ends in a bare LF gets only the separator CRLF (241 entries); a
+    message without a final line break gets a CRLF before the separator.
+  - No body line starts with `From` and a space; 291 lines start with `>From` and 12
+    with `>>From`, each followed by a space. All 44 stored messages with such lines
+    match their stored SHA-256 once one `>` is removed, so the export is mboxrd.
+  - 4,693 of the 4,810 stored messages have the same raw SHA-256 after splitting. 114
+    differ only by the CRLF Takeout added to a message without a final line break,
+    which cannot be told apart from a real one, so it is kept. 3 are 653 to 1,856
+    bytes larger in Takeout for reasons not yet known. Those 117 are `conflict`
+    entries below; the stored originals are kept.
+  - Every entry's Gmail ID agrees with its `From_` date (`checkIdDate` below). The
+    `From_` date is not Gmail's `internalDate`: for the 4,810 stored messages it is
+    later by up to a minute for most, by up to an hour for 227, by more for 27, and
+    earlier for 38.
+  - The owner chose to unfold labels, accept LF endings and remove mboxrd escaping,
+    and to keep the added CRLF (2026-11-23 02:36 UTC).
 - The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
-  149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of
-  `From_` line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds
-  25 MiB + 149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates
-  the buffer at that size, so a normal run never grows it by copying; a buffer smaller
-  than one read (after short reads at the end of an object) doubles until a read needs
-  more, and is then replaced by one of that size. Each entry's raw bytes are a view of
-  the buffer, handled before the next read, so the splitter makes no copy of a
-  message; the R2 binding still copies the bytes it uploads, at most the raw limit,
-  outside the JavaScript heap during the put. A step holds about 41.0 MiB of Takeout
-  data in the JavaScript heap (the buffer and one read), and at most 49.0 MiB while a
-  small buffer is replaced, of the 128 MB the Worker shares with the rest of the
-  isolate. The buffer is released when the stream ends or fails.
-  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the raw limit
-  that starts 1000 bytes before the end of a read.
+  149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of `From_`
+  line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds 25 MiB +
+  149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates the buffer at
+  that size, so a normal run never grows it by copying; a buffer smaller than one read
+  (after short reads at the end of an object) doubles until a read needs more, and is
+  then replaced by one of that size. Each entry's raw bytes are a view of the buffer,
+  handled before the next read, so the splitter makes no copy of a message. The import
+  makes one unescaped copy, at most the raw limit, only for an entry with an escaped
+  line, and drops it before the next entry; the R2 binding still copies the bytes it
+  uploads, at most the raw limit, outside the JavaScript heap during the put. A step
+  holds about 41.0 MiB of Takeout data in the JavaScript heap (the buffer and one read),
+  at most 66.0 MiB while an unescaped copy exists, and at most 49.0 MiB while a small
+  buffer is replaced (no copy exists then), of the 128 MB the Worker shares with the
+  rest of the isolate. The buffer is released when the stream ends or fails.
+  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the raw limit that
+  starts 1000 bytes before the end of a read.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference
   must be 0 to 999 ms. A mismatch stops the run with `takeout_id_date_mismatch`. This
   catches a message body that imitates a Takeout separator with a made-up ID.
-  - It does not stop a sender who writes a full separator with a consistent made-up
-    ID and date into a body line. That entry would import as an ordinary new message,
-    and the carrier message would be cut short. Whether this is possible depends on
-    whether Takeout escapes body lines that start with `From `. Gate 1 measures that
-    on the real export before any run is configured, and this risk is reported to
-    the owner with the result.
-  - Some genuine messages may break the rule, for example mail added through the
-    Gmail API or fetched by POP. Gate 1 also counts mismatches over the whole export.
-    A reviewed entry is passed with `skip` rather than by turning the check off.
+  - A sender cannot write a full separator into a body: Takeout escapes every body line
+    that starts with `From` and a space (above), so such a line never reaches the
+    boundary check unescaped.
+  - Some genuine messages could break the rule, for example mail added through the
+    Gmail API or fetched by POP. None did in the 2026-11-23 export. A reviewed entry
+    is passed with `skip` rather than by turning the check off.
 - The checkpoint `gmail_takeout_runs.next_offset` is the stream offset of the next
   unprocessed entry. It advances in the same D1 batch that records the entry in
   `gmail_takeout_items` with one outcome:
@@ -317,7 +345,7 @@ behaviour:
     run stops at that entry with `takeout_raw_conflict`. After review, the same run
     resumes with `onConflict: "record"`; a stopped run accepts a changed
     configuration only when its account and objects are unchanged.
-  - `oversize`: over the 25 MiB raw limit; not stored.
+  - `oversize`: over the 25 MiB raw limit, measured before unescaping; not stored.
   - `skipped`: its stream offset is in the configuration's `skip` list; not stored.
 - A stopped run resumes from its checkpoint when the configuration changes. Raise
   `attempt` after a transient failure. For a stop a split entry causes

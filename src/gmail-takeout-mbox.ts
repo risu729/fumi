@@ -3,12 +3,18 @@
 // Each Takeout entry is:
 //   From <decimal Gmail message id>@xxx <Www Mmm dd hh:mm:ss +zzzz yyyy>CRLF
 //   X-GM-THRID: <decimal thread id>CRLF
-//   X-Gmail-Labels: <comma-separated label names>CRLF
-//   <the original message bytes, ending in CRLF>
+//   X-Gmail-Labels: <comma-separated label names>CRLF, folded onto CRLF + space lines
+//     when long
+//   <the original message bytes, ending in CRLF or a bare LF; Takeout adds a CRLF to
+//     a message without a final line break>
 //   CRLF (one separator added by Takeout)
-// The splitter strips the From_ line, the two added headers and the separator, and
-// returns the remaining bytes unchanged. Anything else stops with a fixed code, so a
-// malformed or cut-off export never yields a silently changed message.
+// Body lines are escaped as in mboxrd: a line of one or more ">" followed by "From "
+// gets one more ">". The splitter strips the From_ line, the two added headers and the
+// separator and returns the rest unchanged; `unescapeMboxrd` then removes that one ">".
+// Anything else stops with a fixed code, so a malformed or cut-off export never yields
+// a silently changed message, with one accepted exception: a message whose first line
+// starts with whitespace (invalid in RFC 5322) has that line read as a label fold. The format was measured on a 40,598-message export on
+// 2026-11-23 (docs/gmail-import.md, "Google Takeout transport").
 
 import { GMAIL_IMPORT_RAW_LIMIT } from "./gmail-transport.ts";
 
@@ -25,9 +31,12 @@ export type TakeoutEntry = {
   threadId: string;
   /** From_ date in milliseconds; second precision. */
   fromDate: number;
-  /** X-Gmail-Labels value as stored; may be localized or RFC 2047 encoded. */
+  /** X-Gmail-Labels value, unfolded; may be localized or RFC 2047 encoded. */
   labels: string;
-  /** A view of the splitter's buffer, valid until the next `push`; copy it to keep it. */
+  /**
+   * The message bytes still mboxrd-escaped, as a view of the splitter's buffer that is
+   * valid until the next `push`. Pass it to `unescapeMboxrd` for the original message.
+   */
   raw: Uint8Array;
 };
 
@@ -36,7 +45,7 @@ export type TakeoutOversize = {
   offset: number;
   end: number;
   messageId: string;
-  /** Raw size after stripping, above the limit when reported. */
+  /** Raw size after stripping, before unescaping; above the limit when reported. */
   size: number;
 };
 
@@ -163,16 +172,30 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
   if (!Number.isFinite(fromDate) || !messageId)
     throw new TakeoutMboxError("takeout_invalid_from_line", offset);
 
-  // Two single-line headers. Takeout is not known to fold them; a following line that
-  // starts with whitespace is ambiguous (a fold, or the message's first line), so stop.
-  const lines: string[] = [];
+  // Two headers. Takeout folds a long X-Gmail-Labels onto lines that start with a
+  // space; a message cannot start with a space or tab (it would be neither a header field
+  // nor the blank line before a body), so every one of them belongs to the labels.
+  // Each header has at most GMAIL_HEADERS_LIMIT bytes before its last CRLF, folds
+  // included.
+  const headers: string[] = [];
   let cursor = fromEnd + 2;
-  while (lines.length < 2) {
-    const end = lineEnd(bytes, cursor, GMAIL_HEADERS_LIMIT);
+  let headerStart = cursor;
+  for (;;) {
+    if (headers.length === 2) {
+      if (cursor >= bytes.length) {
+        if (final) throw new TakeoutMboxError("takeout_missing_separator", offset);
+        return null;
+      }
+      if (bytes[cursor] !== SP && bytes[cursor] !== HT) break;
+    }
+    const folded = headers.length === 2;
+    if (!folded) headerStart = cursor;
+    const room = GMAIL_HEADERS_LIMIT - (cursor - headerStart);
+    const end = lineEnd(bytes, cursor, room);
     if (end < 0) {
       // A line of exactly the limit whose CR ends the bytes may still get its LF, so
       // before the end of the stream the limit is passed only with one more byte.
-      if (bytes.length - cursor > GMAIL_HEADERS_LIMIT + (final ? 0 : 1))
+      if (bytes.length - cursor > room + (final ? 0 : 1))
         throw new TakeoutMboxError("takeout_header_limit", offset);
       if (final) throw new TakeoutMboxError("takeout_invalid_gmail_headers", offset);
       return null;
@@ -183,17 +206,14 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
     } catch {
       throw new TakeoutMboxError("takeout_invalid_gmail_headers", offset);
     }
-    lines.push(line);
+    // Unfolding removes the CRLF and keeps the leading whitespace (RFC 5322 2.2.3).
+    if (folded) headers[1] += `\r\n${line}`;
+    else headers.push(line);
     cursor = end + 2;
   }
-  if (cursor >= bytes.length) {
-    if (final) throw new TakeoutMboxError("takeout_missing_separator", offset);
-    return null;
-  }
-  if (bytes[cursor] === SP || bytes[cursor] === HT)
-    throw new TakeoutMboxError("takeout_invalid_gmail_headers", offset);
-  const thread = /^X-GM-THRID: ([0-9]{1,20})$/.exec(lines[0]!);
-  const labels = /^X-Gmail-Labels: ?(.*)$/s.exec(lines[1]!);
+  const thread = /^X-GM-THRID: ([0-9]{1,20})$/.exec(headers[0]!);
+  const labelLine = headers[1]!.replaceAll("\r\n", "");
+  const labels = /^X-Gmail-Labels: ?(.*)$/s.exec(labelLine);
   const threadId = thread ? toHex(thread[1]!) : null;
   if (!threadId || !labels) throw new TakeoutMboxError("takeout_invalid_gmail_headers", offset);
   return { messageId, threadId, fromDate, labels: labels[1]!, size: cursor };
@@ -352,9 +372,9 @@ export class TakeoutMboxSplitter {
         return;
       }
       // At the end of the stream the entry ends at the last two bytes, Takeout's
-      // separator, which must follow the message's own CRLF.
+      // separator, which must follow the message's own line break.
       const size = boundary >= 0 ? boundary : bytes.length - 2;
-      if (boundary < 0 && !endsWithCrlfCrlf(bytes))
+      if (boundary < 0 && !endsWithSeparator(bytes))
         throw new TakeoutMboxError("takeout_missing_separator", head.offset);
       const total = this.#dropped + size;
       const end = this.#base + (boundary >= 0 ? boundary + 2 : bytes.length);
@@ -392,7 +412,7 @@ export class TakeoutMboxSplitter {
    * ended and the current entry runs to its end, or null when more bytes are needed.
    * A boundary is a CRLF followed by a valid From_ line and `X-GM-THRID: `; body text
    * such as "From the team" is skipped. A boundary not preceded by the message's own
-   * CRLF means a message without a final line break, which stops the run.
+   * line break (CRLF or a bare LF) means a message without one, which stops the run.
    */
   #findBoundary(bytes: Uint8Array, final: boolean): number | null {
     for (;;) {
@@ -418,7 +438,7 @@ export class TakeoutMboxSplitter {
         FROM_LINE.test(latin1.decode(bytes.subarray(lineStart, end))) &&
         startsWith(bytes, THREAD_PREFIX, end + 2)
       ) {
-        if (candidate < 2 || bytes[candidate - 2] !== CR || bytes[candidate - 1] !== LF)
+        if (candidate < 1 || bytes[candidate - 1] !== LF)
           throw new TakeoutMboxError("takeout_missing_separator", this.#base + lineStart);
         return candidate;
       }
@@ -433,13 +453,45 @@ export class TakeoutMboxSplitter {
   }
 }
 
-function endsWithCrlfCrlf(bytes: Uint8Array): boolean {
+/** True when the bytes end with the message's line break (CRLF or LF) and Takeout's CRLF. */
+function endsWithSeparator(bytes: Uint8Array): boolean {
   const n = bytes.length;
-  return (
-    n >= 4 &&
-    bytes[n - 4] === CR &&
-    bytes[n - 3] === LF &&
-    bytes[n - 2] === CR &&
-    bytes[n - 1] === LF
-  );
+  return n >= 3 && bytes[n - 3] === LF && bytes[n - 2] === CR && bytes[n - 1] === LF;
+}
+
+const GT = 0x3e;
+const FROM_SPACE = encoder.encode("From ");
+
+/**
+ * Removes one ">" from each line that is one or more ">" followed by "From " (mboxrd).
+ * Returns the same view when no line is escaped, otherwise a copy.
+ */
+export function unescapeMboxrd(raw: Uint8Array): Uint8Array {
+  // Count first, so an unescaped message costs one copy and no list of positions.
+  let count = 0;
+  for (let start = 0; start >= 0 && start < raw.length;) {
+    if (escapedFrom(raw, start)) count++;
+    const next = raw.indexOf(LF, start);
+    start = next < 0 ? -1 : next + 1;
+  }
+  if (count === 0) return raw;
+  const out = new Uint8Array(raw.length - count);
+  let to = 0;
+  for (let start = 0; start >= 0 && start < raw.length;) {
+    const next = raw.indexOf(LF, start);
+    const end = next < 0 ? raw.length : next + 1;
+    const from = escapedFrom(raw, start) ? start + 1 : start;
+    out.set(raw.subarray(from, end), to);
+    to += end - from;
+    start = next < 0 ? -1 : end;
+  }
+  return out;
+}
+
+/** True when the line at `start` is one or more ">" followed by "From ". */
+function escapedFrom(raw: Uint8Array, start: number): boolean {
+  if (raw[start] !== GT) return false;
+  let i = start + 1;
+  while (i < raw.length && raw[i] === GT) i++;
+  return startsWith(raw, FROM_SPACE, i);
 }
