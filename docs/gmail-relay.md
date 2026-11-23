@@ -44,7 +44,9 @@ IDs are checked in header order; Cloudflare's header is expected above any
 `X-Fumi-Ingest-ID` the original itself carried. The header is not DKIM-signed, so the
 Message-ID must match too. A copy without a usable Message-ID, a copy whose original had
 no Message-ID (Gmail adds one), an unknown or mismatched ID, a lookup error and a lookup
-slower than five seconds all archive the copy (fail open: no mail is lost).
+slower than five seconds all archive the copy (fail open: no mail is lost). A catalog
+row whose `raw_state` is `missing` or `invalid` archives the copy too, without reading
+R2, because the copy may be the only one left.
 [Copy grouping](copy-grouping.md) links a duplicate that slips through.
 
 A dropped copy stores no R2 object. It keeps one `gmail_relay_deliveries` row with the

@@ -3,6 +3,7 @@ import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } fro
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
 import { MAX_RAW_BYTES } from "../src/limits.ts";
+import { IDENTITY_VERSION } from "../src/mail-identity.ts";
 import { isGmailRelay, RELAY_LOOKUP_TIMEOUT_MS, relayedCopyOf } from "../src/gmail-relay.ts";
 import { getMailHealth } from "../src/mail-health.ts";
 import { readMail, searchMail } from "../src/mail-read.ts";
@@ -119,7 +120,12 @@ async function putOriginal(ingestId: string, bytes: Uint8Array, day = today(), e
   return key;
 }
 
-async function catalogOriginal(ingestId: string, rawKey: string, messageId?: string | null) {
+async function catalogOriginal(
+  ingestId: string,
+  rawKey: string,
+  messageId?: string | null,
+  identityVersion = IDENTITY_VERSION,
+) {
   await env.MAIL_CATALOG.prepare(`INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,
     receipt_key,raw_state,receipt_state,raw_sha256,observed_pass,observed_revision)
     VALUES ('email_routing','ingress-v1',?,?,?,'present','missing',?,0,0)`)
@@ -127,8 +133,8 @@ async function catalogOriginal(ingestId: string, rawKey: string, messageId?: str
     .run();
   if (messageId !== undefined)
     await env.MAIL_CATALOG.prepare(`INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,message_id,
-      group_id,group_rule,indexed_at) VALUES (?,'identity-v1',?,'complete',?,?,'single','2026-11-23T00:00:00.000Z')`)
-      .bind(rawKey, "c".repeat(64), messageId, `group-${ingestId}`)
+      group_id,group_rule,indexed_at) VALUES (?,?,?,'complete',?,?,'single','2026-11-23T00:00:00.000Z')`)
+      .bind(rawKey, identityVersion, "c".repeat(64), messageId, `group-${ingestId}`)
       .run();
 }
 
@@ -298,17 +304,21 @@ describe("Gmail relay ingress in workerd", () => {
     });
   });
 
-  it("checks a cataloged original by its identity row without reading R2", async () => {
-    const ingestId = crypto.randomUUID();
-    const rawKey = `ingest/2026-11-01/${ingestId}/raw.eml`;
-    await catalogOriginal(ingestId, rawKey, "cataloged@example.invalid");
-    const get = vi.spyOn(env.MAIL_ARCHIVE, "get");
-    await run(message(relayed(mime("cataloged@example.invalid"), [ingestId])));
-    expect(get).not.toHaveBeenCalled();
-    expect(await relayRows()).toEqual([
-      expect.objectContaining({ outcome: "duplicate_of_live", original_raw_key: rawKey }),
-    ]);
-  });
+  // An identity-v1 row stays until the identity backfill replaces it.
+  it.each(["identity-v1", IDENTITY_VERSION])(
+    "checks a cataloged original by its %s row without reading R2",
+    async (identityVersion) => {
+      const ingestId = crypto.randomUUID();
+      const rawKey = `ingest/2026-11-01/${ingestId}/raw.eml`;
+      await catalogOriginal(ingestId, rawKey, "cataloged@example.invalid", identityVersion);
+      const get = vi.spyOn(env.MAIL_ARCHIVE, "get");
+      await run(message(relayed(mime("cataloged@example.invalid"), [ingestId])));
+      expect(get).not.toHaveBeenCalled();
+      expect(await relayRows()).toEqual([
+        expect.objectContaining({ outcome: "duplicate_of_live", original_raw_key: rawKey }),
+      ]);
+    },
+  );
 
   it("reads a cataloged original's header when it has no identity row yet", async () => {
     const ingestId = crypto.randomUUID();
@@ -361,6 +371,36 @@ describe("Gmail relay ingress in workerd", () => {
     await run(message(relayed(mime("unsigned@example.invalid"), [ingestId])));
     expect(await relayRows()).toEqual([expect.objectContaining({ outcome: "archived" })]);
   });
+
+  it.each(["missing", "invalid"])(
+    "archives a copy whose cataloged original's raw is %s: it may be the only copy left",
+    async (rawState) => {
+      const ingestId = crypto.randomUUID();
+      const original = mime("lost-original@example.invalid");
+      const rawKey = await putOriginal(ingestId, original);
+      await catalogOriginal(ingestId, rawKey, "lost-original@example.invalid");
+      // The identity row and the R2 header still name the same Message-ID; only raw_state differs.
+      await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_state=? WHERE external_id=?")
+        .bind(rawState, ingestId)
+        .run();
+      const copy = message(relayed(original, [ingestId]));
+      await run(copy);
+      expect(copy.forward).not.toHaveBeenCalled();
+      expect(copy.setReject).not.toHaveBeenCalled();
+      const [receipt] = await receipts();
+      expect(receipt).toMatchObject({
+        schemaVersion: 4,
+        archive: { status: "stored" },
+        forward: { status: "skipped", reason: "gmail_relay" },
+      });
+      if (receipt?.archive.status !== "stored") throw new Error("Missing synthetic raw");
+      expect(receipt.archive.key).not.toBe(rawKey);
+      expect(await env.MAIL_ARCHIVE.head(receipt.archive.key)).not.toBeNull();
+      expect(await relayRows()).toEqual([
+        { ingest_id: receipt.ingestId, outcome: "archived", original_raw_key: null },
+      ]);
+    },
+  );
 
   it("archives a copy naming an ingest fumi does not hold", async () => {
     await run(message(relayed(mime("unknown@example.invalid"), [crypto.randomUUID()])));
