@@ -276,15 +276,18 @@ behaviour:
 - The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
   149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of
   `From_` line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds
-  25 MiB + 149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates the
-  buffer at that size, so a normal run never grows it by copying; a buffer smaller than
-  one read (a run whose first read is the short end of an object) is replaced once.
-  Each entry's raw bytes are a view of the buffer, handled before the next read, so
-  storing a message makes no copy. A step holds about 41.0 MiB of Takeout data (the
-  buffer and one read), and at most 49.0 MiB while a small buffer is replaced, of the
-  128 MB the Worker shares with the rest of the isolate. The buffer is released when
-  the stream ends or fails. `test/gmail-takeout-mbox.test.ts` checks the bound for an
-  entry at the raw limit that starts 1000 bytes before the end of a read.
+  25 MiB + 149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates
+  the buffer at that size, so a normal run never grows it by copying; a buffer smaller
+  than one read (after short reads at the end of an object) doubles until a read needs
+  more, and is then replaced by one of that size. Each entry's raw bytes are a view of
+  the buffer, handled before the next read, so the splitter makes no copy of a
+  message; the R2 binding still copies the bytes it uploads, at most the raw limit,
+  outside the JavaScript heap during the put. A step holds about 41.0 MiB of Takeout
+  data in the JavaScript heap (the buffer and one read), and at most 49.0 MiB while a
+  small buffer is replaced, of the 128 MB the Worker shares with the rest of the
+  isolate. The buffer is released when the stream ends or fails.
+  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the raw limit
+  that starts 1000 bytes before the end of a read.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference
