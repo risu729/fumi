@@ -761,8 +761,8 @@ export async function searchMail(
        (SELECT COALESCE(MAX(rowid),0) FROM mail_identity) AS groups,
        (SELECT COALESCE(MAX(rowid),0) FROM outbound_operations WHERE principal_id=?) AS sent`,
     )
-      // The token is readable by its holder, so the sent snapshot is this principal's own
-      // and never counts other principals' operations.
+      // The token is readable by its holder, so the sent snapshot is this principal's latest
+      // rowid: it moves only with this principal's own sends, never with other principals'.
       .bind(principal.id)
       .first<{ snapshot: number; groups: number; sent: number }>())!;
   const clauses = ["s.rowid<=?", ...parsed.clauses];

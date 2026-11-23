@@ -476,6 +476,27 @@ describe("metadata search over fumi-sent mail", () => {
     expect(await after("")).toEqual([]);
   });
 
+  it("pages sends made in the same millisecond by their IDs", async () => {
+    const at = "2026-11-02T00:00:00.000Z";
+    const expected = [await sent(owner, "tie-1", at), await sent(owner, "tie-2", at)].sort((a, b) =>
+      a < b ? 1 : -1,
+    );
+    const seen: string[] = [];
+    let token: string | undefined;
+    do {
+      // oxlint-disable-next-line no-await-in-loop -- Each page needs the previous token.
+      const page = await searchMail(env, owner, {
+        query: "in:sent",
+        max_results: 1,
+        ...(token ? { next_page_token: token } : {}),
+      });
+      seen.push(...page.emails.map((mail) => mail.id));
+      token = page.next_page_token ?? undefined;
+    } while (token);
+    // The created_at bound includes the token's own millisecond; the ID decides the rest.
+    expect(seen).toEqual(expected);
+  });
+
   it("binds the most filters D1 allows in the sent statement too", async () => {
     const first = await sent(owner, "first", "2026-11-02T00:00:00.000Z", { subject: "Änderung" });
     const second = await sent(owner, "second", "2026-11-01T00:00:00.000Z", {

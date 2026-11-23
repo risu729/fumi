@@ -190,10 +190,12 @@ sent mail.
   `max_results + 1` rows from each source after the token's position and merges them by
   time, then public ID, both descending; archived mail is ordered by `received_at` and
   sent mail by `created_at` as an ISO string, so the order is total and a row is never
-  returned twice. The token fixes the archive and copy group rowids and the caller's own
-  latest sent operation rowid (never a count of other principals' operations), so
-  mail that arrives during a traversal is not part of it. Tokens issued before sent mail
-  joined the search fail with `invalid_page_token`; start a new search.
+  returned twice. The token fixes the archive and copy group rowids and the rowid of the
+  caller's latest sent operation, so mail that arrives during a traversal is not part of
+  it. That rowid counts every principal's operations up to the caller's latest send, as
+  the `label_ids: ["SENT"]` listing cursor does, so it moves only when the caller sends.
+  Tokens issued before sent mail joined the search fail with `invalid_page_token`; start
+  a new search.
 - **Limits.** The sent statement binds the principal, a snapshot, four cursor values,
   the limit and at most two values per operator, so the 33-operator cap above holds.
 
