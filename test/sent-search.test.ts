@@ -402,6 +402,80 @@ describe("metadata search over fumi-sent mail", () => {
     });
   });
 
+  it("keeps another principal's send count out of the continuation token", async () => {
+    await sent(owner, "first", "2026-11-02T00:00:00.000Z");
+    await sent(owner, "second", "2026-11-01T00:00:00.000Z");
+    const snapshot = async () => {
+      const token = (await searchMail(env, owner, { query: "in:sent", max_results: 1 }))
+        .next_page_token!;
+      return (JSON.parse(atob(token)) as { sent: number }).sent;
+    };
+    const before = await snapshot();
+    // The token is readable by its holder, so its sent snapshot must not move with
+    // operations of other principals.
+    await sent(other, "theirs-1", "2026-11-03T00:00:00.000Z");
+    await sent(other, "theirs-2", "2026-11-04T00:00:00.000Z");
+    expect(await snapshot()).toBe(before);
+  });
+
+  it("continues sent pages from an index position, not a scan from the newest send", async () => {
+    for (let day = 1; day <= 24; day++)
+      // oxlint-disable-next-line no-await-in-loop -- Sequential synthetic sends.
+      await sent(owner, `send-${day}`, `2026-10-${String(day).padStart(2, "0")}T00:00:00.000Z`);
+    const reads: number[] = [];
+    const catalog = new Proxy(env.MAIL_CATALOG, {
+      get(target, property) {
+        if (property === "batch")
+          return async (statements: D1PreparedStatement[]) => {
+            const results = await target.batch(statements);
+            reads.push(results[0]!.meta.rows_read);
+            return results;
+          };
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const counted = { MAIL_CATALOG: catalog, MAIL_ARCHIVE: env.MAIL_ARCHIVE };
+    let token: string | undefined;
+    const seen: string[] = [];
+    do {
+      // oxlint-disable-next-line no-await-in-loop -- Each page needs the previous token.
+      const page = await searchMail(counted, owner, {
+        query: "in:sent",
+        max_results: 2,
+        ...(token ? { next_page_token: token } : {}),
+      });
+      seen.push(...page.emails.map((mail) => mail.id));
+      token = page.next_page_token ?? undefined;
+    } while (token);
+    expect(seen).toHaveLength(24);
+    // Each page reads its own rows plus the look-ahead and their recipients, however deep
+    // the cursor is; a scan from the newest send reads every earlier page again.
+    expect(Math.max(...reads)).toBeLessThan(20);
+  });
+
+  it("orders sent mail after any token time by its ISO string", async () => {
+    const evening = await sent(owner, "evening", "2026-11-02T20:00:00.000Z");
+    await sent(owner, "morning", "2026-11-03T05:00:00.000Z");
+    const first = await searchMail(env, owner, { query: "in:sent", max_results: 1 });
+    const position = (beforeTime: string) =>
+      btoa(
+        JSON.stringify({
+          ...(JSON.parse(atob(first.next_page_token!)) as object),
+          beforeTime,
+          beforeId: "sent_~",
+        }),
+      );
+    const after = async (beforeTime: string) =>
+      ids(owner, { query: "in:sent", next_page_token: position(beforeTime) });
+    // Archive times are ISO strings that sort as text; a time toISOString() did not
+    // write, such as an offset, still compares as text rather than as an instant.
+    expect(await after("2026-11-03T00:00:00.000+09:00")).toEqual([evening]);
+    expect(await after("2026-11-03T00:00:00.000Z")).toEqual([evening]);
+    // An archive row without a time sorts after every send.
+    expect(await after("")).toEqual([]);
+  });
+
   it("binds the most filters D1 allows in the sent statement too", async () => {
     const first = await sent(owner, "first", "2026-11-02T00:00:00.000Z", { subject: "Änderung" });
     const second = await sent(owner, "second", "2026-11-01T00:00:00.000Z", {

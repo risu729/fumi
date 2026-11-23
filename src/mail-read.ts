@@ -457,7 +457,7 @@ interface Cursor {
   snapshot: number;
   /** mail_identity rowid snapshot; copy groups are fixed for the whole traversal. */
   groups: number;
-  /** outbound_operations rowid snapshot. */
+  /** The largest outbound_operations rowid of this principal when the search started. */
   sent: number;
   /** Order key of the last result: its time as an ISO string ('' for none) and public ID. */
   beforeTime: string;
@@ -497,7 +497,7 @@ const D1_BOUND_PARAMETERS = 100;
  * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
  * and two per label for up to ten labels (33). search_emails binds at most 27 in its archive
  * statement (two snapshots, archive source, 20 for labels, three for the cursor, limit) and
- * 6 in its sent statement (principal, snapshot, three for the cursor, limit), and
+ * 7 in its sent statement (principal, snapshot, four for the cursor, limit), and
  * search_mail_content 3.
  */
 const CALLER_BOUND_PARAMETERS = 33;
@@ -639,6 +639,18 @@ const SENT_STATES_SQL = "o.state IN ('accepted','unknown','submitting')";
 /** The ISO time of an operation's created_at, so both sources share one order key. */
 const SENT_TIME_SQL =
   "strftime('%Y-%m-%dT%H:%M:%S',o.created_at/1000,'unixepoch')||printf('.%03dZ',o.created_at%1000)";
+/**
+ * The largest created_at whose ISO time can sort at or before a token time. ISO times of
+ * created_at grow with it, so a time toISOString() writes maps to its millisecond, and ''
+ * (an archive row without a time) sorts after every send. Any other string gets no bound.
+ */
+function sentTimeBound(time: string) {
+  if (time === "") return -1;
+  const milliseconds = Date.parse(time);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === time
+    ? milliseconds
+    : Number.MAX_SAFE_INTEGER;
+}
 interface SentRow {
   operation_id: string;
   state: string;
@@ -679,8 +691,17 @@ async function searchSentMail(
   const clauses = ["o.principal_id=?", "o.rowid<=?", SENT_STATES_SQL, ...filters.clauses];
   const values: (string | number)[] = [principal.id, snapshot, ...filters.values];
   if (cursor) {
-    clauses.push(`(${SENT_TIME_SQL}<? OR (${SENT_TIME_SQL}=? AND 'sent_'||o.operation_id<?))`);
-    values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
+    // The bound lets the index start at the token's position instead of scanning every
+    // newer send of the principal; the ISO comparison keeps the exact merged order.
+    clauses.push(
+      `o.created_at<=? AND (${SENT_TIME_SQL}<? OR (${SENT_TIME_SQL}=? AND 'sent_'||o.operation_id<?))`,
+    );
+    values.push(
+      sentTimeBound(cursor.beforeTime),
+      cursor.beforeTime,
+      cursor.beforeTime,
+      cursor.beforeId,
+    );
   }
   const [page, unavailable] = await env.MAIL_CATALOG.batch([
     env.MAIL_CATALOG.prepare(
@@ -738,8 +759,12 @@ export async function searchMail(
     (await env.MAIL_CATALOG.prepare(
       `SELECT (SELECT COALESCE(MAX(rowid),0) FROM archive_sources) AS snapshot,
        (SELECT COALESCE(MAX(rowid),0) FROM mail_identity) AS groups,
-       (SELECT COALESCE(MAX(rowid),0) FROM outbound_operations) AS sent`,
-    ).first<{ snapshot: number; groups: number; sent: number }>())!;
+       (SELECT COALESCE(MAX(rowid),0) FROM outbound_operations WHERE principal_id=?) AS sent`,
+    )
+      // The token is readable by its holder, so the sent snapshot is this principal's own
+      // and never counts other principals' operations.
+      .bind(principal.id)
+      .first<{ snapshot: number; groups: number; sent: number }>())!;
   const clauses = ["s.rowid<=?", ...parsed.clauses];
   const values: (string | number)[] = [snapshots.groups, snapshots.snapshot, ...parsed.values];
   if (source !== "all") {
