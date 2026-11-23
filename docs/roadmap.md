@@ -89,8 +89,10 @@ establish production delivery.
       transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
       before it stopped on 2026-11-12. No Gmail writes are supported. Per account
       ([production runs](gmail-import.md#production-takeout-runs)): momonga is done
-      and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23); the main
-      account and risu.minecraft wait for the owner's go (2026-11-23 14:34 UTC).
+      and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23);
+      risu.minecraft is done and verified (1,137 of 1,137 imported,
+      2022-06-14..2026-11-22, 2026-11-23); the main account waits for the owner's go
+      (2026-11-23 18:22 UTC).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
