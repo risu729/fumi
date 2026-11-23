@@ -71,6 +71,7 @@ async function liveOriginal(
 ): Promise<string | null> {
   const rows = (
     await env.MAIL_CATALOG.withSession("first-primary")
+      // Any identity_version will do while every version normalizes Message-ID the same way.
       .prepare(
         `SELECT s.raw_key,s.raw_state,i.status AS identity_status,i.message_id
         FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND i.raw_sha256=s.raw_sha256

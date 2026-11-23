@@ -14,6 +14,7 @@ import {
   verifyManagedInstance,
   type ManagedMailEnvironment,
 } from "./managed-search-runtime.ts";
+import { CURRENT_IDENTITY_SQL } from "./mail-identity.ts";
 
 interface SearchInput {
   query: string;
@@ -146,7 +147,7 @@ export async function searchManagedMail(
       d.part,d.original_sha256,d.representation,d.conversion_policy,i.group_id
       FROM managed_mail_documents d JOIN mail_extractions e ON e.raw_key=d.raw_key JOIN archive_sources s ON s.raw_key=d.raw_key
       LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key
-      LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND i.status='complete' AND i.raw_sha256=s.raw_sha256 WHERE ${clauses.join(" AND ")}`)
+      LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND i.raw_sha256=s.raw_sha256 WHERE ${clauses.join(" AND ")}`)
         .bind(item["key"], runtime.policy, ...filters)
         .first<Candidate>();
     if (!row) {
