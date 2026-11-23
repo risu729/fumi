@@ -70,7 +70,19 @@ still holds any 200-unit phrase. Citations name the chunk ordinal, not offsets, 
 still point to the chunk that holds the text. Documents indexed before this rule keep
 their stored chunks until an extraction or conversion change invalidates their
 projection and repair rebuilds it. One source can produce multiple hits. Results are
-ordered by index entry, not relevance, with at most 50 chunks per page.
+ordered by index entry, newest chunk ID first, not by relevance, with at most 50 chunks
+per page.
+
+The full-text index row ID is the chunk ID, so the search orders and bounds pages on it
+and FTS5 returns matches already in that order. A page stops after the matches that fill
+it plus one more, instead of sorting every match of the phrase first: in workerd's D1 a
+first page over 2,000 matching chunks read about 100 rows this way and 12,000 when every
+match was sorted. Synthetic tests check that the local query plan has no temporary sort
+and bound that row count; production D1 work was not measured. Metadata filters are
+checked per match during that walk, so a filter that rejects most matches still walks
+them until a page fills, and one that rejects them all walks every match of the phrase
+below the cursor. The order, results and continuation tokens are those of earlier
+versions, and their tokens still work.
 
 Completed searchable conversion derivatives add at most four attachments and 64,000
 UTF-16 code units per message; a derivative cut one unit short to keep a pair whole

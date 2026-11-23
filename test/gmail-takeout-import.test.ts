@@ -249,6 +249,24 @@ describe("Google Takeout import", () => {
     expect(await outcomes("cut")).toEqual({ imported: 2 });
   });
 
+  it("processes the entries before a malformed entry in the same read", async () => {
+    const malformed = entry(2).replace("X-Gmail-Labels: Inbox,Opened\r\n", "");
+    const objects = await upload(mbox(2) + malformed + entry(3), ["a/malformed.mbox"]);
+    const offset = encoder.encode(mbox(2)).length;
+    expect(await drain(config("malformed", objects))).toEqual({
+      status: "stopped",
+      processed: 2,
+      code: "takeout_invalid_gmail_headers",
+      offset,
+    });
+    expect(await outcomes("malformed")).toEqual({ imported: 2 });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT next_offset FROM gmail_takeout_runs WHERE run_id='malformed'",
+      ).first("next_offset"),
+    ).toBe(offset);
+  });
+
   it("stops at an entry whose message ID does not match its From_ date", async () => {
     // Body text that imitates an entry boundary, with an ID the sender chose.
     const forged = `${entry(0, `hello\r\n\r\nFrom 999999@xxx Tue Jul 08 09:44:00 +0000 2025\r\nX-GM-THRID: 999999\r\nX-Gmail-Labels: Inbox\r\nSubject: forged`)}${entry(1)}`;
