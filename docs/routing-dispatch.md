@@ -20,6 +20,9 @@ authentication, classification or ordinary webhook delivery. See
 application Workflow calls it after successful extraction; specialist OTP messages must
 not wait for the five-minute scheduled sweep. This targeted path evaluates the bounded
 CEL router against the current source directly, independently of shadow-row persistence.
+It reads that one source by its key, so a hook call costs a few D1 rows whatever the
+catalog size; a filter of the form `? IS NULL OR e.raw_key=?` could not use the key and
+read every extraction for each call.
 It uses the same durable leases and outbox as `repairRoutingDispatch(env, runtime)`, the
 bounded Cron repair path. Between full passes at the
 [scan cadence](processing-workflows.md#scheduled-scan-cadence), which a new
