@@ -359,6 +359,71 @@ describe("Takeout mbox splitter", () => {
     expect(failure(() => split(text, 4096))).toEqual({ code: "takeout_header_limit", offset: 0 });
   });
 
+  it("applies the From_ and Gmail header line limits wherever a read ends", () => {
+    // Pushes the stream cut at `cuts` and records every item and the error, if any.
+    const outcome = (bytes: Uint8Array, cuts: number[]) => {
+      const splitter = new TakeoutMboxSplitter();
+      const items: unknown[] = [];
+      const keep = (returned: TakeoutItem[]) =>
+        items.push(
+          ...returned.map((item) =>
+            item.kind === "entry" ? { ...item, raw: decoder.decode(item.raw) } : item,
+          ),
+        );
+      try {
+        let at = 0;
+        for (const cut of [...cuts, bytes.length]) {
+          keep(splitter.push(bytes.subarray(at, cut)));
+          at = cut;
+        }
+        keep(splitter.end());
+        return { items };
+      } catch (error) {
+        if (!(error instanceof TakeoutMboxError)) throw error;
+        return { items, error: { code: error.code, offset: error.offset } };
+      }
+    };
+    // Line lengths exclude the CRLF: the From_ line may have 128 bytes (a valid one has
+    // at most 60) and each Gmail header line 65,536.
+    const line = (start: string, length: number, fill: string) => start.padEnd(length, fill);
+    const fromLine = (length: number) =>
+      line("From 2@xxx Tue Jul 08 09:44:28 +0000 2025", length, "z");
+    const thread = (length: number) => line("X-GM-THRID: 2", length, "0");
+    const labels = (length: number) => line("X-Gmail-Labels: ", length, "L");
+    const cases: [string[], number, TakeoutMboxError["code"] | null][] = [
+      [[fromLine(128), thread(13), labels(21)], 0, "takeout_invalid_from_line"],
+      [[fromLine(129), thread(13), labels(21)], 0, "takeout_invalid_from_line"],
+      [[fromLine(41), thread(65_536), labels(21)], 1, "takeout_invalid_gmail_headers"],
+      [[fromLine(41), thread(65_537), labels(21)], 1, "takeout_header_limit"],
+      [[fromLine(41), thread(13), labels(65_536)], 2, null],
+      [[fromLine(41), thread(13), labels(65_537)], 2, "takeout_header_limit"],
+    ];
+    const after = entry({ id: "3", message: third });
+    for (const [lines, target, code] of cases) {
+      // A From_ line is only parsed where the stream starts; an invalid one later is body
+      // text of the entry before it.
+      const before = target === 0 ? "" : entry({ id: "1", message: first });
+      const text = `${before}${lines.join("\r\n")}\r\n${second}\r\n${after}`;
+      const bytes = encoder.encode(text);
+      const start =
+        before.length + lines.slice(0, target).reduce((sum, l) => sum + l.length + 2, 0);
+      const cr = start + lines[target]!.length;
+      const name = `${lines[target]!.slice(0, 5)}… of ${lines[target]!.length} bytes`;
+      const whole = outcome(bytes, []);
+      expect(whole.error?.code ?? null, name).toBe(code);
+      expect(whole.items, name).toHaveLength((before ? 1 : 0) + (code ? 0 : 2));
+      if (code) expect(whole.error?.offset, name).toBe(before.length);
+      for (const cuts of [
+        [cr + 1],
+        [cr],
+        [start + Math.floor((cr - start) / 2)],
+        [cr + 1, cr + 2],
+        [1, cr + 1],
+      ])
+        expect(outcome(bytes, cuts), `${name}, cut at ${cuts}`).toEqual(whole);
+    }
+  });
+
   it("ends once and refuses later pushes", () => {
     const splitter = new TakeoutMboxSplitter();
     splitter.push(encoder.encode(mbox));

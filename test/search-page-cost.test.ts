@@ -149,7 +149,7 @@ const OLD_JOINS = `LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.ext
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 function oldCollapsedSql(where: string, expand: boolean, after: string) {
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND i.identity_version='identity-v2' AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND i.identity_version='identity-v2' AND i.status='complete' AND s.raw_state='present' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${OLD_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
