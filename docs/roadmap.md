@@ -253,7 +253,7 @@ establish production delivery.
       [searching sent mail](agent-mail.md#searching-sent-mail).
 - [ ] Search sent mail bodies in `search_mail_content` and `search_mail_semantic`
       through a principal-owned index (proposed in
-      [searching sent mail](agent-mail.md#searching-sent-mail)).
+      [sent mail body search](sent-body-search.md), awaiting owner approval).
 - [ ] Find Takeout-imported Gmail SENT mail with `in:sent` once the owner confirms
       the Takeout label name of Gmail's Sent label.
 - [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known

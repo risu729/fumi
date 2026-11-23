@@ -35,7 +35,7 @@ not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains ope
 
 Only archived mail is indexed, and `filters` do not accept `in:`. Bodies of mail sent
 through fumi are not searched yet; see
-[searching sent mail](agent-mail.md#searching-sent-mail) for the proposal.
+[sent mail body search](sent-body-search.md) for the proposal.
 
 ## Coverage and resource bounds
 
