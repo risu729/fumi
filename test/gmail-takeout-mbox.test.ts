@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  TAKEOUT_READ_BYTES,
   TakeoutMboxError,
   TakeoutMboxSplitter,
   type TakeoutEntry,
   type TakeoutItem,
 } from "../src/gmail-takeout-mbox.ts";
+import { GMAIL_IMPORT_RAW_LIMIT } from "../src/gmail-transport.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -27,9 +29,16 @@ const split = (mbox: string | Uint8Array, chunk = Number.POSITIVE_INFINITY, limi
   const bytes = typeof mbox === "string" ? encoder.encode(mbox) : mbox;
   const splitter = new TakeoutMboxSplitter(limit);
   const items: TakeoutItem[] = [];
+  // A raw view is valid until the next push; keeping it longer needs a copy.
+  const keep = (returned: TakeoutItem[]) =>
+    items.push(
+      ...returned.map((item) =>
+        item.kind === "entry" ? { ...item, raw: item.raw.slice() } : item,
+      ),
+    );
   for (let i = 0; i < bytes.length; i += Math.min(chunk, bytes.length))
-    items.push(...splitter.push(bytes.subarray(i, Math.min(bytes.length, i + chunk))));
-  items.push(...splitter.end());
+    keep(splitter.push(bytes.subarray(i, Math.min(bytes.length, i + chunk))));
+  keep(splitter.end());
   return items;
 };
 
@@ -115,15 +124,83 @@ describe("Takeout mbox splitter", () => {
     expect(decoder.decode(items[0]!.raw)).toBe(body);
   });
 
-  it("returns a copy that later pushes do not change", () => {
+  it("returns raw bytes that do not depend on the pushed chunk and survive end()", () => {
     const splitter = new TakeoutMboxSplitter();
     const bytes = encoder.encode(mbox);
-    const items = splitter.push(bytes);
-    const raw = (items[0] as TakeoutEntry).raw;
-    const before = decoder.decode(raw);
+    const raw = (splitter.push(bytes)[0] as TakeoutEntry).raw;
     bytes.fill(0);
-    splitter.push(encoder.encode("x"));
-    expect(decoder.decode(raw)).toBe(before);
+    const last = (splitter.end()[0] as TakeoutEntry).raw;
+    expect(decoder.decode(raw)).toBe(first);
+    expect(decoder.decode(last)).toBe(third);
+  });
+
+  it("releases its buffer at the end of the stream and after an error", () => {
+    const ended = new TakeoutMboxSplitter();
+    ended.push(encoder.encode(mbox));
+    expect(ended.capacity).toBeGreaterThan(0);
+    ended.end();
+    expect(ended.capacity).toBe(0);
+    const failed = new TakeoutMboxSplitter();
+    const bad = `From 2@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: 2\r\nSubject: x\r\n\r\n`;
+    const items = failed.push(encoder.encode(entry({ id: "1", message: first }) + bad));
+    expect(decoder.decode((items[0] as TakeoutEntry).raw)).toBe(first);
+    expect(failed.capacity).toBe(0);
+  });
+
+  it("bounds its buffer for an entry at the raw limit that starts late in a read", () => {
+    // The documented bound: the raw limit, the 149-byte margin a boundary check needs,
+    // and one read.
+    const bound = GMAIL_IMPORT_RAW_LIMIT + 149 + TAKEOUT_READ_BYTES;
+    const head = (id: string) =>
+      encoder.encode(
+        `From ${id}@xxx Tue Jul 08 09:44:28 +0000 2025\r\nX-GM-THRID: ${id}\r\nX-Gmail-Labels: Inbox\r\n`,
+      );
+    const raw = (subject: string, size: number) => {
+      const bytes = new Uint8Array(size).fill(0x62);
+      bytes.set(encoder.encode(`Subject: ${subject}\r\n\r\n`));
+      bytes.set(encoder.encode("\r\n"), size - 2);
+      return bytes;
+    };
+    // The entry at the limit starts 1000 bytes before the end of the first read, and a
+    // full read follows the one where it ends.
+    const late = TAKEOUT_READ_BYTES - 1000;
+    const leadRaw = raw("lead", late - head("1").length - 2);
+    const bigRaw = raw("big", GMAIL_IMPORT_RAW_LIMIT);
+    const tailRaw = raw("tail", TAKEOUT_READ_BYTES);
+    const crlf = encoder.encode("\r\n");
+    const parts = [head("1"), leadRaw, crlf, head("2"), bigRaw, crlf, head("3"), tailRaw, crlf];
+    const stream = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+    let at = 0;
+    for (const part of parts) {
+      stream.set(part, at);
+      at += part.length;
+    }
+
+    const same = (a: Uint8Array, b: Uint8Array) =>
+      a.length === b.length && a.every((byte, i) => byte === b[i]);
+    const splitter = new TakeoutMboxSplitter();
+    const capacities: number[] = [];
+    const found: [number, boolean][] = [];
+    // Each raw is read before the next push, as the runner does.
+    const check = (items: TakeoutItem[]) => {
+      for (const item of items) {
+        const want = [leadRaw, bigRaw, tailRaw][found.length]!;
+        found.push([item.offset, item.kind === "entry" && same(item.raw, want)]);
+      }
+      capacities.push(splitter.capacity);
+    };
+    for (let from = 0; from < stream.length; from += TAKEOUT_READ_BYTES)
+      check(splitter.push(stream.subarray(from, from + TAKEOUT_READ_BYTES)));
+    check(splitter.end());
+    expect(found).toEqual([
+      [0, true],
+      [late, true],
+      [late + head("2").length + GMAIL_IMPORT_RAW_LIMIT + 2, true],
+    ]);
+    expect(Math.max(...capacities)).toBeLessThanOrEqual(bound);
+    // The first full read allocates the bound, so the buffer is never grown by copying.
+    const pushes = Math.ceil(stream.length / TAKEOUT_READ_BYTES);
+    expect(capacities).toEqual([...Array.from({ length: pushes }, () => bound), 0]);
   });
 
   it("returns nothing for an empty stream", () => {

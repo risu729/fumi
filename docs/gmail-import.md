@@ -273,6 +273,18 @@ behaviour:
   and Takeout's separator removed. A malformed or cut-off stream stops the run with
   the splitter's fixed code and stream offset, once every entry split before the error
   is processed.
+- The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
+  149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of
+  `From_` line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds
+  25 MiB + 149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates the
+  buffer at that size, so a normal run never grows it by copying; a buffer smaller than
+  one read (a run whose first read is the short end of an object) is replaced once.
+  Each entry's raw bytes are a view of the buffer, handled before the next read, so
+  storing a message makes no copy. A step holds about 41.0 MiB of Takeout data (the
+  buffer and one read), and at most 49.0 MiB while a small buffer is replaced, of the
+  128 MB the Worker shares with the rest of the isolate. The buffer is released when
+  the stream ends or fails. `test/gmail-takeout-mbox.test.ts` checks the bound for an
+  entry at the raw limit that starts 1000 bytes before the end of a read.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference
