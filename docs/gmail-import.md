@@ -272,7 +272,9 @@ behaviour:
   stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
   and Takeout's separator removed. A malformed or cut-off stream stops the run with
   the splitter's fixed code and stream offset, once every entry split before the error
-  is processed.
+  is processed. An `X-GM-THRID` or `X-Gmail-Labels` line may have at most 65,536 bytes
+  before its CRLF; a longer one stops with `takeout_header_limit`. Where the reads
+  split the stream never changes the entries, the code or the offset.
 - The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
   149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of
   `From_` line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds
