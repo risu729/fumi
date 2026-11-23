@@ -439,31 +439,35 @@ describe("header-only mail identity", () => {
     )
       .bind(leftover!.key)
       .run();
-    const grouping = async () => (await getMailHealth(env, principal)).sections.copy_grouping;
     // Every original matches an unfiltered read, so the window and the read agree.
-    const read = (await searchMail(env, principal, { expand_copies: true })).emails;
-    expect(read).toHaveLength(10);
-    expect(await grouping()).toMatchObject({
-      status: "observed",
-      window: { records: 10, truncated: false },
-      counts: {
-        indexed: read.filter((mail) => mail.group_id !== null).length,
-        blocked: 0,
-        pending: 2,
-        unknown: 1,
-        message_id_conflicts: 0,
-        in_multi_copy_groups: read.filter((mail) => (mail.copies ?? 0) > 1).length,
-      },
+    const matchesReads = async (counts: { pending: number; unknown: number }) => {
+      const read = (await searchMail(env, principal, { expand_copies: true })).emails;
+      expect(read).toHaveLength(10);
+      const { copy_grouping: grouping } = (await getMailHealth(env, principal)).sections;
+      expect(grouping).toMatchObject({
+        status: "observed",
+        window: { records: 10, truncated: false },
+        counts: {
+          indexed: read.filter((mail) => mail.group_id !== null).length,
+          blocked: 0,
+          message_id_conflicts: 0,
+          in_multi_copy_groups: read.filter((mail) => (mail.copies ?? 0) > 1).length,
+          ...counts,
+        },
+      });
+      return grouping;
+    };
+    expect(await matchesReads({ pending: 2, unknown: 1 })).toMatchObject({
+      counts: { indexed: 7, in_multi_copy_groups: 5 },
     });
-    expect(await grouping()).toMatchObject({ counts: { indexed: 7, in_multi_copy_groups: 5 } });
-    // Reads group only present originals, as for current extractions; health already does.
+    // Reads group only present originals, as for current extractions, and so does health.
     await env.MAIL_CATALOG.prepare(
       "UPDATE archive_sources SET raw_state=CASE raw_key WHEN ? THEN 'missing' ELSE 'invalid' END WHERE raw_key IN (?,?)",
     )
       .bind(absent[0]!.key, absent[0]!.key, absent[1]!.key)
       .run();
-    expect(await grouping()).toMatchObject({
-      counts: { indexed: 5, pending: 2, unknown: 3, in_multi_copy_groups: 2 },
+    expect(await matchesReads({ pending: 2, unknown: 3 })).toMatchObject({
+      counts: { indexed: 5, in_multi_copy_groups: 2 },
     });
   });
 

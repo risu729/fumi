@@ -157,6 +157,5 @@ Until this change (2026-11-23 02:00 UTC), `indexed` and `in_multi_copy_groups` a
 counted originals whose row was written for a replaced SHA-256, which reads never group,
 and originals that were not `present`; `in_multi_copy_groups` counted every row with the
 same `group_id`, whatever its version, and `pending` did not require a SHA-256.
-`unknown` was added then. Requiring `present` follows the pending change to collapsed
-reads in [#173](https://github.com/risu729/fumi/pull/173); until it merges, reads still
-group a missing or invalid original whose row matches its SHA-256.
+`unknown` was added then. Requiring `present` matches collapsed reads, which require it
+since [#173](https://github.com/risu729/fumi/pull/173) (2026-11-23 02:12 UTC).
