@@ -3,6 +3,7 @@ import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readMailThread } from "../src/mail-read.ts";
 import type { MailPrincipal } from "../src/principal.ts";
+import { IDENTITY_VERSION } from "../src/mail-identity.ts";
 
 const principal: MailPrincipal = {
   id: "synthetic-reader",
@@ -95,7 +96,7 @@ async function group(groupId: string, ...ids: string[]) {
   await env.MAIL_CATALOG.batch(
     ids.map((id) =>
       env.MAIL_CATALOG.prepare(
-        `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at) VALUES (?,'identity-v1',?,'complete',?,'message_id_dkim','2026-11-11T00:00:00.000Z')`,
+        `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at) VALUES (?,'${IDENTITY_VERSION}',?,'complete',?,'message_id_dkim','2026-11-11T00:00:00.000Z')`,
       ).bind(key(id), SHA, groupId),
     ),
   );

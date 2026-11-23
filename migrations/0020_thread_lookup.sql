@@ -1,6 +1,9 @@
 -- Thread reads look up their messages by key instead of scanning the archive
 -- (docs/agent-mail.md#thread-reads). Indexes only: a running Worker without them
 -- reads the same rows, and its writes maintain them.
+-- A later migration that rebuilds archive_sources or mail_extractions (as 0008 and
+-- 0014 did) must recreate these indexes; the query-plan test in
+-- test/mail-thread.test.ts fails if one is missing.
 -- Message IDs carry only the external ID; every read resolves it through this index.
 CREATE INDEX archive_sources_external_id ON archive_sources (external_id);
 -- Live header links. The expressions must stay identical to readMailThread's in
