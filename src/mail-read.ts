@@ -850,6 +850,15 @@ export async function searchMail(
   };
 }
 
+/**
+ * Header links of a live thread. SQLite uses an expression index only for the identical
+ * expression, so these must match migrations/0020_thread_lookup.sql exactly.
+ */
+const headerLink = (path: string) =>
+  `CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'${path}') END`;
+const HEADER_MESSAGE_ID = headerLink("$.messageId");
+const HEADER_IN_REPLY_TO = headerLink("$.inReplyTo");
+
 export async function readMailThread(
   env: MailReadEnvironment,
   principal: MailPrincipal,
@@ -873,12 +882,16 @@ export async function readMailThread(
   const expand = args.expand_copies ?? false;
   const groups = await identitySnapshot(env);
   // Header links are untrusted conversation hints; they never grant access or prove identity.
+  // Each thread member is found by key: its raw_key comes from indexed lookups. The unary
+  // `+` keeps the planner from scanning every source of the kind instead.
   const rows =
     row.source_kind === "gmail"
       ? (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              "s.source_kind='gmail' AND ((g.account_namespace=? AND g.thread_id=?) OR s.external_id=?)",
+              `+s.source_kind='gmail' AND s.raw_key IN (
+    SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND thread_id=?
+    UNION ALL SELECT raw_key FROM archive_sources WHERE external_id=?)`,
               NEWEST_FIRST,
               expand,
               { preferRawKey: true },
@@ -897,9 +910,11 @@ export async function readMailThread(
       : (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              `s.source_kind='email_routing' AND (s.external_id=? OR
-    (? IS NOT NULL AND (json_extract(e.metadata_json,'$.messageId')=? OR json_extract(e.metadata_json,'$.inReplyTo')=?)) OR
-    (? IS NOT NULL AND json_extract(e.metadata_json,'$.messageId')=?))`,
+              `+s.source_kind='email_routing' AND s.raw_key IN (
+    SELECT raw_key FROM archive_sources WHERE external_id=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_IN_REPLY_TO}=?
+    UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?)`,
               NEWEST_FIRST,
               expand,
               { preferRawKey: true },
@@ -910,8 +925,6 @@ export async function readMailThread(
               row.external_id,
               messageId ?? null,
               messageId ?? null,
-              messageId ?? null,
-              reply ?? null,
               reply ?? null,
               row.raw_key,
               limit + 1,
