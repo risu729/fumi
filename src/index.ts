@@ -495,10 +495,13 @@ export default {
     }
     // Gmail forwarding is optional and fumi's archive is the copy that counts (owner,
     // 2026-11-23 17:53 UTC). A failed forward asks the sender to retry only when the
-    // original is not stored: a retry cannot fix a forward that fails every time (a
-    // DMARC-strict sender) and only archives another copy. Successful forwarding is
-    // preserved across R2 failures, as before.
-    if (forwarding?.status === "failed" && archive.status !== "stored") {
+    // original or its receipt (the failure's only durable record) is not stored: a retry
+    // cannot fix a forward that fails every time (a DMARC-strict sender) and only
+    // archives another copy. Successful forwarding is preserved across R2 failures.
+    if (
+      forwarding?.status === "failed" &&
+      (archive.status !== "stored" || receiptStatus !== "stored")
+    ) {
       throw new Error("Forwarding did not complete");
     }
     // Gmail keeps its copy, but fumi sees relayed mail nowhere else: ask for a retry like a

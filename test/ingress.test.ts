@@ -460,6 +460,34 @@ describe("archive and forward ingress in workerd", () => {
     });
   });
 
+  it("asks for a retry when the forward failed and the raw capture failed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const incoming = message();
+    incoming.raw = new ReadableStream({
+      start(controller) {
+        controller.error(new Error("private reader diagnostic"));
+      },
+    });
+    incoming.forward.mockRejectedValue(new Error("private SMTP diagnostic"));
+    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    expect((await receipts())[0]?.archive).toEqual({ status: "failed", code: "read_failed" });
+  });
+
+  it("asks for a retry when the forward failed and only the receipt write failed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const put = env.MAIL_ARCHIVE.put.bind(env.MAIL_ARCHIVE);
+    vi.spyOn(env.MAIL_ARCHIVE, "put").mockImplementation(async (key, value, options) => {
+      if (key.endsWith("/receipt.json")) throw new Error("private R2 diagnostic");
+      return put(key, value, options);
+    });
+    const incoming = message();
+    incoming.forward.mockRejectedValue(new Error("private SMTP diagnostic"));
+    // The receipt is the failure's only durable record, so the sender retries.
+    await expect(run(incoming)).rejects.toThrow("Forwarding did not complete");
+    expect((await objects()).some((object) => object.key.endsWith("/raw.eml"))).toBe(true);
+    expect(await receipts()).toEqual([]);
+  });
+
   it.each([Number.NaN, -1, 1.5, MAX_RAW_BYTES + 1])(
     "bounds invalid advertised size %s without blocking forwarding",
     async (size) => {
