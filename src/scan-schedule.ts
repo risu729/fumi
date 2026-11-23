@@ -106,7 +106,9 @@ export async function closeScan(
 /** Makes the next scheduled run of `name` a full pass. */
 export async function requestFullScan(db: Database, name: ScanName) {
   await db
-    .prepare("UPDATE catalog_scans SET next_full_at=0 WHERE name=? AND next_full_at!=0")
+    // Each request writes a new value that is still due, so a full pass that is already
+    // running (and may have started because of an earlier request) cannot close it.
+    .prepare("UPDATE catalog_scans SET next_full_at=MIN(next_full_at,0)-1 WHERE name=?")
     .bind(name)
     .run();
 }

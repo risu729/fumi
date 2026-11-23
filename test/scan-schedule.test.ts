@@ -181,7 +181,12 @@ describe("scheduled scan cadence", () => {
     expect(running.full).toBe(true);
     await requestFullScan(env.MAIL_CATALOG, "routing_dispatch");
     await closeScan(env.MAIL_CATALOG, "routing_dispatch", "1", running, t0 + FULL_SCAN_INTERVAL);
-    expect(await scanState("routing_dispatch")).toMatchObject({ next_full_at: 0 });
+    expect(await scanState("routing_dispatch")).toMatchObject({ next_full_at: -1 });
+    // A pass that started because of a request does not cancel a later one either.
+    const requested = await openScan(env.MAIL_CATALOG, "routing_dispatch", "1", t0 + 1);
+    await requestFullScan(env.MAIL_CATALOG, "routing_dispatch");
+    await closeScan(env.MAIL_CATALOG, "routing_dispatch", "1", requested, t0 + 1);
+    expect(await scanState("routing_dispatch")).toMatchObject({ next_full_at: -2 });
     expect(
       (await openScan(env.MAIL_CATALOG, "routing_dispatch", "1", t0 + FULL_SCAN_INTERVAL + 1)).full,
     ).toBe(true);

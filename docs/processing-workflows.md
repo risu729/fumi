@@ -63,9 +63,9 @@ the highest `archive_sources` rowid is below the recorded mark (a rebuilt table)
 Routing dispatch also makes its next pass full whenever the Workflow hook or Cron finds
 its configuration disabled, or dispatch paused, draining or stale, and when dispatch is
 activated, because sources that arrive meanwhile get no job row. A full pass that
-started before such a request does not cancel it. A missing configuration object touches
-no D1, so sources that arrive then wait for the hourly pass. Between full passes a run
-reads only the cheap part:
+started before such a request does not cancel it. A missing or invalid configuration
+object touches no D1, so sources that arrive then wait for the hourly pass. Between full
+passes a run reads only the cheap part:
 
 | Scan | Between full passes |
 | --- | --- |
