@@ -24,6 +24,8 @@ export interface ScanWindow {
   after: number;
   /** The highest archive_sources rowid when the pass started; later rows wait for the next one. */
   through: number;
+  /** `next_full_at` when the pass started; a full pass requested since then stays due. */
+  due?: number | null;
 }
 
 type Database = D1Database | D1DatabaseSession;
@@ -55,7 +57,12 @@ export async function openScan(
     now >= row.next_full_at ||
     // A rebuilt table can number its rows again from one.
     row.scanned_rowid > row.through;
-  return { full, after: full ? 0 : row.scanned_rowid!, through: row.through };
+  return {
+    full,
+    after: full ? 0 : row.scanned_rowid!,
+    through: row.through,
+    due: row.next_full_at,
+  };
 }
 
 /**
@@ -74,8 +81,16 @@ export async function closeScan(
     await db
       .prepare(`INSERT INTO catalog_scans(name,next_full_at,scanned_rowid,fingerprint) VALUES(?,?,?,?)
         ON CONFLICT(name) DO UPDATE SET next_full_at=excluded.next_full_at,
-        scanned_rowid=excluded.scanned_rowid,fingerprint=excluded.fingerprint`)
-      .bind(name, now + FULL_SCAN_INTERVAL, window.through, fingerprint)
+        scanned_rowid=excluded.scanned_rowid,fingerprint=excluded.fingerprint
+        WHERE ? IS NULL OR catalog_scans.next_full_at=?`)
+      .bind(
+        name,
+        now + FULL_SCAN_INTERVAL,
+        window.through,
+        fingerprint,
+        window.due ?? null,
+        window.due ?? null,
+      )
       .run();
   } else if (window.through > window.after) {
     // Overlapping runs only move the mark forward.

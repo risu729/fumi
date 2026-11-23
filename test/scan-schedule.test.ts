@@ -3,7 +3,7 @@ import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROCESSING_REPAIR_LIMIT, repairProcessing } from "../src/processing-jobs.ts";
 import { repairMailIdentity } from "../src/mail-identity.ts";
-import { closeScan, FULL_SCAN_INTERVAL, openScan } from "../src/scan-schedule.ts";
+import { closeScan, FULL_SCAN_INTERVAL, openScan, requestFullScan } from "../src/scan-schedule.ts";
 
 const t0 = Date.parse("2026-11-23T00:00:00.000Z");
 
@@ -40,7 +40,7 @@ beforeEach(async () => {
 describe("scheduled scan cadence", () => {
   it("runs a full pass when due, and otherwise reads only sources added since", async () => {
     const empty = await openScan(env.MAIL_CATALOG, "processing_ledger", "v1", t0);
-    expect(empty).toEqual({ full: true, after: 0, through: 0 });
+    expect(empty).toEqual({ full: true, after: 0, through: 0, due: null });
     await catalogSource();
     const first = await openScan(env.MAIL_CATALOG, "processing_ledger", "v1", t0);
     expect(first.full).toBe(true);
@@ -52,7 +52,12 @@ describe("scheduled scan cadence", () => {
     });
     await catalogSource();
     const next = await openScan(env.MAIL_CATALOG, "processing_ledger", "v1", t0 + 1);
-    expect(next).toEqual({ full: false, after: first.through, through: first.through + 1 });
+    expect(next).toEqual({
+      full: false,
+      after: first.through,
+      through: first.through + 1,
+      due: t0 + FULL_SCAN_INTERVAL,
+    });
     await closeScan(env.MAIL_CATALOG, "processing_ledger", "v1", next, t0 + 1);
     // An incremental pass moves the mark but keeps the full pass schedule.
     expect(await scanState("processing_ledger")).toMatchObject({
@@ -162,6 +167,24 @@ describe("scheduled scan cadence", () => {
       scanned_rowid: cheap.through,
       fingerprint: "v1",
     });
+  });
+
+  it("keeps a full pass requested while another full pass runs", async () => {
+    const first = await openScan(env.MAIL_CATALOG, "routing_dispatch", "1", t0);
+    await closeScan(env.MAIL_CATALOG, "routing_dispatch", "1", first, t0);
+    const running = await openScan(
+      env.MAIL_CATALOG,
+      "routing_dispatch",
+      "1",
+      t0 + FULL_SCAN_INTERVAL,
+    );
+    expect(running.full).toBe(true);
+    await requestFullScan(env.MAIL_CATALOG, "routing_dispatch");
+    await closeScan(env.MAIL_CATALOG, "routing_dispatch", "1", running, t0 + FULL_SCAN_INTERVAL);
+    expect(await scanState("routing_dispatch")).toMatchObject({ next_full_at: 0 });
+    expect(
+      (await openScan(env.MAIL_CATALOG, "routing_dispatch", "1", t0 + FULL_SCAN_INTERVAL + 1)).full,
+    ).toBe(true);
   });
 
   it("keeps a full identity pass due until it comes back below its limit", async () => {

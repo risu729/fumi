@@ -468,7 +468,10 @@ export async function activateRoutingDispatch(
     AND NOT EXISTS(SELECT 1 FROM routing_dispatch_outbox WHERE state IN ('sending','uncertain'))`)
     .bind(config.configurationSha256)
     .run();
-  return update.meta.changes === 1 ? "active" : "draining";
+  if (update.meta.changes !== 1) return "draining";
+  // Sources that arrived while dispatch was inactive have no job row.
+  await requestFullScan(db, "routing_dispatch");
+  return "active";
 }
 
 async function saveReceipt(
@@ -1245,13 +1248,6 @@ export async function repairRoutingDispatch(
 ) {
   runtime = snapshotRuntime(env, runtime);
   const sweep = scheduled && rawKey === undefined;
-  // Sources that arrive while dispatch is paused, draining, stale or disabled get no job
-  // row; the first scheduled run after it becomes active again looks for them across the
-  // whole catalog. Without a configuration object the stage stays clear of D1.
-  const inactive = async <T>(result: T) => {
-    if (sweep) await requestFullScan(env.MAIL_CATALOG, "routing_dispatch");
-    return result;
-  };
   let config: DispatchConfiguration | null;
   try {
     config = await loadDispatchConfiguration(env.MAIL_ARCHIVE);
@@ -1261,6 +1257,14 @@ export async function repairRoutingDispatch(
   if (!config) return { status: "disabled", processed: 0 };
   await bindDestinationIdentity(config, transportFor(env, runtime));
   const db = env.MAIL_CATALOG.withSession("first-primary");
+  // Sources that arrive while dispatch is paused, draining, stale or disabled get no job
+  // row, from the Workflow hook or from Cron; the first scheduled run after it becomes
+  // active again looks for them across the whole catalog. Without a configuration object
+  // the stage stays clear of D1.
+  const inactive = async <T>(result: T) => {
+    await requestFullScan(db, "routing_dispatch");
+    return result;
+  };
   const state = await observe(db, config);
   if (!config.artifact.enabled) return inactive({ status: "disabled", processed: 0 });
   await reconcileRoutingDispatch(env, runtime, rawKey);

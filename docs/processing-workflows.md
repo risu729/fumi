@@ -56,13 +56,16 @@ five hours while the archive was idle (D1 query insights, 2026-11-23 08:00 to 13
 UTC), and the Gmail Takeout backfill multiplies the table size.
 
 `src/scan-schedule.ts` therefore keeps one `catalog_scans` row per scan (migration
-`0022`). A scheduled run makes a full pass only when one is due: no row yet, the
-scan's fingerprint changed (the pipeline version, the identity version or the routing
+`0022`). A scheduled run makes a full pass only when one is due: no row yet, the scan's
+fingerprint changed (the pipeline version, the identity version or the routing
 configuration revision), the last full pass is an hour old (`FULL_SCAN_INTERVAL`), or
 the highest `archive_sources` rowid is below the recorded mark (a rebuilt table).
-Routing dispatch also makes its next pass full after any scheduled run that found
-its configuration disabled, or dispatch paused, draining or stale, because sources that
-arrive then get no job row. Between full passes a run reads only the cheap part:
+Routing dispatch also makes its next pass full whenever the Workflow hook or Cron finds
+its configuration disabled, or dispatch paused, draining or stale, and when dispatch is
+activated, because sources that arrive meanwhile get no job row. A full pass that
+started before such a request does not cancel it. A missing configuration object touches
+no D1, so sources that arrive then wait for the hourly pass. Between full passes a run
+reads only the cheap part:
 
 | Scan | Between full passes |
 | --- | --- |

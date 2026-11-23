@@ -1509,6 +1509,13 @@ describe("durable routing dispatch in workerd", () => {
     expect(await activateRoutingDispatch(env)).toBe("active");
     expect((await scheduled()).processed).toBe(1);
     expect(destination.requests).toHaveLength(1);
+    // A pause between two Cron runs that only the Workflow hook saw.
+    await drainRoutingDispatch(env.MAIL_CATALOG);
+    const missed = await source(2);
+    expect((await dispatchRoutingSource(env, missed.rawKey, run)).status).toBe("paused");
+    expect(await activateRoutingDispatch(env)).toBe("active");
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(2);
   });
   it("only one concurrent administrative receipt can resolve an uncertain operation", async () => {
     await configure(artifact());
