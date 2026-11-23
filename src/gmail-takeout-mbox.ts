@@ -173,7 +173,7 @@ function parseHead(bytes: Uint8Array, offset: number, final: boolean): Head | nu
     throw new TakeoutMboxError("takeout_invalid_from_line", offset);
 
   // Two headers. Takeout folds a long X-Gmail-Labels onto lines that start with a
-  // space; a message cannot start with such a line (it would be neither a header field
+  // space; a message cannot start with a space or tab (it would be neither a header field
   // nor the blank line before a body), so every one of them belongs to the labels.
   // Each header has at most GMAIL_HEADERS_LIMIT bytes before its last CRLF, folds
   // included.

@@ -283,9 +283,11 @@ behaviour:
   had already stored for that account:
   - Takeout folds a long `X-Gmail-Labels` onto lines that start with a space (159
     entries). The splitter unfolds them: it removes the CRLF and keeps the space. A
-    valid message cannot start with such a line, so every such line is read as a
-    fold. An invalid message that does start with one would lose that line to the
-    labels without a stop; this risk is accepted with the owner's choice below.
+    valid message cannot start with a space or tab, so every line after the labels
+    that starts with one is read as a fold. An invalid message that does start with
+    one would lose that line to the labels, and stops only if the labels then fail a
+    check (UTF-8, the header limit or `takeout_labels_too_long`); this risk is
+    accepted with the owner's choice below.
   - A message that ends in a bare LF gets only the separator CRLF (241 entries); a
     message without a final line break gets a CRLF before the separator.
   - No body line starts with `From` and a space; 291 lines start with `>From` and 12
@@ -343,7 +345,7 @@ behaviour:
     run stops at that entry with `takeout_raw_conflict`. After review, the same run
     resumes with `onConflict: "record"`; a stopped run accepts a changed
     configuration only when its account and objects are unchanged.
-  - `oversize`: over the 25 MiB raw limit; not stored.
+  - `oversize`: over the 25 MiB raw limit, measured before unescaping; not stored.
   - `skipped`: its stream offset is in the configuration's `skip` list; not stored.
 - A stopped run resumes from its checkpoint when the configuration changes. Raise
   `attempt` after a transient failure. For a stop a split entry causes
