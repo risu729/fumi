@@ -21,7 +21,10 @@ application Workflow calls it after successful extraction; specialist OTP messag
 not wait for the five-minute scheduled sweep. This targeted path evaluates the bounded
 CEL router against the current source directly, independently of shadow-row persistence.
 It uses the same durable leases and outbox as `repairRoutingDispatch(env, runtime)`, the
-bounded Cron repair path. A transient guaranteed-no-effect owner error gets at most two
+bounded Cron repair path. Between full passes at the
+[scan cadence](processing-workflows.md#scheduled-scan-cadence), which a new
+configuration revision also starts, Cron reads only the `waiting` and `held` jobs that
+are due. A transient guaranteed-no-effect owner error gets at most two
 immediate retries after two and four seconds. Later repair retries remain bounded by the
 total attempt budget. No detached promise is started by either helper.
 

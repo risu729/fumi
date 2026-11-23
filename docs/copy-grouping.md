@@ -32,13 +32,16 @@ matches. Grouping instead compares a few header values that hops keep.
 
 `repairMailIdentity` runs in every scheduled invocation (every five minutes). It selects
 up to 200 present originals that have no `mail_identity` row of the current
-`identity_version`, newest catalog row first,
-so new mail is grouped within one interval and the backlog drains behind it. For each
-one it reads only the first 64 KiB of the original (the MIME header budget) with a
-ranged R2 read and writes one row. Rows are never updated; a row of an older
-`identity_version` is replaced by the backfill, and reads use only current rows. A read
-that throws (an R2 outage) writes nothing for that original, which stays pending for a
-later run without holding back the others; the run reports it as `deferred`.
+`identity_version`, newest catalog row first, among sources added since its last clean
+pass, and across the whole catalog at the
+[scan cadence](processing-workflows.md#scheduled-scan-cadence) (hourly, and at once
+after an `identity_version` change), so new mail is grouped within one interval and the
+backlog drains behind it. For each one it reads only the first 64 KiB of the original
+(the MIME header budget) with a ranged R2 read and writes one row. Rows are never
+updated; a row of an older `identity_version` is replaced by the backfill, and reads use
+only current rows. A read that throws (an R2 outage) writes nothing for that original,
+which stays pending for a later run without holding back the others; the run reports it
+as `deferred`.
 
 | Column | Value |
 | --- | --- |
