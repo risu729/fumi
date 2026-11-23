@@ -1,5 +1,6 @@
 import { addressParser } from "postal-mime";
 import type { Address } from "postal-mime";
+import { closeScan, FULL_SCAN, openScan } from "./scan-schedule.ts";
 
 /**
  * Header-only identity of one original and its copy group (ADR 0004). The same mail
@@ -327,20 +328,26 @@ async function readIdentity(
 
 /**
  * Bounded backfill: indexes up to IDENTITY_BATCH present originals that have no row yet,
- * newest first, so live mail is grouped within one scheduled interval.
+ * newest first, so live mail is grouped within one scheduled interval. A scheduled run
+ * looks among sources added since its last clean pass, and across the whole catalog at
+ * the cadence in scan-schedule.ts.
  */
 export async function repairMailIdentity(
   env: MailIdentityEnvironment,
   limit = IDENTITY_BATCH,
   now = new Date(),
+  scheduled = false,
 ) {
+  const window = scheduled
+    ? await openScan(env.MAIL_CATALOG, "mail_identity", IDENTITY_VERSION, now.getTime())
+    : FULL_SCAN;
   const pending = (
     await env.MAIL_CATALOG.prepare(
       `SELECT s.raw_key,s.raw_sha256,i.raw_key IS NOT NULL AS replaced FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
       WHERE (i.raw_key IS NULL OR NOT ${CURRENT_IDENTITY_SQL}) AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL
-      ORDER BY s.rowid DESC LIMIT ?`,
+      AND s.rowid > ? AND s.rowid <= ? ORDER BY s.rowid DESC LIMIT ?`,
     )
-      .bind(limit)
+      .bind(window.after, window.through, limit)
       .all<{ raw_key: string; raw_sha256: string; replaced: number }>()
   ).results;
   const results: (HeaderIdentity | IdentityFailure | null)[] = Array.from({
@@ -387,6 +394,9 @@ export async function repairMailIdentity(
     // oxlint-disable-next-line no-await-in-loop -- Ordered writes keep group assignment deterministic.
     await env.MAIL_CATALOG.batch(statements.slice(start, start + WRITE_BATCH).flat());
   const blocked = written.filter(({ result }) => typeof result === "string").length;
+  // A deferred read keeps its window open, so the next run reads that original again.
+  if (scheduled && pending.length < limit && written.length === pending.length)
+    await closeScan(env.MAIL_CATALOG, "mail_identity", IDENTITY_VERSION, window, now.getTime());
   return {
     indexed: written.length - blocked,
     blocked,

@@ -9,6 +9,7 @@ import {
 } from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
+import { FULL_SCAN_INTERVAL } from "../src/scan-schedule.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
@@ -267,6 +268,29 @@ describe("bounded content retrieval", () => {
     expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
       omitted: ["html_only_body", "part_0:conversion_not_enabled_or_pending"],
     });
+  });
+  it("reads only due retries between full scheduled passes", async () => {
+    await env.MAIL_CATALOG.exec("DELETE FROM catalog_scans; DELETE FROM mail_search_documents;");
+    const broken = await insert("scheduled-broken", "scheduled retry needle");
+    await env.MAIL_ARCHIVE.delete(broken.body_text_key!);
+    expect(await repairContentSearch(env, 100, true)).toEqual({ indexed: 0, deferred: 1 });
+    // A source the Workflow never indexed waits for the next full pass.
+    const missed = await insert("scheduled-missed", "scheduled missed needle");
+    expect(await repairContentSearch(env, 101, true)).toEqual({ indexed: 0, deferred: 0 });
+    await object("scheduled retry needle");
+    expect(await repairContentSearch(env, 300100, true)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM mail_search_documents WHERE raw_key=?")
+        .bind(missed.raw_key)
+        .first(),
+    ).toBeNull();
+    expect(await repairContentSearch(env, 100 + FULL_SCAN_INTERVAL, true)).toEqual({
+      indexed: 1,
+      deferred: 0,
+    });
+    expect(
+      (await searchMailContent(env, reader, { query: "scheduled" }, base)).matches,
+    ).toHaveLength(2);
   });
   it("retries corrupt or missing derivatives without publishing partial results or starving work", async () => {
     const broken = await insert("a-broken", "private missing content");

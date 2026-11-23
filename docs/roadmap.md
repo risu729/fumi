@@ -88,6 +88,10 @@ establish production delivery.
       the 276 live/Gmail pairs is pending. The connector
       transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
       before it stopped on 2026-11-12. No Gmail writes are supported.
+- [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
+      which grows with the Takeout import (owner request, 2026-11-23). Full repair
+      passes run hourly and runs in between read only new sources and due retries. See
+      [scheduled scan cadence](processing-workflows.md#scheduled-scan-cadence).
 - [ ] On hold (owner, 2026-11-17 17:44 UTC): keep importing Gmail SENT mail after the
       historical cutoff. Do not implement until the owner picks the design. The owner
       sends by hand from Gmail through Cloudflare Email Sending SMTP. Those messages do

@@ -35,13 +35,55 @@ start using `waitUntil`. Neither D1 nor Workflows changes the forwarding result.
 This best-effort start is not the durable recovery mechanism: the existing R2
 sweep discovers raw-only and receipt-only sources if invocation time runs out.
 Every scheduled invocation also discovers up to 10 catalog sources without jobs
-and checks up to 10 due jobs. A failed scan does not suppress repair of known jobs.
+(among sources added since the last clean pass, and across the whole catalog at the
+[scan cadence](#scheduled-scan-cadence)) and checks up to 10 due jobs. A failed scan
+does not suppress repair of known jobs.
 More generally, every stage of the scheduled handler, from the archive sweep through
 outbound delivery-event reconciliation and MCP Events delivery, is isolated: a failed
 stage logs only its event name and a fixed status, later stages still run, and the
 run is reported failed.
 Failed dispatches move behind other due jobs before remote calls, with a five-minute
 check interval. These bounds are for the small live archive, not bulk import.
+
+### Scheduled scan cadence
+
+Four scheduled repairs look for catalog rows that lack a derived row: sources without
+a processing job, present originals without a current `mail_identity` row, extracted
+messages without a current search projection, and live sources without a current
+routing dispatch job. When such a query finds nothing, SQLite reads its whole driving
+table, so at 6,210 sources these four queries read about 3.4 million D1 rows every
+five hours while the archive was idle (D1 query insights, 2026-11-23 08:00 to 13:00
+UTC), and the Gmail Takeout backfill multiplies the table size.
+
+`src/scan-schedule.ts` therefore keeps one `catalog_scans` row per scan (migration
+`0022`). A scheduled run makes a full pass only when one is due: no row yet, the
+scan's fingerprint changed (the pipeline version, the identity version or the routing
+configuration revision), the last full pass is an hour old (`FULL_SCAN_INTERVAL`), or
+the table holds fewer rows than the recorded mark. Between full passes a run reads only
+the cheap part:
+
+| Scan | Between full passes |
+| --- | --- |
+| `repairProcessing` | sources with `rowid` above `scanned_rowid` |
+| `repairMailIdentity` | sources with `rowid` above `scanned_rowid` |
+| `repairContentSearch` | `mail_search_documents` rows with `status='retry'` that are due, through the `mail_search_documents_retry` index |
+| `repairRoutingDispatch` | `routing_dispatch_jobs` rows in `waiting` or `held` that are due, through `routing_dispatch_jobs_due` |
+
+A pass records itself only when it comes back below its limit and left nothing
+unrecorded behind: a full pass sets the next full pass an hour later and `scanned_rowid`
+to the highest source rowid it covered, and a cheap pass only moves `scanned_rowid`
+forward. A pass that hit its limit, or an identity read that was deferred, records
+nothing, so the next run repeats the same window and a backlog drains every five
+minutes as before.
+
+The live paths do not wait for these passes: ingress, the Gmail imports and the Takeout
+import create the processing job, and the MIME Workflow indexes content and dispatches
+routing for each message itself. What only a full pass finds now waits up to an hour
+instead of five minutes: a source whose job creation failed at ingress and that the R2
+sweep catalogued below the mark, an older catalog row that changed after its pass, a
+projection removed by an extraction change during a pass, and a live source whose
+Workflow dispatch never ran. The operator repair route (`POST
+/api/admin/archive/repair`) and the Workflow hooks always run full queries.
 
 The catalog Workflow has three checkpointed stages: begin, observe/catalog, complete.
 MIME jobs insert a separate extraction stage before completion. Only small outcome

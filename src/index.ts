@@ -249,14 +249,19 @@ export default {
       failed = true;
     }
     try {
-      const processing = await repairProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING);
+      const processing = await repairProcessing(
+        env.MAIL_CATALOG,
+        env.MAIL_PROCESSING,
+        Date.now(),
+        true,
+      );
       console.log(JSON.stringify({ event: "processing_repair", ...processing }));
     } catch {
       console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
       failed = true;
     }
     try {
-      const identity = await repairMailIdentity(env);
+      const identity = await repairMailIdentity(env, undefined, undefined, true);
       console.log(JSON.stringify({ event: "mail_identity", ...identity }));
     } catch {
       console.error(JSON.stringify({ event: "mail_identity", status: "deferred" }));
@@ -273,7 +278,7 @@ export default {
       failed = true;
     }
     try {
-      const search = await repairContentSearch(env);
+      const search = await repairContentSearch(env, Date.now(), true);
       console.log(JSON.stringify({ event: "content_search_repair", ...search }));
     } catch {
       console.error(JSON.stringify({ event: "content_search_repair", status: "deferred" }));
@@ -310,7 +315,7 @@ export default {
       failed = true;
     }
     try {
-      const routing = await repairRoutingDispatch(env, routingRuntime(env));
+      const routing = await repairRoutingDispatch(env, routingRuntime(env), undefined, true);
       if (["invalid_config", "stale", "draining"].includes(routing.status)) failed = true;
       console.log(JSON.stringify({ event: "routing_dispatch", ...routing }));
     } catch {

@@ -19,6 +19,7 @@ import type {
   RoutingOfferService,
 } from "./plugin-offer.ts";
 import { loadDispatchConfiguration } from "./routing-dispatch-config.ts";
+import { closeScan, FULL_SCAN, openScan } from "./scan-schedule.ts";
 import type { DispatchConfiguration, OfferField } from "./routing-dispatch-config.ts";
 
 export interface RoutingDispatchSource {
@@ -1235,6 +1236,7 @@ export async function repairRoutingDispatch(
   env: RoutingDispatchEnvironment,
   runtime: RoutingDispatchRuntime = {},
   rawKey?: string,
+  scheduled = false,
 ) {
   runtime = snapshotRuntime(env, runtime);
   let config: DispatchConfiguration | null;
@@ -1254,8 +1256,17 @@ export async function repairRoutingDispatch(
   const now = runtime.now?.() ?? Date.now();
   let processed = 0;
   const budget = { remaining: LIMIT };
-  const rows = await db
-    .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
+  // The MIME Workflow dispatches each new source itself. Between full passes
+  // (scan-schedule.ts), a scheduled run reads only the jobs whose retry is due.
+  const fingerprint = String(config.artifact.revision);
+  const window =
+    scheduled && rawKey === undefined
+      ? await openScan(db, "routing_dispatch", fingerprint, now)
+      : FULL_SCAN;
+  const rows = await (
+    window.full
+      ? db
+          .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
       LEFT JOIN routing_dispatch_jobs j ON j.raw_key=e.raw_key
       WHERE e.extractor_version='mime-v1' AND e.status='complete' AND s.raw_state='present'
       AND s.source_kind='email_routing' AND s.notify_events=1 AND s.raw_sha256=e.raw_sha256
@@ -1264,17 +1275,25 @@ export async function repairRoutingDispatch(
         OR (j.state IN ('waiting','held') AND (? IS NOT NULL OR j.next_attempt_at<=?))
         OR (? IS NOT NULL AND j.state='ignored'))
       ORDER BY COALESCE(j.next_attempt_at,0),e.raw_key LIMIT ?`)
-    .bind(
-      rawKey ?? null,
-      rawKey ?? null,
-      Date.now(),
-      config.artifact.revision,
-      rawKey ?? null,
-      now,
-      rawKey ?? null,
-      LIMIT,
-    )
-    .all<{ raw_key: string; raw_sha256: string; updated_at: number }>();
+          .bind(
+            rawKey ?? null,
+            rawKey ?? null,
+            Date.now(),
+            config.artifact.revision,
+            rawKey ?? null,
+            now,
+            rawKey ?? null,
+            LIMIT,
+          )
+      : db
+          .prepare(`SELECT e.raw_key,e.raw_sha256,e.updated_at FROM routing_dispatch_jobs j CROSS JOIN mail_extractions e ON e.raw_key=j.raw_key
+      CROSS JOIN archive_sources s ON s.raw_key=e.raw_key
+      WHERE j.state IN ('waiting','held') AND j.next_attempt_at<=? AND j.lease_until<=?
+      AND e.extractor_version='mime-v1' AND e.status='complete' AND s.raw_state='present'
+      AND s.source_kind='email_routing' AND s.notify_events=1 AND s.raw_sha256=e.raw_sha256
+      ORDER BY j.next_attempt_at,e.raw_key LIMIT ?`)
+          .bind(now, Date.now(), LIMIT)
+  ).all<{ raw_key: string; raw_sha256: string; updated_at: number }>();
   for (const row of rows.results) {
     // oxlint-disable-next-line no-await-in-loop -- Per-source leases and a three-source batch bound scheduled work.
     const item = await source(db, row.raw_key);
@@ -1331,6 +1350,10 @@ export async function repairRoutingDispatch(
         .run();
     }
   }
+  // Each selected source now has a job row; a full pass that found fewer than LIMIT
+  // left no source without a current job.
+  if (scheduled && rawKey === undefined && window.full && rows.results.length < LIMIT)
+    await closeScan(db, "routing_dispatch", fingerprint, window, now);
   return { status: "complete", processed };
 }
 
