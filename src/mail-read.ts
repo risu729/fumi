@@ -795,7 +795,9 @@ async function archivePage(env: MailReadEnvironment, page: ArchivePage): Promise
             ? [
                 JSON.stringify(walked.map((row) => row.raw_key)),
                 JSON.stringify([
-                  ...new Set(walked.flatMap((row) => (row.group_id === null ? [] : [row.group_id]))),
+                  ...new Set(
+                    walked.flatMap((row) => (row.group_id === null ? [] : [row.group_id])),
+                  ),
                 ]),
               ]
             : []),
@@ -805,10 +807,8 @@ async function archivePage(env: MailReadEnvironment, page: ArchivePage): Promise
         )
         .all<MailRow>()
     ).results;
-  for (const factor of WALK_WINDOWS) {
-    const window = factor * (page.limit + 1);
-    const walked = (
-      // oxlint-disable-next-line no-await-in-loop -- A larger walk runs only when the last fell short.
+  const walk = async (window: number) =>
+    (
       await env.MAIL_CATALOG.prepare(
         // Without INDEXED BY, a source_kind filter (archive_source, label_ids, in:inbox)
         // makes SQLite read every source of that kind through the primary key and sort.
@@ -821,6 +821,10 @@ async function archivePage(env: MailReadEnvironment, page: ArchivePage): Promise
         .bind(...page.values, ...page.rangeValues, ...page.afterValues, window)
         .all<WalkedRow>()
     ).results;
+  for (const factor of WALK_WINDOWS) {
+    const window = factor * (page.limit + 1);
+    // oxlint-disable-next-line no-await-in-loop -- A larger walk runs only when the last fell short.
+    const walked = await walk(window);
     if (!walked.length) return [];
     const last = walked.length === window ? walked.at(-1)! : null;
     // oxlint-disable-next-line no-await-in-loop -- See the walk above.

@@ -114,9 +114,63 @@ within one page or call, drop a match whose group, part and text digest were alr
 shown. Later pages are not deduplicated. `coverage.duplicate_copies_omitted` counts
 the dropped matches, and `expand_copies: true` keeps them.
 
-Every collapsed page scans all originals that match its filters and sorts them twice,
-and the cursor applies after the collapse. That is bounded by the archive size, not by
-the page size.
+### Page cost
+
+Until 2026-11-23, every page of `search_emails` and `search_email_ids` collapsed all
+originals that matched its filters up to the snapshot, then applied the cursor, so even
+page 1 of an empty query read the whole archive. Each page now reads rows in proportion
+to the page size:
+
+1. A walk reads the next `4 × (max_results + 1)` matching originals after the token's
+   position, newest first, through the `archive_sources_search_order` index on
+   `(COALESCE(received_at,''), external_id)`, the page order. `after:`, `before:` and
+   the token bound where the walk starts and stops in that index.
+2. A collapse runs the same SQL as before over only the walked originals and every
+   original whose `mail_identity` row has the `group_id` of a walked one, then keeps
+   representatives no older than the last walked original.
+3. When the walk filled its window but that yields `max_results` or fewer results, the
+   walk repeats with `32 × (max_results + 1)` originals, and after that one statement
+   collapses every matching original as before.
+
+The pages are the same as collapsing everything: a representative after the token is
+itself a matching original, so each one down to the last walked original was walked, and
+its whole group (every original with that identity `group_id`, a superset of the
+members whatever their identity version, status or snapshot) was collapsed with it. So
+its representative and `copies` are the same. `test/search-page-cost.test.ts` compares
+full traversals against the previous statement on random archives with groups across
+page boundaries, Gmail labels, `archive_source`, `in:` and `expand_copies`.
+
+Measured with the local D1 of the test runtime (`meta.rows_read` summed over every
+statement of a page, 20 results per page, about 15% of messages in groups of two to
+four copies):
+
+| Archive | Search | Page 1 before | Page 10 before | Page 1 after | Page 10 after |
+| --- | --- | --- | --- | --- | --- |
+| 1,990 originals | empty query | 24,374 | 23,908 | 1,713 | 1,757 |
+| 1,990 originals | `from:alpha` | 11,719 | 11,229 | 2,227 | 2,201 |
+| 1,990 originals | `in:inbox` | 17,334 | 16,891 | 2,057 | 2,046 |
+| 1,990 originals | `archive_source: gmail` | 16,817 | 16,287 | 1,840 | 1,823 |
+| 4,033 originals | empty query | 49,006 | 48,527 | 1,689 | 1,684 |
+| 4,033 originals | `from:alpha` | 23,826 | 23,365 | 2,094 | 2,183 |
+| 4,033 originals | `in:inbox` | 35,596 | 35,142 | 2,119 | 2,040 |
+| 4,033 originals | `archive_source: gmail` | 33,635 | 33,099 | 1,799 | 1,866 |
+
+The test asserts that pages 1 and 10 read exactly as many rows whether the older
+archive below them holds 1,500 or 3,000 more messages. Limits:
+
+- A filter that matches few originals (a rare `from:`) still walks every newer original
+  until it finds enough matches; no index covers extracted metadata.
+- A page whose walks reach mostly copies whose representative lies outside them (many
+  copies per group spread over time) falls back to collapsing everything.
+- The walk and the collapse are two statements, so a write that lands between them
+  (an extraction finishing) can be seen by one and not the other, like a write between
+  two pages.
+- The walk names its index with `INDEXED BY`, and the search clauses on `source_kind`
+  carry a unary `+`: otherwise SQLite reads every source of that kind through the
+  primary key and sorts it.
+
+Migration `0022` adds the index. It changes no table, so the running Worker reads the
+same rows while the deploy job applies it, and its inserts maintain the index.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
 rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a

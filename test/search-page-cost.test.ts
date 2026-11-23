@@ -22,9 +22,12 @@ interface Original {
   subject: string;
   labels: string[];
   attachments: number;
-  /** The identity row: a complete row of this group, a blocked one, or none. */
+  /**
+   * The identity row: a complete row of this group, one for another SHA-256, a blocked
+   * one, a complete identity-v1 row (not current, so the original stands alone), or none.
+   */
   group?: string;
-  identity?: "complete" | "stale" | "blocked";
+  identity?: "complete" | "stale" | "blocked" | "previous";
 }
 
 async function insertOriginals(originals: Original[]) {
@@ -55,7 +58,7 @@ async function insertIdentities(originals: Original[]) {
   const rows = JSON.stringify(originals.filter((original) => original.identity));
   await env.MAIL_CATALOG.prepare(
     `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,failure_code,group_id,group_rule,indexed_at)
-     SELECT 'synthetic/'||(value->>'id'),'identity-v1',CASE value->>'identity' WHEN 'stale' THEN ? ELSE ? END,
+     SELECT 'synthetic/'||(value->>'id'),CASE value->>'identity' WHEN 'previous' THEN 'identity-v1' ELSE 'identity-v2' END,CASE value->>'identity' WHEN 'stale' THEN ? ELSE ? END,
      CASE value->>'identity' WHEN 'blocked' THEN 'blocked' ELSE 'complete' END,
      CASE value->>'identity' WHEN 'blocked' THEN 'source_missing' END,
      CASE value->>'identity' WHEN 'blocked' THEN NULL ELSE value->>'group' END,
@@ -104,8 +107,7 @@ function archiveMessages(
   for (let message = 0; message < count; message++) {
     serial++;
     const time = options.start - message * options.step;
-    const copies =
-      random.next() < options.copyRate ? 2 + random.int((options.copies ?? 4) - 1) : 1;
+    const copies = random.next() < options.copyRate ? 2 + random.int((options.copies ?? 4) - 1) : 1;
     const group = `group-${serial.toString().padStart(8, "0")}`;
     const from = random.pick(SENDERS);
     const subject = random.pick(["Invoice", "Meeting", "Report"]);
@@ -127,7 +129,9 @@ function archiveMessages(
           ? {
               group,
               identity:
-                random.next() < 0.05 ? random.pick(["stale", "blocked"] as const) : "complete",
+                random.next() < 0.1
+                  ? random.pick(["stale", "blocked", "previous"] as const)
+                  : "complete",
             }
           : {}),
       });
@@ -145,7 +149,7 @@ const OLD_JOINS = `LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.ext
  LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
 function oldCollapsedSql(where: string, expand: boolean, after: string) {
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND i.identity_version='identity-v2' AND i.status='complete' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${OLD_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
@@ -509,4 +513,3 @@ describe("search page cost", () => {
     ).toHaveLength(240);
   });
 });
-
