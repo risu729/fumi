@@ -1,6 +1,7 @@
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { readVerified } from "./attachment-conversion-io.ts";
 import { truncateCodeUnits } from "./utf16.ts";
+import { CURRENT_IDENTITY_SQL } from "./mail-identity.ts";
 
 export interface MailReadEnvironment {
   MAIL_CATALOG: D1Database;
@@ -84,7 +85,7 @@ function collapsedSql(
 ) {
   const { after = "", preferRawKey = false } = options;
   return `WITH matched AS (SELECT s.rowid AS source_row,s.raw_key,s.source_kind,s.received_at,s.external_id,
-   CASE WHEN i.rowid<=? AND i.status='complete' AND s.raw_state='present' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
+   CASE WHEN i.rowid<=? AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND s.raw_state='present' AND i.raw_sha256=s.raw_sha256 THEN i.group_id END AS copy_group_id
    FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
