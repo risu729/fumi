@@ -87,7 +87,7 @@ Agent API and outbound mail:
 
 - [Agent mail API](agent-mail.md)
 - [Outbound email through MCP](outbound-mcp.md)
-- [Sent mail body search](sent-body-search.md) (proposed, not implemented)
+- [Sent mail body search](sent-body-search.md) (approved, not implemented)
 
 Routing:
 

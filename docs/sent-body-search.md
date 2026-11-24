@@ -1,12 +1,13 @@
 # Sent mail body search
 
-Status: proposed, not implemented; awaiting owner approval. Written 2026-11-23 02:30
-UTC as part 2 of the owner's request (2026-11-23, before 00:14 UTC) to make sent mail
-searchable over MCP. Part 1, metadata search, is implemented; see
-[searching sent mail](agent-mail.md#searching-sent-mail). Nothing on this page exists
-in the code yet: no migration, table, route or tool change. Current behavior is
-described in [content search](content-search.md) and
-[managed retrieval](managed-mail-search.md), which cover archived mail only.
+Status: approved, not implemented. Written 2026-11-23 02:30 UTC and approved by the
+owner on 2026-11-24 02:14 UTC (see [owner decisions](#owner-decisions)), as part 2 of
+the owner's request (2026-11-23, before 00:14 UTC) to make sent mail searchable over
+MCP. Part 1, metadata search, is implemented; see
+[searching sent mail](agent-mail.md#searching-sent-mail). Nothing on this page exists in
+the code yet: no migration, table, route or tool change. Current behavior is described
+in [content search](content-search.md) and [managed retrieval](managed-mail-search.md),
+which cover archived mail only.
 
 ## Summary
 
@@ -24,9 +25,8 @@ described in [content search](content-search.md) and
 - `search_mail_semantic` stays archive-only. Managed AI Search cannot isolate one
   principal's bodies inside fumi's single shared instance (see
   [semantic search](#semantic-search)).
-- One new migration, proposed as `0023_sent_body_search.sql`: open
-  [#177](https://github.com/risu729/fumi/pull/177) adds `0022`, and main's highest is
-  `0021`.
+- One new migration, `0024_sent_body_search.sql`: main has `0022_scan_schedule`, and
+  [#177](https://github.com/risu729/fumi/pull/177) adds `0023_search_order`.
 
 ## What exists today
 
@@ -88,7 +88,7 @@ These facts, from the code on main at
 
 ### Separate tables
 
-Proposed text of `0023_sent_body_search.sql` (not a file in this change):
+Proposed text of `0024_sent_body_search.sql` (not a file in this change):
 
 ```sql
 -- Rebuildable private index of fumi-sent bodies. Each operation's input.json stays
@@ -343,8 +343,10 @@ matches. The continuation token gains the phase:
 archive phase starts below the highest possible ID, as the first page does today, so
 the archive part of a traversal behaves exactly as it does now. A sent chunk indexed
 during a traversal has a higher ID than `before` and is not returned by later pages.
-Tokens without `version` were issued before sent mail joined content search and fail
-with `invalid_page_token`, as part 1 handled `search_emails` tokens. The token is not
+Tokens without `version` were issued before sent mail joined content search. They keep
+working as archive-phase tokens with the same `before`, `query` and `filter`, so a
+traversal started before the change continues through the archive with the order and
+results it had (owner decision, 2026-11-24). The token is not
 bound to a principal: another principal holding it gets only its own matches.
 
 A sent match keeps every field of an archive match, so clients parse both alike:
@@ -511,7 +513,21 @@ All synthetic:
   digest equal to the citation's `sha256`.
 - Query plans without a temporary sort, and rows read bounded like the archive search.
 
-## Open questions for the owner
+## Owner decisions
+
+On 2026-11-24 02:14 UTC the owner approved this design with the recommended answer to
+each question below, and with two further choices:
+
+- **Timing.** The response-time signal from other principals' matching chunks
+  ([security](#security)) is accepted. fumi has one principal today, so a principal-key
+  FTS5 column or per-principal indexes are not added for it; question 6 still allows the
+  column if measurements show other principals' matches dominate the walk.
+- **Old tokens.** Continuation tokens issued before this change keep working as
+  archive-phase tokens instead of failing with `invalid_page_token`.
+
+## Questions answered by the owner
+
+The recommended answer of each question was approved on 2026-11-24.
 
 1. **Semantic search of sent mail.** Recommended: keep `search_mail_semantic`
    archive-only and keep it rejecting `in:`. Alternative: accept `in:` there for

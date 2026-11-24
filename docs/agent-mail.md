@@ -225,9 +225,9 @@ Known gaps:
   as its `sent_` record and as the archived `mail_` copy.
 - `read_email_thread` does not accept `sent_` IDs.
 
-Part 2, searching the bodies of sent mail, is proposed, not implemented, and awaits
-owner approval (2026-11-23 02:30 UTC): see [sent mail body search](sent-body-search.md).
-Until then `search_mail_content` and `search_mail_semantic` cover archived mail only.
+Part 2, searching the bodies of sent mail, was approved by the owner on 2026-11-24 and
+is not implemented yet: see [sent mail body search](sent-body-search.md). Until then
+`search_mail_content` and `search_mail_semantic` cover archived mail only.
 
 Search pages contain at most 50 records; batches contain at most ten messages; thread
 reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
