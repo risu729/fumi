@@ -954,18 +954,43 @@ async function getSentMailImpl(
 ) {
   scope(principal, "mail:read");
   const operation = await operationFor(ctx, principal, operationId);
-  const object = await ctx.MAIL_ARCHIVE.get(operation.input_key);
-  if (!object || object.size > 6 * 1024 * 1024) fail("send_content_unavailable");
-  const json = await object.text();
-  if ((await digest(json)) !== operation.input_hash) fail("send_content_unavailable");
-  const envelope = JSON.parse(json) as { input: NormalizedMail };
+  const input = await sentInput(ctx, operation);
   // Bcc is returned only through the explicitly owner-scoped sent-record API.
   return {
     operation_id: operationId,
     state: operation.state === "submitting" ? "unknown" : operation.state,
-    input: publicMail(envelope.input),
+    input: publicMail(input),
     created_at: operation.created_at,
   };
+}
+
+/** The composed message archived as the operation's input.json, verified by its digest. */
+async function sentInput(ctx: OutboundContext, operation: Operation) {
+  const object = await ctx.MAIL_ARCHIVE.get(operation.input_key);
+  if (!object) fail("send_content_unavailable");
+  if (object.size > 6 * 1024 * 1024) {
+    await object.body.cancel();
+    fail("send_content_unavailable");
+  }
+  const json = await object.text();
+  if ((await digest(json)) !== operation.input_hash) fail("send_content_unavailable");
+  return (JSON.parse(json) as { input: NormalizedMail }).input;
+}
+
+/**
+ * The UTF-8 bytes of a sent record's plain-text body (payload.text), which sent body
+ * search citations hash. It holds no recipients. An HTML-only send has none.
+ */
+async function getSentTextImpl(
+  ctx: OutboundContext,
+  principal: MailPrincipal,
+  operationId: string,
+) {
+  scope(principal, "mail:read");
+  const operation = await operationFor(ctx, principal, operationId);
+  const body = (await sentInput(ctx, operation)).payload?.text;
+  if (typeof body !== "string") fail("send_content_unavailable");
+  return encoder.encode(body);
 }
 
 async function listSentMailImpl(
@@ -1437,6 +1462,7 @@ export const updateDraft = withOutboundErrors(updateDraftImpl);
 export const listDrafts = withOutboundErrors(listDraftsImpl);
 export const getSendStatus = withOutboundErrors(getSendStatusImpl);
 export const getSentMail = withOutboundErrors(getSentMailImpl);
+export const getSentText = withOutboundErrors(getSentTextImpl);
 export const listSentMail = withOutboundErrors(listSentMailImpl);
 export const sendMail = withOutboundErrors(sendMailImpl);
 export const sendDraft = withOutboundErrors(sendDraftImpl);

@@ -881,8 +881,18 @@ async function searchStatement(input: Parameters<typeof searchMailContent>[2]) {
     spy.mockRestore();
   }
 }
-// The continuation token format every earlier version issued and accepted.
+// An archive-phase continuation token, as search issues it.
 function pageToken(before: number, query: string, filter: string) {
+  return btoa(
+    String.fromCharCode(
+      ...new TextEncoder().encode(
+        JSON.stringify({ version: 2, phase: "archive", before, query, filter }),
+      ),
+    ),
+  );
+}
+// The continuation token format every version before sent body search issued.
+function legacyPageToken(before: number, query: string, filter: string) {
   return btoa(
     String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ before, query, filter }))),
   );
@@ -1043,6 +1053,23 @@ describe("content search paging", () => {
           .slice(0, 3)
           .map((row) => `mail_${row.external_id}#${row.ordinal}`),
       );
+      // A token issued before sent body search continues the same archive traversal.
+      // oxlint-disable-next-line no-await-in-loop -- One filter at a time.
+      const legacy = await searchMailContent(
+        env,
+        reader,
+        {
+          query: "needle",
+          filters,
+          max_results: 7,
+          next_page_token: legacyPageToken(expected[6]!.id, "needle", filters),
+        },
+        base,
+      );
+      expect({
+        ids: legacy.matches.map((match) => `${match.message_id}#${match.citation.chunk}`),
+        token: legacy.next_page_token,
+      }).toEqual(pages[1]);
     }
   });
 });

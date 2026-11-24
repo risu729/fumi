@@ -2,17 +2,24 @@ import { NonRetryableError } from "cloudflare:workflows";
 import {
   CURRENT_EXTRACTION_SQL,
   MailReadError,
-  parseMailSearch,
+  parseContentSearch,
   type MailReadEnvironment,
 } from "./mail-read.ts";
 import { hasScope, type MailPrincipal } from "./principal.ts";
 import { pairBoundary, truncateCodeUnits } from "./utf16.ts";
+import {
+  BODY_SEARCH_CHARACTERS,
+  chunks,
+  InvalidSearchSource,
+  UnsupportedEncoding,
+  verifiedText,
+  type Chunk,
+} from "./search-text.ts";
 import { CURRENT_IDENTITY_SQL } from "./mail-identity.ts";
 import { closeScan, FULL_SCAN, openScan } from "./scan-schedule.ts";
+import { searchSentBodies, sentBodyCoverage, type SentChunkRow } from "./sent-body-search.ts";
 
 const VERSION = "text-v2";
-const CHUNK = 3500;
-const OVERLAP = 200;
 interface Extraction {
   raw_key: string;
   manifest_key: string;
@@ -27,15 +34,6 @@ interface Part {
   size: number;
   sha256: string;
 }
-interface Chunk {
-  part: string;
-  ordinal: number;
-  text: string;
-  sha256: string;
-  original_sha256?: string;
-  representation?: string;
-  source_part?: string;
-}
 interface Conversion {
   part_index: number;
   state: string;
@@ -45,41 +43,6 @@ interface Conversion {
   source_sha256: string;
   representation: string | null;
   policy_hash: string;
-}
-// The stored object can never yield the recorded text: R2 answered, but the object
-// is absent, over its bound, not the recorded digest, or not UTF-8. Reading it again
-// returns the same answer; D1 and R2 request failures stay ordinary errors.
-class InvalidSearchSource extends Error {}
-class UnsupportedEncoding extends InvalidSearchSource {}
-
-async function verifiedText(bucket: R2Bucket, key: string, digest: string, maximum: number) {
-  const object = await bucket.get(key);
-  if (!object) throw new InvalidSearchSource("Search source unavailable");
-  if (object.size > maximum) {
-    await object.body.cancel();
-    throw new InvalidSearchSource("Search source exceeds bound");
-  }
-  const bytes = await object.arrayBuffer();
-  const actual = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("");
-  if (actual !== digest) throw new InvalidSearchSource("Search source changed");
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    throw new UnsupportedEncoding("Unsupported text encoding");
-  }
-}
-function chunks(text: string, part: string, sha256: string): Chunk[] {
-  const result: Chunk[] = [];
-  for (let start = 0; start < text.length; start += CHUNK - OVERLAP) {
-    // A boundary inside a surrogate pair moves back one unit: the start keeps the whole pair
-    // and the end leaves it to the next chunk, so the overlap never drops below 199 units.
-    const chunk = text.slice(pairBoundary(text, start), pairBoundary(text, start + CHUNK));
-    result.push({ part, ordinal: result.length, text: chunk, sha256 });
-    if (start + CHUNK >= text.length) break;
-  }
-  return result;
 }
 
 /** Bounded rebuild from immutable MIME derivatives; never fetches message URLs. */
@@ -98,8 +61,8 @@ export async function indexMailContent(
       digest,
       6 * 1024 * 1024,
     );
-    entries.push(...chunks(truncateCodeUnits(text, 100_000), "body", digest));
-    if (text.length > 100_000) omitted.push("body_truncated");
+    entries.push(...chunks(truncateCodeUnits(text, BODY_SEARCH_CHARACTERS), "body", digest));
+    if (text.length > BODY_SEARCH_CHARACTERS) omitted.push("body_truncated");
   } else if (source.body_html_key) omitted.push("html_only_body");
   const attachments = JSON.parse(source.attachments_json) as Part[];
   const conversions = (
@@ -411,6 +374,69 @@ function excerpt(text: string, query: string, fallback: string) {
   const end = pairBoundary(text, Math.min(text.length, at + query.length + 150));
   return `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }
+/**
+ * A continuation token. Sent and archive chunk IDs are separate sequences, so a
+ * traversal returns every sent match, newest chunk first, then every archive match;
+ * `before` is the chunk ID in the index of `phase`. Tokens without `version` were issued
+ * before sent mail joined content search and continue as archive-phase tokens (owner
+ * decision, 2026-11-24).
+ */
+interface PageToken {
+  version: 2;
+  phase: "sent" | "archive";
+  before: number;
+  query: string;
+  filter: string;
+}
+const FIRST = Number.MAX_SAFE_INTEGER;
+function decodePageToken(token: string, query: string, filter: string, sent: boolean) {
+  try {
+    if (token.length > 8192) throw new Error();
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+        Uint8Array.from(atob(token), (c) => c.charCodeAt(0)),
+      ),
+    ) as Partial<Record<keyof PageToken, unknown>>;
+    const phase =
+      value.version === undefined
+        ? "archive"
+        : value.version === 2 && (value.phase === "sent" || value.phase === "archive")
+          ? value.phase
+          : null;
+    if (
+      !phase ||
+      (phase === "sent" && !sent) ||
+      typeof value.before !== "number" ||
+      !Number.isSafeInteger(value.before) ||
+      value.before < 1 ||
+      value.query !== query ||
+      value.filter !== filter
+    )
+      throw new Error();
+    return { phase, before: value.before };
+  } catch {
+    throw new MailReadError("invalid_page_token");
+  }
+}
+function encodePageToken(token: Omit<PageToken, "version">) {
+  return btoa(
+    String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ version: 2, ...token }))),
+  );
+}
+interface ArchiveChunkRow {
+  id: number;
+  external_id: string;
+  part: string;
+  ordinal: number;
+  sha256: string;
+  original_sha256: string | null;
+  representation: string | null;
+  source_part: string | null;
+  text: string;
+  excerpt: string;
+  coverage_json: string;
+  group_id: string | null;
+}
 export async function searchMailContent(
   env: MailReadEnvironment,
   principal: MailPrincipal,
@@ -424,111 +450,125 @@ export async function searchMailContent(
   const limit = input.max_results ?? 20;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MailReadError("invalid_limit");
   const filter = input.filters ?? "";
-  const parsed = parseMailSearch(filter);
-  let before = Number.MAX_SAFE_INTEGER;
-  if (input.next_page_token) {
-    try {
-      if (input.next_page_token.length > 8192) throw new Error();
-      const value = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
-          Uint8Array.from(atob(input.next_page_token), (c) => c.charCodeAt(0)),
-        ),
-      ) as { before: number; query: string; filter: string };
-      if (
-        !Number.isSafeInteger(value.before) ||
-        value.before < 1 ||
-        value.query !== query ||
-        value.filter !== filter
-      )
-        throw new Error();
-      before = value.before;
-    } catch {
-      throw new MailReadError("invalid_page_token");
-    }
+  const parsed = parseContentSearch(filter);
+  const position = input.next_page_token
+    ? decodePageToken(input.next_page_token, query, filter, parsed.sent !== null)
+    : { phase: parsed.sent ? "sent" : "archive", before: FIRST };
+  const phrase = `"${query.replaceAll('"', '""')}"`;
+  let next: Omit<PageToken, "version" | "query" | "filter"> | null = null;
+  let sent: SentChunkRow[] = [];
+  if (position.phase === "sent") {
+    const rows = await searchSentBodies(
+      env.MAIL_CATALOG,
+      principal,
+      phrase,
+      parsed.sent!,
+      position.before,
+      limit + 1,
+    );
+    sent = rows.slice(0, limit);
+    if (rows.length > limit) next = { phase: "sent", before: sent.at(-1)!.id };
   }
-  // The FTS rowid is the chunk ID (content_rowid='id', set by the insert trigger). Ordering
-  // and bounding on it lets FTS5 return matches in descending order and stop at LIMIT,
-  // instead of sorting every match; results and cursors are those of the chunk ID.
-  const rows = (
-    await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,c.original_sha256,c.representation,c.source_part,
+  // The rest of the page comes from the archive, from its first match once the sent
+  // phase is done. A page full of sent matches still asks for one archive match, so a
+  // token is issued only while matches remain.
+  let archived: ArchiveChunkRow[] = [];
+  if (!next) {
+    const remaining = limit - sent.length;
+    const before = position.phase === "archive" ? position.before : FIRST;
+    // The FTS rowid is the chunk ID (content_rowid='id', set by the insert trigger). Ordering
+    // and bounding on it lets FTS5 return matches in descending order and stop at LIMIT,
+    // instead of sorting every match; results and cursors are those of the chunk ID.
+    const rows = (
+      await env.MAIL_CATALOG.prepare(`SELECT c.id,s.external_id,c.part,c.ordinal,c.sha256,c.text,c.original_sha256,c.representation,c.source_part,
     snippet(mail_search_fts,0,'','','…',48) AS excerpt,d.coverage_json,i.group_id
     FROM mail_search_fts JOIN mail_search_chunks c ON c.id=mail_search_fts.rowid
     JOIN mail_search_documents d ON d.raw_key=c.raw_key AND d.status='ready'
     JOIN archive_sources s ON s.raw_key=c.raw_key
     JOIN mail_extractions e ON e.raw_key=c.raw_key AND e.extractor_version='mime-v1' AND ${CURRENT_EXTRACTION_SQL} AND e.manifest_key=d.manifest_key
+    LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'
     LEFT JOIN mail_identity i ON i.raw_key=c.raw_key AND ${CURRENT_IDENTITY_SQL} AND i.status='complete' AND i.raw_sha256=s.raw_sha256
-    WHERE mail_search_fts MATCH ? AND mail_search_fts.rowid<? ${parsed.clauses.length ? `AND ${parsed.clauses.join(" AND ")}` : ""}
+    WHERE mail_search_fts MATCH ? AND mail_search_fts.rowid<? ${parsed.archive.clauses.length ? `AND ${parsed.archive.clauses.join(" AND ")}` : ""}
     ORDER BY mail_search_fts.rowid DESC LIMIT ?`)
-      .bind(`"${query.replaceAll('"', '""')}"`, before, ...parsed.values, limit + 1)
-      .all<{
-        id: number;
-        external_id: string;
-        part: string;
-        ordinal: number;
-        sha256: string;
-        original_sha256: string | null;
-        representation: string | null;
-        source_part: string | null;
-        text: string;
-        excerpt: string;
-        coverage_json: string;
-        group_id: string | null;
-      }>()
-  ).results;
-  const page = rows.slice(0, limit);
-  const last = page.at(-1);
+        .bind(phrase, before, ...parsed.archive.values, remaining + 1)
+        .all<ArchiveChunkRow>()
+    ).results;
+    archived = rows.slice(0, remaining);
+    if (rows.length > remaining) next = { phase: "archive", before: archived.at(-1)?.id ?? FIRST };
+  }
   // Copies of one message index the same chunks. Within this page only, keep the first
   // match of each chunk per copy group (ADR 0004); later pages are not deduplicated.
   const seen = new Set<string>();
-  const shown = page.filter((row) => {
+  const shown = archived.filter((row) => {
     if (input.expand_copies || row.group_id === null) return true;
     const key = JSON.stringify([row.group_id, row.part, row.ordinal, row.sha256]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
-  const coverage = await env.MAIL_CATALOG.prepare(`SELECT
+  const [coverage, sentCoverage] = await Promise.all([
+    env.MAIL_CATALOG.prepare(`SELECT
     COUNT(*) AS extracted_messages,
     SUM(CASE WHEN d.status='ready' AND d.manifest_key=e.manifest_key THEN 1 ELSE 0 END) AS indexed_messages
     FROM mail_extractions e JOIN archive_sources s ON s.raw_key=e.raw_key
-    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key WHERE ${CURRENT_EXTRACTION_SQL}`).first();
+    LEFT JOIN mail_search_documents d ON d.raw_key=e.raw_key WHERE ${CURRENT_EXTRACTION_SQL}`).first(),
+    parsed.sent ? sentBodyCoverage(env.MAIL_CATALOG, principal) : { searched: false },
+  ]);
   return {
-    matches: shown.map((row) => ({
-      message_id: `mail_${row.external_id}`,
-      group_id: row.group_id,
-      excerpt: excerpt(row.text, query, row.excerpt),
-      citation: {
-        part: row.part,
-        chunk: row.ordinal,
-        sha256: row.sha256,
-        representation: row.representation ?? "original_text",
-        original_sha256: row.original_sha256 ?? row.sha256,
-        original_file_uri: new URL(
-          `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part === "body" ? "text" : `attachments/${row.source_part ?? row.part}`}`,
-          base,
-        ).href,
-        file_uri: new URL(
-          `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part.startsWith("converted_") ? `conversions/${row.source_part}/${row.sha256}` : row.part === "body" ? "text" : `attachments/${row.part}`}`,
-          base,
-        ).href,
-      },
-      coverage: JSON.parse(row.coverage_json) as Record<string, unknown>,
-    })),
-    next_page_token:
-      rows.length > limit && last
-        ? btoa(
-            String.fromCharCode(
-              ...new TextEncoder().encode(JSON.stringify({ before: last.id, query, filter })),
-            ),
-          )
-        : null,
+    matches: [
+      ...sent.map((row) => {
+        const id = `sent_${encodeURIComponent(row.operation_id)}`;
+        const text = new URL(`/api/mail/${id}/text`, base).href;
+        return {
+          message_id: `sent_${row.operation_id}`,
+          // A sent record is never grouped with archived copies (ADR 0004).
+          group_id: null,
+          excerpt: excerpt(row.text, query, row.excerpt),
+          citation: {
+            part: row.part,
+            chunk: row.ordinal,
+            sha256: row.sha256,
+            representation: "original_text",
+            original_sha256: row.sha256,
+            file_uri: text,
+            original_file_uri: text,
+            input_sha256: row.input_hash,
+            record_uri: new URL(`/api/mail/${id}/body`, base).href,
+          },
+          coverage: JSON.parse(row.body_search_json) as Record<string, unknown>,
+        };
+      }),
+      ...shown.map((row) => ({
+        message_id: `mail_${row.external_id}`,
+        group_id: row.group_id,
+        excerpt: excerpt(row.text, query, row.excerpt),
+        citation: {
+          part: row.part,
+          chunk: row.ordinal,
+          sha256: row.sha256,
+          representation: row.representation ?? "original_text",
+          original_sha256: row.original_sha256 ?? row.sha256,
+          original_file_uri: new URL(
+            `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part === "body" ? "text" : `attachments/${row.source_part ?? row.part}`}`,
+            base,
+          ).href,
+          file_uri: new URL(
+            `/api/mail/mail_${encodeURIComponent(row.external_id)}/${row.part.startsWith("converted_") ? `conversions/${row.source_part}/${row.sha256}` : row.part === "body" ? "text" : `attachments/${row.part}`}`,
+            base,
+          ).href,
+        },
+        coverage: JSON.parse(row.coverage_json) as Record<string, unknown>,
+      })),
+    ],
+    next_page_token: next ? encodePageToken({ ...next, query, filter }) : null,
     coverage: {
       version: VERSION,
       ...coverage,
       searches: "bounded_plain_text_utf8_attachments_and_completed_derivatives",
       pending_and_unsupported_content_excluded: true,
       semantic_search: false,
-      duplicate_copies_omitted: page.length - shown.length,
+      duplicate_copies_omitted: archived.length - shown.length,
+      sent_operations: sentCoverage,
     },
   };
 }

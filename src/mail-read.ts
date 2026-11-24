@@ -501,7 +501,8 @@ const D1_BOUND_PARAMETERS = 100;
  * collapse (two snapshots, archive source, 20 for labels, two key lists, three for the
  * cursor, three for the walk's last row, limit), 28 in its archive walk (snapshot, archive
  * source twice, 20 for labels, four for the cursor, limit) and 7 in its sent statement
- * (principal, snapshot, four for the cursor, limit), and search_mail_content 3.
+ * (principal, snapshot, four for the cursor, limit), and search_mail_content 4 in its
+ * sent statement (phrase, principal, cursor, limit) and 3 in its archive statement.
  */
 const CALLER_BOUND_PARAMETERS = 33;
 /**
@@ -525,7 +526,8 @@ type SearchFilter =
   | { kind: "attachment" }
   | { kind: "mailbox"; label: "INBOX" | "SENT" };
 const MAILBOXES: Record<string, "INBOX" | "SENT"> = { inbox: "INBOX", sent: "SENT" };
-/** `in:` is accepted only where sent mail is searched: search_emails and search_email_ids. */
+/** `in:` is accepted only where sent mail is searched: search_emails, search_email_ids
+ * and search_mail_content. */
 function parseSearchFilters(query: string, mailbox: boolean): SearchFilter[] {
   if (query.length > 1000) throw new MailReadError("query_too_long");
   const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
@@ -629,17 +631,25 @@ function sentFilterSql(filters: SearchFilter[]) {
   }
   return { clauses: clauses.length ? [balancedAnd(clauses)] : [], values };
 }
-/** Search filters of search_mail_content and search_mail_semantic, over archive mail only. */
+/** Search filters of search_mail_semantic, over archive mail only. */
 export function parseMailSearch(query: string) {
   return archiveFilterSql(parseSearchFilters(query, false));
+}
+/**
+ * Search filters of search_mail_content: clauses over the archive, and over this
+ * principal's operations `o`, or null when the filters exclude fumi-sent mail (in:inbox).
+ */
+export function parseContentSearch(query: string) {
+  const filters = parseSearchFilters(query, true);
+  return { archive: archiveFilterSql(filters), sent: sentFilterSql(filters) };
 }
 /**
  * Submission states searched as sent mail: provider acceptance, and the uncertain outcomes
  * that may have reached the provider (a surviving `submitting` claim reads as `unknown`).
  * `prepared` was never submitted and `rejected` was refused by the provider.
  */
-const SENT_STATES = ["accepted", "unknown"];
-const SENT_STATES_SQL = "o.state IN ('accepted','unknown','submitting')";
+export const SENT_STATES = ["accepted", "unknown"];
+export const SENT_STATES_SQL = "o.state IN ('accepted','unknown','submitting')";
 /** The ISO time of an operation's created_at, so both sources share one order key. */
 const SENT_TIME_SQL =
   "strftime('%Y-%m-%dT%H:%M:%S',o.created_at/1000,'unixepoch')||printf('.%03dZ',o.created_at%1000)";

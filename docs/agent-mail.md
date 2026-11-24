@@ -119,17 +119,18 @@ rejected. Pending/blocked extraction remains visible. Gmail threads use retained
 and thread IDs, with a Fumi message anchor as public thread ID. Live thread links are
 direct untrusted header hints. Neither claims a complete conversation model.
 
-`search_mail_content` is a separate lexical baseline over bounded plain-text
-bodies and supported UTF-8 text attachments. It returns citations and explicit
-indexing/representation coverage. See [content search](content-search.md) for
-limits, phrase syntax and activation. Metadata search semantics are unchanged.
-It covers archived mail only; its `filters` reject `in:`.
+`search_mail_content` is a separate lexical baseline over bounded plain-text bodies and
+supported UTF-8 text attachments. It returns citations and explicit
+indexing/representation coverage. See [content search](content-search.md) for limits,
+phrase syntax and activation. Metadata search semantics are unchanged. It also searches
+the plain-text bodies of the caller's own fumi-sent mail, and its `filters` accept
+`in:sent` and `in:inbox` ([sent mail body search](sent-body-search.md)).
 
 ## Searching sent mail
 
 Owner request (2026-11-23, before 00:14 UTC): make sent mail searchable over MCP too.
 Part 1, metadata search, is implemented with synthetic tests; part 2, body search, is
-proposed in [sent mail body search](sent-body-search.md). On 2026-11-23 the owner
+described in [sent mail body search](sent-body-search.md). On 2026-11-23 the owner
 approved part 1 as designed, including sent mail in the default search; `in:inbox`
 narrows to received mail. The legacy `label_ids:["SENT"]` listing stays for now, to be
 revisited separately.
@@ -227,8 +228,10 @@ Known gaps:
 - `read_email_thread` does not accept `sent_` IDs.
 
 Part 2, searching the bodies of sent mail, was approved by the owner on 2026-11-24 and
-is not implemented yet: see [sent mail body search](sent-body-search.md). Until then
-`search_mail_content` and `search_mail_semantic` cover archived mail only.
+is implemented with synthetic tests: `search_mail_content` also searches the caller's
+own sent plain-text bodies and accepts `in:sent` and `in:inbox`; see
+[sent mail body search](sent-body-search.md). `search_mail_semantic` covers archived
+mail only.
 
 Search pages contain at most 50 records; batches contain at most ten messages; thread
 reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
