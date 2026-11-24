@@ -321,8 +321,8 @@ where `skipped` counts `rejected` rows marked `not_sent`.
 
 Indexing at send time is not proposed. The send path would gain D1 writes after the
 provider accepted the message, and an indexing failure must never turn an accepted send
-into an error. The cost is a delay of at least one scheduled run, more during bursts or backfill (see
-the latency bullet above; question 5).
+into an error. The cost is a delay of at least one scheduled run, more during bursts or
+backfill (see the latency bullet above; question 5).
 
 ## API
 
