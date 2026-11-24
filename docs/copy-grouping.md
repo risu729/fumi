@@ -159,3 +159,4 @@ and originals that were not `present`; `in_multi_copy_groups` counted every row 
 same `group_id`, whatever its version, and `pending` did not require a SHA-256.
 `unknown` was added then. Requiring `present` matches collapsed reads, which require it
 since [#173](https://github.com/risu729/fumi/pull/173) (2026-11-23 02:12 UTC).
+The owner approved the `unknown` count and the narrower meanings on 2026-11-24.
