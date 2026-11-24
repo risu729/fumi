@@ -490,17 +490,17 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   `gmail_takeout_labels` 1,137 for the run. All 1,137 have a complete `mime-v1`
   extraction and a complete processing job. The count agrees with the 1,137 messages
   counted in the export before it was uploaded.
-- larva06online (`gmail-cdd6472a601c7ebf1388bfd2`, owner's go 2026-11-24 02:15 UTC;
-  held for the [speed-up](#import-speed) (owner, 04:59 UTC); `GMAIL_TAKEOUT_CONFIG`
-  replaced at 05:35 UTC and run started about 05:36 UTC): the export came from the owner's
+- larva06online (`gmail-cdd6472a601c7ebf1388bfd2`, owner's go 2026-11-24 02:15 UTC; held
+  for the [speed-up](#import-speed) (owner, 04:59 UTC); `GMAIL_TAKEOUT_CONFIG` replaced
+  at 05:35 UTC and run started about 05:36 UTC): the export came from the owner's
   computer, and the uploaded object's SHA-256 read back from R2 equals the extracted
   mbox's. The run is `complete` with no stop code, and `next_offset` equals
   `total_bytes`. The 5,407 entries have 5,407 distinct Gmail IDs (174,652,160 raw bytes,
   largest 3,996,609, none over the 4 MiB MIME limit); `gmail_messages` holds 5,407 rows
   for the namespace (2,825 threads, imported 05:36:18..07:11:39 UTC, about 1.1 s per
-  entry over the whole run) and `gmail_takeout_labels` 5,407 for the run. All 5,407
-  have a complete `mime-v1` extraction and one complete processing job. The count
-  agrees with the 5,407 messages counted in the export before it was uploaded.
+  entry over the whole run) and `gmail_takeout_labels` 5,407 for the run. All 5,407 have
+  a complete `mime-v1` extraction and one complete processing job. The count agrees with
+  the 5,407 messages counted in the export before it was uploaded.
 - The main account is not started; it waits for the owner's go.
 
 ## Primary references
