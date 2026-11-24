@@ -321,7 +321,8 @@ where `skipped` counts `rejected` rows marked `not_sent`.
 
 Indexing at send time is not proposed. The send path would gain D1 writes after the
 provider accepted the message, and an indexing failure must never turn an accepted send
-into an error. The cost is a delay of up to one scheduled run (question 5).
+into an error. The cost is a delay of at least one scheduled run, more during bursts or backfill (see
+the latency bullet above; question 5).
 
 ## API
 
@@ -357,7 +358,8 @@ the archive part of a traversal behaves exactly as it does now. A sent chunk ind
 during a traversal has a higher ID than `before` and is not returned by later pages.
 While the deploy job runs, a page served by the previous Worker version reads a
 version-2 token as an archive token with the same `before`; a sent-phase token can then
-skip archive matches on that one page. This lasts only until the new version is live.
+skip matches for the rest of that traversal. This lasts only until the new version is
+live.
 Tokens without `version` were issued before sent mail joined content search. They keep
 working as archive-phase tokens with the same `before`, `query` and `filter`, so a
 traversal started before the change continues through the archive with the order and
