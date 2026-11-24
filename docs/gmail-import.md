@@ -449,6 +449,15 @@ The owner chose (2026-11-24 04:59 UTC):
 3. Decide on handling several entries of one read concurrently only after measuring 1
    and 2 on the larva06online run (5,407 entries), which waits for them.
 
+Measured after 1 and 2 ([#196](https://github.com/risu729/fumi/pull/196),
+[#197](https://github.com/risu729/fumi/pull/197), deployed 2026-11-24 05:31 UTC): the
+larva06online run imported 730 entries from 05:36:18 to 05:43:35 UTC, about 0.6 s per
+entry, nine times faster. Change 2 alone was estimated at about 2.3 s per entry from
+outside APAC, so the hint took effect. At this rate the main account's 40,600 entries
+take about 7 h. The owner chose not to handle entries concurrently (2026-11-24 05:44
+UTC): the main account is the only large import left, and 7 h does not justify a more
+complex import loop.
+
 ### Production Takeout runs
 
 One row per account, checked with read-only queries on the production D1 catalog. The
