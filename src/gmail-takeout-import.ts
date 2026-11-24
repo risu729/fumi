@@ -6,7 +6,13 @@
 // advances only in the same D1 batch that records that entry's outcome.
 
 import * as v from "valibot";
-import { requestProcessing, type ProcessingParams } from "./processing-jobs.ts";
+import {
+  dispatchDueProcessingJobs,
+  dispatchProcessingJobs,
+  processingJobStatement,
+  type ProcessingParams,
+} from "./processing-jobs.ts";
+import type { ScanCheckpoint } from "./catalog.ts";
 import { gmailIngestId, storeGmailSource, type GmailRawStream } from "./gmail-import.ts";
 import {
   gmailNamespace,
@@ -80,6 +86,8 @@ export type TakeoutConfig = v.InferOutput<typeof configSchema>;
 /** Entries processed per chunk, and the most stream bytes one chunk reads. */
 export const TAKEOUT_CHUNK_ENTRIES = 100;
 export const TAKEOUT_CHUNK_BYTES = 128 * 1024 * 1024;
+/** Imported entries whose processing jobs are started together with one `createBatch`. */
+export const TAKEOUT_DISPATCH_ENTRIES = 25;
 const LEASE_MS = 10 * 60 * 1000;
 const hex = (bytes: ArrayBuffer) =>
   Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -293,7 +301,28 @@ export async function runTakeoutChunk(
   }
   let offset = claimed;
   let processed = 0;
+  // One catalog checkpoint read serves the chunk's stores (see GmailStoreContext).
+  const catalog: { value?: ScanCheckpoint } = {};
+  // Sources recorded as imported whose processing jobs are not started yet.
+  const undispatched: string[] = [];
+  // The job rows are committed before any start, so a failed start only delays it: the
+  // next chunk starts leftovers first, and the scheduled processing repair also does.
+  const report = async (started: Promise<{ claimed: number; acknowledged: number }>) => {
+    const result = await started.catch(() => null);
+    if (!result || result.acknowledged < result.claimed)
+      console.error(
+        JSON.stringify({
+          event: "gmail_takeout_dispatch",
+          status: result ? "partial" : "failed",
+          claimed: result?.claimed ?? null,
+          acknowledged: result?.acknowledged ?? null,
+        }),
+      );
+  };
+  const dispatch = () =>
+    report(dispatchProcessingJobs(db, env.MAIL_PROCESSING, undispatched.splice(0)));
   try {
+    await report(dispatchDueProcessingJobs(db, env.MAIL_PROCESSING));
     // A changed or missing object would shift every later offset: check all sizes first.
     const heads = await Promise.all(
       config.objects.map((object) => env.TAKEOUT_ARCHIVE.head(object.key)),
@@ -350,6 +379,9 @@ export async function runTakeoutChunk(
               ...fenceArgs,
             ),
         );
+      // The processing job commits with the outcome and is started after it (dispatch).
+      if (outcome === "imported" && details.rawKey)
+        statements.push(processingJobStatement(db, details.rawKey, Date.now()));
       statements.push(
         db
           .prepare(
@@ -362,6 +394,10 @@ export async function runTakeoutChunk(
       if (!results.at(-1)?.meta.changes) throw new GmailImportError("takeout_lease_lost");
       offset = item.end;
       processed++;
+      if (outcome === "imported" && details.rawKey) {
+        undispatched.push(details.rawKey);
+        if (undispatched.length >= TAKEOUT_DISPATCH_ENTRIES) await dispatch();
+      }
     };
     const handle = async (item: TakeoutItem): Promise<TakeoutChunkResult | null> => {
       if (item.offset !== offset) throw new GmailImportError("takeout_offset_mismatch");
@@ -403,15 +439,15 @@ export async function runTakeoutChunk(
       const details = { rawSha256, size, fromDate: item.fromDate };
       const existing = await db
         .prepare(`SELECT g.raw_key,s.raw_sha256,s.raw_state,s.receipt_state,l.run_id,l.entry_offset
-          FROM gmail_messages g JOIN archive_sources s ON s.raw_key=g.raw_key
+          FROM gmail_messages g LEFT JOIN archive_sources s ON s.raw_key=g.raw_key
           LEFT JOIN gmail_takeout_labels l ON l.raw_key=g.raw_key
           WHERE g.account_namespace=? AND g.message_id=?`)
         .bind(config.accountNamespace, item.messageId)
         .first<{
           raw_key: string;
           raw_sha256: string | null;
-          raw_state: string;
-          receipt_state: string;
+          raw_state: string | null;
+          receipt_state: string | null;
           run_id: string | null;
           entry_offset: number | null;
         }>();
@@ -466,8 +502,8 @@ export async function runTakeoutChunk(
       if (!proposed) return halt("takeout_invalid_provenance");
       if (new TextEncoder().encode(JSON.stringify(proposed)).length > MAX_RECEIPT_BYTES)
         return halt("takeout_receipt_too_large");
-      await storeGmailSource(env, proposed, raw);
-      await requestProcessing(db, env.MAIL_PROCESSING, rawKey);
+      // The lookup above found no gmail_messages row for this message ID.
+      await storeGmailSource(env, proposed, raw, { absent: true, checkpoint: catalog });
       await record(item, "imported", { ...details, rawKey });
       return null;
     };
@@ -527,6 +563,8 @@ export async function runTakeoutChunk(
     if (error instanceof GmailImportError) throw error;
     throw new GmailImportError("takeout_import_failed");
   } finally {
+    // Also after a failure: the jobs of entries already recorded are committed.
+    await dispatch();
     await db
       .prepare(
         "UPDATE gmail_takeout_runs SET lease_token=NULL,lease_until=0 WHERE run_id=? AND lease_token=?",

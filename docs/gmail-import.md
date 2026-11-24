@@ -352,10 +352,17 @@ behaviour:
 - The checkpoint `gmail_takeout_runs.next_offset` is the stream offset of the next
   unprocessed entry. It advances in the same D1 batch that records the entry in
   `gmail_takeout_items` with one outcome:
-  - `imported`: stored through the same path as the API transports, with receipt
-    schema `gmail-takeout-v1` (below), then dispatched for processing. If the Worker
-    stops after storing the entry but before recording it, the retry finds this run's
-    own receipt at the same offset and records `imported`.
+  - `imported`: stored through the same path as the API transports, with receipt schema
+    `gmail-takeout-v1` (below). The entry's pending `mime-v1` processing job is inserted
+    in the same batch, and jobs are started after their batch commits, 25 at a time with
+    one `createBatch` and at the end of the step, even a failed one. Each step first
+    starts up to 100 due jobs that were never started, such as those of a step that
+    stopped before its end; a start that is not acknowledged stays pending with
+    `dispatch_unavailable` for that and for the
+    [processing repair](processing-workflows.md). The instance status is checked by the
+    processing repair five minutes later, not right after the start. If the Worker stops
+    after storing the entry but before recording it, the retry finds this run's own
+    receipt at the same offset and records `imported`, with its job.
   - `verified`: the account already has this message ID with the same raw SHA-256.
   - `conflict`: the account already has this message ID with a different raw
     SHA-256. The stored original is kept. With `onConflict: "stop"` (the default) the
@@ -424,7 +431,21 @@ The owner chose (2026-11-24 04:59 UTC):
    (the error's name only) and creates the same instance without the hint, which then
    runs wherever Workflows places it. It applies to instances created after the change;
    a running instance keeps its place.
-2. Cut the sequential calls per entry (planned, separate change).
+2. Cut the sequential calls per new entry from 10 D1, 4 R2 and 3 Workflows calls to 3 D1
+   calls (the message lookup, the catalog commit and the outcome batch) and 2 R2 puts,
+   plus a few calls per 25 entries to start their processing jobs (above):
+   - `storeGmailSource` skips its `gmail_messages` lookup when the caller has just found
+     no row (`absent`), and shares one `archive_scan` read across a step's stores
+     (`checkpoint`), reading it again only after a refused commit. The commit accepts
+     `revision >= <value read>` when this raw key was not observed since, so an older
+     value stays valid for keys written after it was read.
+   - For every caller, an in-memory original goes straight to its conditional put (a
+     refused put is still compared with `head`, and a streamed original is still
+     checked first), and the receipt is read back only when its conditional put is
+     refused. A receipt over 16 KiB is refused before anything is written.
+   - The existing-message lookup reads `archive_sources` with a left join, so a
+     `gmail_messages` row without its source stops the run with
+     `takeout_existing_source_invalid` instead of being stored again.
 3. Decide on handling several entries of one read concurrently only after measuring 1
    and 2 on the larva06online run (5,407 entries), which waits for them.
 
