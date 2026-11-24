@@ -395,6 +395,32 @@ Progress and outcomes are D1 rows. The run's `status`, `stop_code` and `stop_off
 and the per-outcome counts and `from_date` range in `gmail_takeout_items`, are the
 evidence for the per-account verification in the ADR.
 
+### Import speed
+
+Measured: about 5.5 s per entry (risu.minecraft, 1,137 entries in 6,234 s on
+2026-11-23), so the main account's 40,600 entries would take about 62 h. Almost all of
+it is network time. Each new entry makes its calls one after another: 10 D1 calls, 4 R2
+calls on `fumi-mail` and 3 Workflows API calls. `fumi-catalog`'s primary is in APAC
+(served by HKG) and `fumi-mail` is APAC, while fumi's Workflow calls ran from DFW, LHR
+and AMS. Workers Observability spans (sampled, 2026-11-20..24, medians):
+
+| Call | From DFW, LHR, AMS | From HKG |
+| --- | --- | --- |
+| D1 query | 203..259 ms (of which SQL 0.2 ms) | 5 ms |
+| R2 `get` | 287..498 ms | 130 ms |
+| R2 `put` | 542..843 ms | not sampled |
+
+The owner chose (2026-11-24 04:59 UTC):
+
+1. Create each Takeout Workflow instance with `locationHint: "apac"`
+   (`TAKEOUT_LOCATION_HINT`). The hint is best effort; the option is in the Workers
+   runtime types and the Cloudflare API schema (`location_hint`), but not yet described
+   in the Workflows guides. It applies to instances created after the change; a running
+   instance keeps its place.
+2. Cut the sequential calls per entry (planned, separate change).
+3. Decide on handling several entries of one read concurrently only after measuring 1
+   and 2 on the larva06online run.
+
 ### Production Takeout runs
 
 One row per account, checked with read-only queries on the production D1 catalog. The

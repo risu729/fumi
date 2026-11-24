@@ -494,8 +494,8 @@ describe("Google Takeout import", () => {
       status: "created",
     });
     expect(takeout.create.mock.calls.map(([options]) => options)).toEqual([
-      { id: "takeout-cron-1", params: { runId: "cron" } },
-      { id: "takeout-cron-3", params: { runId: "cron" } },
+      { id: "takeout-cron-1", params: { runId: "cron" }, locationHint: "apac" },
+      { id: "takeout-cron-3", params: { runId: "cron" }, locationHint: "apac" },
     ]);
   });
 
