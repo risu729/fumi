@@ -123,7 +123,18 @@ describe("Google Takeout import", () => {
     expect(firstChunk).toMatchObject({ status: "advanced", processed: TAKEOUT_CHUNK_ENTRIES });
     expect(await drain(run)).toMatchObject({ status: "complete" });
     expect(await outcomes("run-1")).toEqual({ imported: count });
-    expect(workflow.createBatch).toHaveBeenCalledTimes(count);
+    // Jobs are started 25 at a time, each after its outcome committed.
+    const dispatched = workflow.createBatch.mock.calls.flatMap((call) =>
+      (call[0] as { instances: { id: string }[] }).instances.map(({ id }) => id),
+    );
+    expect(workflow.createBatch.mock.calls.length).toBeLessThan(count / 20);
+    expect(new Set(dispatched).size).toBe(count);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        `SELECT COUNT(*) AS n FROM processing_jobs j JOIN gmail_takeout_items i ON i.raw_key=j.raw_key
+        WHERE i.run_id='run-1' AND j.state='pending' AND j.dispatched_at IS NOT NULL`,
+      ).first("n"),
+    ).toBe(count);
     const state = await env.MAIL_CATALOG.prepare(
       "SELECT next_offset,total_bytes,status FROM gmail_takeout_runs WHERE run_id='run-1'",
     ).first<{ next_offset: number; total_bytes: number; status: string }>();
@@ -385,6 +396,85 @@ describe("Google Takeout import", () => {
     vi.restoreAllMocks();
     expect(await drain(run)).toMatchObject({ status: "complete" });
     expect(await outcomes("crash")).toEqual({ imported: 2 });
+  });
+
+  it("leaves jobs whose start was not acknowledged to the processing repair", async () => {
+    const objects = await upload(mbox(3), ["a/dispatch.mbox"]);
+    const run = config("dispatch", objects);
+    workflow.createBatch.mockImplementationOnce(
+      async ({ instances }: { instances: { id: string }[] }) => ({
+        created: [{ id: instances[0]!.id }],
+        errors: [
+          { index: 1, id: instances[1]!.id, code: 10405, message: "already exists" },
+          { index: 2, id: instances[2]!.id, code: 500, message: "unavailable" },
+        ],
+      }),
+    );
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    expect(await outcomes("dispatch")).toEqual({ imported: 3 });
+    const jobs = await env.MAIL_CATALOG.prepare(
+      `SELECT j.state,j.dispatched_at IS NOT NULL AS dispatched,j.failure_code,j.next_check_at>0 AS deferred
+      FROM processing_jobs j JOIN gmail_takeout_items i ON i.raw_key=j.raw_key
+      WHERE i.run_id='dispatch' ORDER BY i.entry_offset`,
+    ).all();
+    expect(jobs.results).toEqual([
+      { state: "pending", dispatched: 1, failure_code: null, deferred: 1 },
+      { state: "pending", dispatched: 1, failure_code: null, deferred: 1 },
+      { state: "pending", dispatched: 0, failure_code: "dispatch_unavailable", deferred: 1 },
+    ]);
+
+    // A refused batch acknowledges nothing; the run itself is unaffected.
+    const next = config("dispatch-2", await upload(mbox(2, 10), ["a/dispatch-2.mbox"]));
+    workflow.createBatch.mockRejectedValueOnce(new Error("Workflows unavailable"));
+    expect(await drain(next)).toMatchObject({ status: "complete" });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        `SELECT COUNT(*) AS n FROM processing_jobs j JOIN gmail_takeout_items i ON i.raw_key=j.raw_key
+        WHERE i.run_id='dispatch-2' AND j.failure_code='dispatch_unavailable' AND j.dispatched_at IS NULL`,
+      ).first("n"),
+    ).toBe(2);
+
+    // Once due, the next chunk of any run starts those leftovers before its own entries.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE processing_jobs SET next_check_at=0 WHERE dispatched_at IS NULL",
+    ).run();
+    workflow.createBatch.mockClear();
+    expect(
+      await drain(config("dispatch-3", await upload(mbox(1, 20), ["a/dispatch-3.mbox"]))),
+    ).toMatchObject({ status: "complete" });
+    expect(
+      (workflow.createBatch.mock.calls[0]![0] as { instances: unknown[] }).instances,
+    ).toHaveLength(3);
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM processing_jobs WHERE dispatched_at IS NULL",
+      ).first("n"),
+    ).toBe(0);
+  });
+
+  it("starts the jobs of entries recorded before a chunk fails", async () => {
+    const objects = await upload(mbox(3), ["a/fail-late.mbox"]);
+    const run = config("fail-late", objects);
+    await startTakeoutRun(env.MAIL_CATALOG, run);
+    // Only outcome batches use the database's own batch(); the third entry's fails.
+    const batch = env.MAIL_CATALOG.batch.bind(env.MAIL_CATALOG);
+    let calls = 0;
+    vi.spyOn(env.MAIL_CATALOG, "batch").mockImplementation(async (statements) => {
+      if (++calls === 3) throw new Error("D1 unavailable");
+      return batch(statements);
+    });
+    await expect(runTakeoutChunk(env, run)).rejects.toThrow("takeout_import_failed");
+    vi.restoreAllMocks();
+    expect(await outcomes("fail-late")).toEqual({ imported: 2 });
+    expect(
+      (workflow.createBatch.mock.calls.at(-1)![0] as { instances: unknown[] }).instances,
+    ).toHaveLength(2);
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT COUNT(*) AS n FROM processing_jobs WHERE dispatched_at IS NOT NULL",
+      ).first("n"),
+    ).toBe(3);
   });
 
   it("records a skipped entry as imported when a timed-out step stored it anyway", async () => {

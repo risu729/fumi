@@ -43,7 +43,11 @@ outbound delivery-event reconciliation and MCP Events delivery, is isolated: a f
 stage logs only its event name and a fixed status, later stages still run, and the
 run is reported failed.
 Failed dispatches move behind other due jobs before remote calls, with a five-minute
-check interval. These bounds are for the small live archive, not bulk import.
+check interval. These bounds are for the small live archive, not bulk import: the
+[Takeout import](gmail-import.md#google-takeout-transport) starts its own jobs in
+batches of up to 100 (`dispatchProcessingJobs`), and each of its steps first starts up
+to 100 due jobs that were never started (`dispatchDueProcessingJobs`), so leftovers do
+not wait for these ten per run.
 
 ### Scheduled scan cadence
 

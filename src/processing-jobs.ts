@@ -119,20 +119,123 @@ export async function readProcessingJob(
     .first<ProcessingJob>();
 }
 
+/** The pending job for a source, as a statement a caller can put in its own batch. */
+export function processingJobStatement(
+  db: D1Database | D1DatabaseSession,
+  rawKey: string,
+  now: number,
+  pipelineVersion: PipelineVersion = PIPELINE_VERSION,
+): D1PreparedStatement {
+  const instanceId = processingInstanceId(rawKey, 0, pipelineVersion);
+  return db
+    .prepare(`INSERT INTO processing_jobs (
+    raw_key, pipeline_version, instance_id, state, created_at, updated_at, next_check_at
+  ) VALUES (?, ?, ?, 'pending', ?, ?, 0)
+  ON CONFLICT (raw_key, pipeline_version) DO NOTHING`)
+    .bind(rawKey, pipelineVersion, instanceId, now, now);
+}
+
 async function ensureProcessingJob(
   db: D1DatabaseSession,
   rawKey: string,
   now: number,
   pipelineVersion: PipelineVersion,
 ) {
-  const instanceId = processingInstanceId(rawKey, 0, pipelineVersion);
-  await db
-    .prepare(`INSERT INTO processing_jobs (
-    raw_key, pipeline_version, instance_id, state, created_at, updated_at, next_check_at
-  ) VALUES (?, ?, ?, 'pending', ?, ?, 0)
-  ON CONFLICT (raw_key, pipeline_version) DO NOTHING`)
-    .bind(rawKey, pipelineVersion, instanceId, now, now)
-    .run();
+  await processingJobStatement(db, rawKey, now, pipelineVersion).run();
+}
+
+/** Most sources one dispatchProcessingJobs call takes: one `createBatch`. */
+export const PROCESSING_DISPATCH_BATCH = 100;
+
+/**
+ * Starts the never-dispatched pending jobs of up to 100 sources with one `createBatch`,
+ * for a caller that created their job rows in its own committed batch. It claims the
+ * jobs as `dispatchJob` does (pushing `next_check_at` five minutes out), so the repair
+ * loop checks each instance's status later instead of this call. An unacknowledged
+ * instance is left pending with `dispatch_unavailable` for the repair loop to retry.
+ * Returns how many jobs it claimed and how many instances were acknowledged.
+ */
+export async function dispatchProcessingJobs(
+  db: D1Database,
+  workflow: WorkflowBinding,
+  rawKeys: readonly string[],
+  now = Date.now(),
+): Promise<{ claimed: number; acknowledged: number }> {
+  if (rawKeys.length === 0) return { claimed: 0, acknowledged: 0 };
+  if (rawKeys.length > PROCESSING_DISPATCH_BATCH) throw new Error("Too many processing jobs");
+  const session = db.withSession("first-primary");
+  const claimed = await session
+    .prepare(`UPDATE processing_jobs SET next_check_at = ?
+    WHERE pipeline_version = ? AND state = 'pending' AND dispatched_at IS NULL
+      AND next_check_at <= ? AND created_at > ?
+      AND raw_key IN (SELECT value FROM json_each(?))
+    RETURNING raw_key, instance_id, attempt`)
+    .bind(
+      now + PROCESSING_CHECK_INTERVAL_MS,
+      PIPELINE_VERSION,
+      now,
+      now - DISPATCH_WINDOW_MS,
+      JSON.stringify(rawKeys),
+    )
+    .all<{ raw_key: string; instance_id: string; attempt: number }>();
+  const jobs = claimed.results;
+  if (jobs.length === 0) return { claimed: 0, acknowledged: 0 };
+  const instances: WorkflowInstanceCreateOptions<ProcessingParams>[] = jobs.map((job) => ({
+    id: job.instance_id,
+    params: { rawKey: job.raw_key, pipelineVersion: PIPELINE_VERSION, attempt: job.attempt },
+  }));
+  const acknowledged = new Set<string>();
+  try {
+    const batch = await workflow.createBatch({ instances });
+    for (const instance of batch.created) acknowledged.add(instance.id);
+    for (const error of batch.errors) {
+      const id = instances[error.index]?.id;
+      // An instance that already exists was created by an earlier dispatch.
+      if (error.code === 10405 && id !== undefined && (error.id === undefined || error.id === id))
+        acknowledged.add(id);
+    }
+  } catch {
+    // Nothing is acknowledged; every job below is left for the repair loop.
+  }
+  const statements = jobs.map((job) =>
+    acknowledged.has(job.instance_id)
+      ? session
+          .prepare(`UPDATE processing_jobs SET dispatched_at = COALESCE(dispatched_at, ?)
+          WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?`)
+          .bind(now, job.raw_key, PIPELINE_VERSION, job.instance_id)
+      : session
+          .prepare(`UPDATE processing_jobs SET failure_code = 'dispatch_unavailable', updated_at = ?
+          WHERE raw_key = ? AND pipeline_version = ? AND instance_id = ?
+            AND state IN ('pending', 'running')`)
+          .bind(now, job.raw_key, PIPELINE_VERSION, job.instance_id),
+  );
+  await session.batch(statements);
+  return { claimed: jobs.length, acknowledged: acknowledged.size };
+}
+
+/**
+ * Starts up to 100 due jobs that were never dispatched, whatever created them, with one
+ * `createBatch`. A bulk importer calls it so that jobs a failed earlier attempt left
+ * behind do not wait for the repair loop's ten per run.
+ */
+export async function dispatchDueProcessingJobs(
+  db: D1Database,
+  workflow: WorkflowBinding,
+  now = Date.now(),
+): Promise<{ claimed: number; acknowledged: number }> {
+  const due = await db
+    .prepare(`SELECT raw_key FROM processing_jobs
+    WHERE state = 'pending' AND next_check_at <= ? AND dispatched_at IS NULL
+      AND pipeline_version = ? AND created_at > ?
+    ORDER BY next_check_at, raw_key LIMIT ?`)
+    .bind(now, PIPELINE_VERSION, now - DISPATCH_WINDOW_MS, PROCESSING_DISPATCH_BATCH)
+    .all<{ raw_key: string }>();
+  return dispatchProcessingJobs(
+    db,
+    workflow,
+    due.results.map((job) => job.raw_key),
+    now,
+  );
 }
 
 async function recordProblem(

@@ -1,4 +1,4 @@
-import { commitSource, readCheckpoint } from "./catalog.ts";
+import { commitSource, readCheckpoint, type ScanCheckpoint } from "./catalog.ts";
 import { requestProcessing, type ProcessingParams } from "./processing-jobs.ts";
 import {
   gmailId,
@@ -252,6 +252,21 @@ async function putStream(
 }
 
 /**
+ * What a caller already knows when it stores a source, to save catalog reads.
+ *
+ * - `absent`: the caller read `gmail_messages` for this account and message ID in the
+ *   same run and found no row, so the previous-key check is skipped.
+ * - `checkpoint`: an `archive_scan` row shared by the caller's consecutive stores. The
+ *   commit fences on `revision >= checkpoint.revision` and on no newer observation of
+ *   this raw key, so an older revision stays valid for a key the reconciler has not seen;
+ *   a refused commit reads the row again and replaces the shared value.
+ */
+export interface GmailStoreContext {
+  absent?: boolean;
+  checkpoint?: { value?: ScanCheckpoint };
+}
+
+/**
  * Writes one Gmail-derived source: raw object and receipt with conditional writes, then
  * the catalog row and provider provenance in one fenced commit. Returns the raw key.
  */
@@ -259,7 +274,10 @@ export async function storeGmailSource(
   env: Pick<GmailImportEnvironment, "MAIL_CATALOG" | "MAIL_ARCHIVE">,
   proposed: GmailProvenance,
   bytes: Uint8Array | GmailRawStream,
+  known: GmailStoreContext = {},
 ): Promise<string> {
+  // The commit below uses `proposed` itself when this call writes the receipt.
+  if (!parseGmailProvenance(proposed)) throw new GmailImportError("gmail_invalid_provenance");
   const size = bytes instanceof Uint8Array ? bytes.byteLength : bytes.size;
   const id = proposed.messageId;
   const { rawKey, rawSha256 } = proposed;
@@ -268,14 +286,22 @@ export async function storeGmailSource(
   if (ingestId !== (await gmailIngestId(proposed.accountNamespace, id)))
     throw new GmailImportError("gmail_identity_conflict");
   const receivedAt = new Date(Number(proposed.internalDate)).toISOString();
-  const previousKey = await env.MAIL_CATALOG.prepare(
-    "SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?",
-  )
-    .bind(proposed.accountNamespace, proposed.messageId)
-    .first<{ raw_key: string }>();
-  if (previousKey && previousKey.raw_key !== rawKey)
-    throw new GmailImportError("gmail_identity_conflict");
-  const existing = await env.MAIL_ARCHIVE.head(rawKey);
+  if (!known.absent) {
+    const previousKey = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_key FROM gmail_messages WHERE account_namespace=? AND message_id=?",
+    )
+      .bind(proposed.accountNamespace, proposed.messageId)
+      .first<{ raw_key: string }>();
+    if (previousKey && previousKey.raw_key !== rawKey)
+      throw new GmailImportError("gmail_identity_conflict");
+  }
+  const receiptKey = `${prefix}/receipt.json`;
+  const receiptBytes = encoder.encode(JSON.stringify(proposed));
+  // The reconciler reads at most this much of a receipt; never store a larger one.
+  if (receiptBytes.byteLength > 16 * 1024) throw new GmailImportError("gmail_receipt_conflict");
+  // A buffered original goes straight to a conditional put; a refused put is compared
+  // below. A streamed one is checked first, so a replay never streams it only to be refused.
+  const existing = bytes instanceof Uint8Array ? null : await env.MAIL_ARCHIVE.head(rawKey);
   if (existing && !gmailRawMatches(existing, proposed))
     throw new GmailImportError("gmail_source_conflict");
   if (!existing) {
@@ -303,18 +329,20 @@ export async function storeGmailSource(
         throw new GmailImportError("gmail_source_conflict");
     }
   }
-  const receiptKey = `${prefix}/receipt.json`;
-  const receiptBytes = encoder.encode(JSON.stringify(proposed));
-  await env.MAIL_ARCHIVE.put(receiptKey, receiptBytes, {
+  const storedReceipt = await env.MAIL_ARCHIVE.put(receiptKey, receiptBytes, {
     onlyIf: { etagDoesNotMatch: "*" },
     httpMetadata: { contentType: "application/json" },
   });
-  const receipt = await env.MAIL_ARCHIVE.get(receiptKey);
-  if (!receipt || receipt.size > 16 * 1024) {
-    await receipt?.body.cancel();
-    throw new GmailImportError("gmail_receipt_conflict");
+  // A receipt this call wrote holds exactly `proposed`; only an existing one is read back.
+  let provenance: GmailProvenance | null = proposed;
+  if (!storedReceipt) {
+    const receipt = await env.MAIL_ARCHIVE.get(receiptKey);
+    if (!receipt || receipt.size > 16 * 1024) {
+      await receipt?.body.cancel();
+      throw new GmailImportError("gmail_receipt_conflict");
+    }
+    provenance = parseGmailProvenance(await receipt.json());
   }
-  const provenance = parseGmailProvenance(await receipt.json());
   if (
     !provenance ||
     provenance.schemaVersion !== proposed.schemaVersion ||
@@ -328,8 +356,13 @@ export async function storeGmailSource(
     throw new GmailImportError("gmail_receipt_conflict");
   const session = env.MAIL_CATALOG.withSession("first-primary");
   for (let attempt = 0; attempt < 5; attempt++) {
-    // oxlint-disable-next-line no-await-in-loop -- Retry only bounded observation CAS conflicts with the live reconciler.
-    const checkpoint = await readCheckpoint(session);
+    // A checkpoint read earlier in the caller's run is still a valid fence (see
+    // GmailStoreContext); after a refused commit it is read again.
+    const checkpoint =
+      (attempt === 0 ? known.checkpoint?.value : undefined) ??
+      // oxlint-disable-next-line no-await-in-loop -- Retry only bounded observation CAS conflicts with the live reconciler.
+      (await readCheckpoint(session));
+    if (known.checkpoint) known.checkpoint.value = checkpoint;
     // oxlint-disable-next-line no-await-in-loop -- Catalog and provider provenance commit in one transaction before the page checkpoint.
     const result = await commitSource(
       session,
