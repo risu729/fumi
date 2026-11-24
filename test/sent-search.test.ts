@@ -11,7 +11,7 @@ import {
   type OutboundContext,
 } from "../src/outbound.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
-import { searchMailContent } from "../src/content-search.ts";
+import { searchManagedMail } from "../src/managed-mail-search.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const base = "https://mail.example.invalid";
@@ -237,9 +237,9 @@ describe("metadata search over fumi-sent mail", () => {
     expect((await searchMail(env, owner, { query: "in:inbox" })).coverage).toMatchObject({
       sent_operations: { searched: false },
     });
-    // Body search does not cover sent mail yet, so it does not accept the mailbox operator.
+    // Semantic search stays over archived mail only, so it does not accept the mailbox operator.
     await expect(
-      searchMailContent(env, owner, { query: "Synthetic", filters: "in:sent" }, base),
+      searchManagedMail(env, owner, { query: "Synthetic", filters: "in:sent" }, base),
     ).rejects.toMatchObject({ code: "unsupported_query" });
   });
 

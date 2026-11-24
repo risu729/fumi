@@ -6,6 +6,7 @@ import { repairProcessing, requestProcessing } from "./processing-jobs.ts";
 import { handleHttp } from "./http.ts";
 import { applyProviderEvent, reconcileProviderEvents } from "./outbound-events.ts";
 import { projectSentSearch } from "./outbound.ts";
+import { indexSentBodies } from "./sent-body-search.ts";
 import { deliverEvents } from "./event-delivery.ts";
 import { eventRuntime } from "./event-runtime.ts";
 import { repairContentSearch } from "./content-search.ts";
@@ -334,6 +335,18 @@ export default {
       console.log(JSON.stringify({ event: "sent_search_projection", ...sent }));
     } catch {
       console.error(JSON.stringify({ event: "sent_search_projection", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const bodies = await indexSentBodies(env);
+      // A row whose input could not be read or published stays for the next run, and
+      // marks this run failed so that repeated request failures are visible.
+      if (bodies.deferred > 0) {
+        console.error(JSON.stringify({ event: "sent_body_search", ...bodies }));
+        failed = true;
+      } else console.log(JSON.stringify({ event: "sent_body_search", ...bodies }));
+    } catch {
+      console.error(JSON.stringify({ event: "sent_body_search", status: "deferred" }));
       failed = true;
     }
     try {

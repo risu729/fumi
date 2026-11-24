@@ -1,13 +1,12 @@
 # Sent mail body search
 
-Status: approved, not implemented. Written 2026-11-23 02:30 UTC and approved by the
-owner on 2026-11-24 02:14 UTC (see [owner decisions](#owner-decisions)), as part 2 of
-the owner's request (2026-11-23, before 00:14 UTC) to make sent mail searchable over
-MCP. Part 1, metadata search, is implemented; see
-[searching sent mail](agent-mail.md#searching-sent-mail). Nothing on this page exists in
-the code yet: no migration, table, route or tool change. Current behavior is described
-in [content search](content-search.md) and [managed retrieval](managed-mail-search.md),
-which cover archived mail only.
+Status: implemented with synthetic tests; not yet verified in production. Written
+2026-11-23 02:30 UTC and approved by the owner on 2026-11-24 02:14 UTC (see
+[owner decisions](#owner-decisions)), as part 2 of the owner's request (2026-11-23,
+before 00:14 UTC) to make sent mail searchable over MCP. Part 1, metadata search, is
+implemented; see [searching sent mail](agent-mail.md#searching-sent-mail). The archive
+side is described in [content search](content-search.md);
+[managed retrieval](managed-mail-search.md) stays archive-only.
 
 ## Summary
 
@@ -21,17 +20,22 @@ which cover archived mail only.
   `in:sent` and `in:inbox` in `filters`, as part 1 does for `search_emails`. Sent
   matches come first, then archive matches, behind one continuation token.
 - A scheduled, bounded stage reads each operation's SHA-256-verified `input.json` and
-  indexes its plain-text body. New sends become searchable at the next five-minute run.
+  indexes its plain-text body, five operations per five-minute run, newest first. A new
+  send becomes searchable at the next run unless more than five arrived since the last.
 - `search_mail_semantic` stays archive-only. Managed AI Search cannot isolate one
   principal's bodies inside fumi's single shared instance (see
   [semantic search](#semantic-search)).
-- One new migration, `0024_sent_body_search.sql`: main has `0022_scan_schedule`, and
-  [#177](https://github.com/risu729/fumi/pull/177) adds `0023_search_order`.
+- One new migration,
+  [`0024_sent_body_search.sql`](../migrations/0024_sent_body_search.sql). Code:
+  `src/sent-body-search.ts` (indexing stage, sent statement, coverage),
+  `searchMailContent` in `src/content-search.ts` (phases and tokens), chunking shared in
+  `src/search-text.ts`, and the `/text` download in `handleMailResource` (`src/mcp.ts`)
+  and `getSentText` (`src/outbound.ts`).
 
-## What exists today
+## What existed before
 
 These facts, from the code on main at
-[199d333](https://github.com/risu729/fumi/commit/199d333), constrain the design.
+[199d333](https://github.com/risu729/fumi/commit/199d333), constrained the design.
 
 - A send stores its composed message once, at
   `outbound/sent/<operation_id>/input.json` in R2, and its SHA-256 as
@@ -73,22 +77,23 @@ These facts, from the code on main at
   including Bcc, with attachment object keys removed and `reply_message_id` rewritten to
   a `mail_` ID (or `null`) by `publicResult` in `src/mcp.ts`. It has no state, draft or
   `forward_message_id`, its bytes are not `input.json`, and they can change with the
-  catalog. Any other download of a `sent_` ID, `/text` included, answers HTTP 404
-  `mail_unavailable` (`handleMailResource`).
+  catalog. Any other download of a `sent_` ID answered HTTP 404 `mail_unavailable`
+  (`handleMailResource`); `/text` now serves the plain-text body (see [API](#api)).
 
 - The archive index (`0007_content_search.sql`) is an external-content FTS5 table,
   `mail_search_fts(text, content='mail_search_chunks', content_rowid='id',
   tokenize='trigram')`. Pages walk `rowid` (the chunk ID) in descending order and stop
   after `max_results + 1` matches.
 
-- `search_mail_content` and `search_mail_semantic` parse `filters` with
-  `parseMailSearch`, which rejects `in:`.
+- `search_mail_content` and `search_mail_semantic` parsed `filters` with
+  `parseMailSearch`, which rejects `in:`. `search_mail_content` now uses
+  `parseContentSearch`, which accepts it; `search_mail_semantic` still rejects it.
 
 ## Isolation
 
 ### Separate tables
 
-Proposed text of `0024_sent_body_search.sql` (not a file in this change):
+[`0024_sent_body_search.sql`](../migrations/0024_sent_body_search.sql) adds:
 
 ```sql
 -- Rebuildable private index of fumi-sent bodies. Each operation's input.json stays
@@ -121,7 +126,7 @@ END;
 ```
 
 The `UNIQUE` constraint's index already serves lookups and deletes by `operation_id`,
-so no separate index is proposed (`0007` has one for `raw_key` next to its `UNIQUE`).
+so no separate index is added (`0007` has one for `raw_key` next to its `UNIQUE`).
 
 Example rows:
 
@@ -140,7 +145,7 @@ its `/text` download serves. Every chunk of one body carries the same value.
 | Value | Meaning |
 | --- | --- |
 | `NULL` | Not indexed yet; the partial index lists it |
-| `{"version":"sent-text-v1","status":"ready","chunks":2,"omitted":[],"composed":"reply"}` | Indexed. `composed` is `new`, `reply` or `forward`; `omitted` can hold `body_truncated` or `html_only_body` |
+| `{"version":"sent-text-v1","status":"ready","chunks":2,"omitted":[],"composed":"reply"}` | Indexed. `composed` is `forward` when `forward_message_id` is set, else `reply` when `reply_message_id` is, else `new`; `omitted` can hold `body_truncated` or `html_only_body` (then `chunks` is 0) |
 | `{"version":"sent-text-v1","status":"unavailable"}` | `input.json` missing, over 6 MiB, not its digest, or not the expected JSON; not read again |
 | `{"version":"sent-text-v1","status":"not_sent"}` | `rejected`; never indexed or read |
 
@@ -151,7 +156,7 @@ coverage counts read only the caller's rows.
 
 ### Why a separate FTS5 table
 
-- **Separate table (proposed).** `mail_search_fts` and every archive statement stay as
+- **Separate table (chosen).** `mail_search_fts` and every archive statement stay as
   they are, so no archive filter mistake can return a sent chunk, and the archive's
   global coverage counts never include sent mail. Sent chunk IDs come from their own
   sequence.
@@ -164,7 +169,7 @@ coverage counts read only the caller's rows.
 
 FTS5 content options:
 
-- **External content with triggers (proposed).** As in `0007`: the chunk table holds
+- **External content with triggers (chosen).** As in `0007`: the chunk table holds
   the text once, `snippet()` works, and the delete trigger passes the exact old text
   that FTS5's `'delete'` command needs.
 - **Regular FTS5 table with `UNINDEXED` operation columns.** One table, but `UNINDEXED`
@@ -178,7 +183,7 @@ FTS5 content options:
 
 ### Keeping MATCH and the principal filter bounded
 
-Sent-phase statement (proposed):
+Sent-phase statement (`searchSentBodies`):
 
 ```sql
 SELECT c.id, o.operation_id, c.part, c.ordinal, c.sha256, c.text, o.input_hash,
@@ -209,7 +214,8 @@ fixed-length principal key (`principal_key:"<hex>" AND text:"<phrase>"`), would 
 FTS5 intersect the two before any row lookup, but every query would then read the
 position lists of every chunk of the caller (about 14 trigram lists for a 16-character
 key). Which is cheaper depends on data this design does not have, so it is proposed
-only as a later change, after measuring with synthetic data (question 6).
+only as a later change, after measuring with synthetic data (question 6); see
+[measurements](#measurements).
 
 ### Scopes
 
@@ -253,9 +259,9 @@ cap bounds this per operation.
 
 ## Indexing pipeline
 
-A new scheduled stage, `sent_body_search`, runs in the five-minute scheduled handler
-after `sent_search_projection`, with its own `try` block: its failure marks the run
-failed but does not skip later stages. It logs only counts:
+A scheduled stage, `sent_body_search` (`indexSentBodies`), runs in the five-minute
+scheduled handler after `sent_search_projection`, with its own `try` block: its failure
+marks the run failed but does not skip later stages. It logs only counts:
 `{"event":"sent_body_search","indexed":3,"unavailable":0,"skipped":1,"deferred":0}`,
 where `skipped` counts `rejected` rows marked `not_sent`.
 
@@ -295,8 +301,14 @@ where `skipped` counts `rejected` rows marked `not_sent`.
   guard makes the batch a no-op once another run has published, and an overlapping run
   that loses the race writes nothing.
 - **Retries.** A D1 or R2 request failure leaves the row `NULL`, counts it as
-  `deferred` and moves on to the next row; the next run selects it again. A row that
-  keeps failing takes one of the five places per run and blocks nothing else.
+  `deferred` and moves on to the next row; the next run selects it again. A run with a
+  deferred row logs its counts as an error and marks the scheduled run failed, so
+  repeated failures are visible. A row that keeps failing takes one of the five places
+  per run: newer sends still come first, but five such rows would stop the backfill of
+  older sends until they succeed.
+- **Latency.** Five operations per five-minute run: a burst of 15 sends is indexed
+  within about three runs, and the first backfill of 1,000 earlier sends takes about 200
+  runs (about 17 hours). `pending` in coverage shows the remainder.
 - **Bounds.** Each operation reads one object of at most 6 MiB and writes at most 31
   chunks (100,000 units at a 3,300-unit stride), one operation in memory at a time.
 - **Migration safety.** The running Worker does not know `body_search_json`; its new
@@ -309,7 +321,8 @@ where `skipped` counts `rejected` rows marked `not_sent`.
 
 Indexing at send time is not proposed. The send path would gain D1 writes after the
 provider accepted the message, and an indexing failure must never turn an accepted send
-into an error. The cost is a delay of up to one scheduled run (question 5).
+into an error. The cost is a delay of at least one scheduled run, more during bursts or
+backfill (see the latency bullet above; question 5).
 
 ## API
 
@@ -343,6 +356,10 @@ matches. The continuation token gains the phase:
 archive phase starts below the highest possible ID, as the first page does today, so
 the archive part of a traversal behaves exactly as it does now. A sent chunk indexed
 during a traversal has a higher ID than `before` and is not returned by later pages.
+While the deploy job runs, a page served by the previous Worker version reads a
+version-2 token as an archive token with the same `before`; a sent-phase token can then
+skip matches for the rest of that traversal. This lasts only until the new version is
+live.
 Tokens without `version` were issued before sent mail joined content search. They keep
 working as archive-phase tokens with the same `before`, `query` and `filter`, so a
 traversal started before the change continues through the archive with the order and
@@ -377,8 +394,8 @@ A sent match keeps every field of an archive match, so clients parse both alike:
 }
 ```
 
-- `file_uri` is a new download, `GET /api/mail/sent_<operation_id>/text`: the exact
-  UTF-8 bytes of `payload.text` from the verified `input.json`, as
+- `file_uri` is a new download, `GET` or `HEAD /api/mail/sent_<operation_id>/text`: the
+  exact UTF-8 bytes of `payload.text` from the verified `input.json`, as
   `text/plain; charset=utf-8` with the headers `/body` already sends. `sha256` is the
   digest of those bytes, as archive body citations hash their `/text` download. It needs
   `mail:read` and the caller's own operation, and answers HTTP 404 `mail_unavailable`
@@ -408,7 +425,8 @@ only:
 
 or `{ "searched": false }` with `in:inbox`. `pending` counts searchable operations with
 `body_search_json` still `NULL`, so a caller can tell that a send from the last few
-minutes may not be found yet. The archive's existing global counts are unchanged and
+minutes may not be found yet. `html_only` counts indexed operations without a text part,
+so it is part of `indexed`. The archive's existing global counts are unchanged and
 never include sent mail.
 
 ### Semantic search
@@ -437,7 +455,7 @@ same remote retention question. It is not proposed now.
 
 ## Cost and limits
 
-Estimates, not measurements; the implementation PR measures them with synthetic data.
+Estimates, except where [measurements](#measurements) give a number.
 
 - **Bound parameters.** The sent statement binds the phrase, the cursor, the principal
   and the limit, plus at most two values for each of up to 33 operators: 70 of D1's
@@ -490,16 +508,33 @@ Estimates, not measurements; the implementation PR measures them with synthetic 
 
 Nothing deletes sent records today; retention and deletion are an open roadmap item
 ([phase 2A](roadmap.md#phase-2a-historical-import-and-attachment-aware-retrieval)). The
-index is rebuildable from `input.json`. The proposed trigger removes an operation's
-chunks when its row is deleted, so a future deletion of a sent record needs to delete
-the row and `input.json`; deleting only the R2 object would leave its chunks searchable.
-Removing a principal from `MAIL_GRANTS` makes its chunks unreachable but does not delete
-them. Archive content repeated in forwards and quotes is covered by the retention
-decision, not by this change.
+index is rebuildable from `input.json`. The `sent_search_operation_delete` trigger
+removes an operation's chunks when its row is deleted, so a future deletion of a sent
+record needs to delete the row and `input.json`; deleting only the R2 object would leave
+its chunks searchable. Removing a principal from `MAIL_GRANTS` makes its chunks
+unreachable but does not delete them. Archive content repeated in forwards and quotes is
+covered by the retention decision, not by this change.
 
-## Tests the implementation would add
+## Measurements
 
-All synthetic:
+Measured in workerd's local D1 with synthetic rows (`test/sent-body-search.test.ts`), on
+2026-11-24; production D1 work was not measured.
+
+- The sent statement's query plan is a descending FTS5 rowid walk bounded by the token,
+  with no temporary sort, with and without filters.
+- 2,000 of the caller's own chunks match: each page of 20 reads fewer than 500 rows, as
+  the archive search does.
+- 2,000 matching chunks of another principal sit below 20 of the caller's: a page of 20
+  read 4,079 rows, about two per visited match (the test bounds it below 2.1), because
+  the walk looks for a 21st match of the caller through all of them. This is the
+  response-time signal the owner accepted; with one principal today, no principal-key
+  column is added (question 6).
+- The trigram index size for real mail was not measured: repeated synthetic text
+  compresses unlike mail.
+
+## Tests
+
+`test/sent-body-search.test.ts`, all synthetic, covers:
 
 - Two principals sending the same phrase: each finds only its own, with matching counts,
   and a token from one returns only the other's own matches.

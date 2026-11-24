@@ -33,9 +33,11 @@ data. The optional `filters` argument uses the existing `from:`, `to:`, `subject
 explicitly instead of silently producing empty results. This is lexical retrieval,
 not semantic or hybrid retrieval; AI Search and Vectorize evaluation remains open.
 
-Only archived mail is indexed, and `filters` do not accept `in:`. Bodies of mail sent
-through fumi are not searched yet; see
-[sent mail body search](sent-body-search.md) for the approved design.
+The plain-text bodies of mail the caller sent through fumi are searched too, from their
+own index, and returned before archive matches as `sent_` IDs; `filters` accept
+`in:sent` and `in:inbox` as in `search_emails`. See
+[sent mail body search](sent-body-search.md). Everything else on this page describes the
+archive index.
 
 ## Coverage and resource bounds
 
@@ -84,8 +86,10 @@ match was sorted. Synthetic tests check that the local query plan has no tempora
 and bound that row count; production D1 work was not measured. Metadata filters are
 checked per match during that walk, so a filter that rejects most matches still walks
 them until a page fills, and one that rejects them all walks every match of the phrase
-below the cursor. The order, results and continuation tokens are those of earlier
-versions, and their tokens still work.
+below the cursor. The archive order and results are those of earlier versions. Tokens
+now also name the phase, sent or archive
+([sent mail body search](sent-body-search.md#api)), and tokens of earlier versions still
+work as archive-phase tokens.
 
 Completed searchable conversion derivatives add at most four attachments and 64,000
 UTF-16 code units per message; a derivative cut one unit short to keep a pair whole
