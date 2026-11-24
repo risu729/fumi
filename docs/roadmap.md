@@ -263,8 +263,9 @@ establish production delivery.
       attachment count to D1. Synthetic tests only. See
       [searching sent mail](agent-mail.md#searching-sent-mail).
 - [ ] Search sent mail bodies in `search_mail_content` and `search_mail_semantic`
-      through a principal-owned index (proposed in
-      [searching sent mail](agent-mail.md#searching-sent-mail)).
+      through a principal-owned index (approved by the owner on 2026-11-24 in
+      [sent mail body search](sent-body-search.md), which keeps
+      `search_mail_semantic` archive-only; not implemented).
 - [ ] Find Takeout-imported Gmail SENT mail with `in:sent` once the owner confirms
       the Takeout label name of Gmail's Sent label.
 - [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known

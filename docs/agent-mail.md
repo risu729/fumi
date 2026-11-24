@@ -129,9 +129,10 @@ It covers archived mail only; its `filters` reject `in:`.
 
 Owner request (2026-11-23, before 00:14 UTC): make sent mail searchable over MCP too.
 Part 1, metadata search, is implemented with synthetic tests; part 2, body search, is
-proposed below. On 2026-11-23 the owner approved part 1 as designed,
-including sent mail in the default search; `in:inbox` narrows to received mail. The
-legacy `label_ids:["SENT"]` listing stays for now, to be revisited separately.
+proposed in [sent mail body search](sent-body-search.md). On 2026-11-23 the owner
+approved part 1 as designed, including sent mail in the default search; `in:inbox`
+narrows to received mail. The legacy `label_ids:["SENT"]` listing stays for now, to be
+revisited separately.
 
 `search_emails` and `search_email_ids` return mail the caller sent through fumi as
 `sent_` IDs beside archived `mail_` IDs, newest first, in one page:
@@ -225,12 +226,9 @@ Known gaps:
   as its `sent_` record and as the archived `mail_` copy.
 - `read_email_thread` does not accept `sent_` IDs.
 
-Proposed, not implemented (part 2): search sent bodies in `search_mail_content` and
-`search_mail_semantic`. Bodies are only in `input.json`, so this needs a lexical index
-of sent bodies owned by the principal, kept apart from the shared archive index so no
-other principal's search reaches it, with the same `in:` operator in `filters` and
-citations that point at `/api/mail/sent_…/body`. It will be designed and reviewed in its
-own change.
+Part 2, searching the bodies of sent mail, was approved by the owner on 2026-11-24 and
+is not implemented yet: see [sent mail body search](sent-body-search.md). Until then
+`search_mail_content` and `search_mail_semantic` cover archived mail only.
 
 Search pages contain at most 50 records; batches contain at most ten messages; thread
 reads contain at most 20. Bodies of `mail_` and `sent_` messages inline at most 16,000
