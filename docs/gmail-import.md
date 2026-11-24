@@ -491,8 +491,8 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   extraction and a complete processing job. The count agrees with the 1,137 messages
   counted in the export before it was uploaded.
 - larva06online (`gmail-cdd6472a601c7ebf1388bfd2`, owner's go 2026-11-24 02:15 UTC;
-  held for the [speed-up](#import-speed) and started after it, with
-  `GMAIL_TAKEOUT_CONFIG` replaced at 05:35 UTC): the export came from the owner's
+  held for the [speed-up](#import-speed) (owner, 04:59 UTC); `GMAIL_TAKEOUT_CONFIG`
+  replaced at 05:35 UTC and run started about 05:36 UTC): the export came from the owner's
   computer, and the uploaded object's SHA-256 read back from R2 equals the extracted
   mbox's. The run is `complete` with no stop code, and `next_offset` equals
   `total_bytes`. The 5,407 entries have 5,407 distinct Gmail IDs (174,652,160 raw bytes,
