@@ -228,9 +228,9 @@ Known gaps:
 - `read_email_thread` does not accept `sent_` IDs.
 
 Part 2, searching the bodies of sent mail, was approved by the owner on 2026-11-24 and
-is implemented with synthetic tests: `search_mail_content` also searches the caller's
-own sent plain-text bodies and accepts `in:sent` and `in:inbox`; see
-[sent mail body search](sent-body-search.md). `search_mail_semantic` covers archived
+is implemented and verified in production on 2026-11-24: `search_mail_content` also
+searches the caller's own sent plain-text bodies and accepts `in:sent` and `in:inbox`;
+see [sent mail body search](sent-body-search.md). `search_mail_semantic` covers archived
 mail only.
 
 Search pages contain at most 50 records; batches contain at most ten messages; thread
