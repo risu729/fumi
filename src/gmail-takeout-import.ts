@@ -617,7 +617,15 @@ export async function ensureTakeoutWorkflow(
   const params = { runId: config.runId };
   await env.GMAIL_TAKEOUT.create({ id, params, locationHint: TAKEOUT_LOCATION_HINT }).catch(
     (error: unknown) => {
-      console.error(JSON.stringify({ event: "gmail_takeout_location_hint", status: "refused" }));
+      // Any failure retries without the hint, so the log says only that and the error's kind.
+      const name = error instanceof Error ? error.name : "unknown";
+      console.error(
+        JSON.stringify({
+          event: "gmail_takeout_create",
+          status: "retry_without_hint",
+          error: name,
+        }),
+      );
       return env.GMAIL_TAKEOUT.create({ id, params }).catch(() => {
         throw error;
       });
