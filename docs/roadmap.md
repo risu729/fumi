@@ -98,8 +98,9 @@ establish production delivery.
         ([import speed](gmail-import.md#import-speed), owner 2026-11-24 04:59 UTC): run
         the Workflow in APAC, cut the sequential calls per entry, measure on
         larva06online, then decide whether entries of one read run concurrently. Done:
-        about 0.6 s per entry instead of 5.5 s; no concurrency (owner, 2026-11-24 05:44
-        UTC).
+        about 1.06 s per entry over the whole larva06online run instead of 5.5 s; no
+        concurrency (owner, 2026-11-24 05:44 UTC, decided on the first 730 entries at
+        about 0.6 s).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
