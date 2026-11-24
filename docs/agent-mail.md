@@ -188,8 +188,9 @@ sent mail.
   `created_at` (when the send was requested, in UTC), and `has:attachment` any attached
   file, including a forward's original attachments. Text matching follows the rules
   above. Sent records have no display names.
-- **Pagination.** One token covers both sources. Each page reads at most
-  `max_results + 1` rows from each source after the token's position and merges them by
+- **Pagination.** One token covers both sources. Each page takes at most
+  `max_results + 1` results from each source after the token's position (archived mail
+  with a bounded walk, see [page cost](copy-grouping.md#page-cost)) and merges them by
   time, then public ID, both descending; archived mail is ordered by `received_at` and
   sent mail by `created_at` as an ISO string, so the order is total and a row is never
   returned twice. The token fixes the archive and copy group rowids and the rowid of the
