@@ -204,7 +204,7 @@ the kind index). Limits:
   carry a unary `+`: otherwise SQLite reads every source of that kind through the
   primary key and sorts it.
 
-Migration `0022` adds both indexes. It changes no table, so the running Worker reads the
+Migration `0023` adds both indexes. It changes no table, so the running Worker reads the
 same rows while the deploy job applies it, and its inserts maintain the indexes.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
