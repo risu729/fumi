@@ -1,8 +1,17 @@
 # Copies of one message
 
-Status: implemented (the grouping half of
-[ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Production
-acceptance is the 276 live/Gmail Message-ID pairs described in the ADR.
+Status: implemented and accepted in production (the grouping half of
+[ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Acceptance is the 276
+live/Gmail Message-ID pairs described in the ADR: with `identity-v2` all 276 collapse
+by default and expand to both copies.
+
+Production check of `identity-v2`, 2026-11-23 04:10 UTC, after the backfill indexed
+every original again: for `after:2026-11-07 before:2026-11-12`, the live side had 309
+results, the Gmail side 374 and both together 407, so all 276 live/Gmail groups
+collapsed. Every live result stayed its group's representative, and no ID repeated
+within a traversal. With `expand_copies: true` the same search returned 689 originals:
+the 683 live and Gmail results plus 6 copies of other source kinds that the collapse had
+hidden.
 
 Production check of `identity-v1`, 2026-11-23 01:00 UTC, after the backfill indexed
 all 5,947 originals with none blocked: for `after:2026-11-07 before:2026-11-12`, the
@@ -23,13 +32,16 @@ matches. Grouping instead compares a few header values that hops keep.
 
 `repairMailIdentity` runs in every scheduled invocation (every five minutes). It selects
 up to 200 present originals that have no `mail_identity` row of the current
-`identity_version`, newest catalog row first,
-so new mail is grouped within one interval and the backlog drains behind it. For each
-one it reads only the first 64 KiB of the original (the MIME header budget) with a
-ranged R2 read and writes one row. Rows are never updated; a row of an older
-`identity_version` is replaced by the backfill, and reads use only current rows. A read
-that throws (an R2 outage) writes nothing for that original, which stays pending for a
-later run without holding back the others; the run reports it as `deferred`.
+`identity_version`, newest catalog row first, among sources added since its last clean
+pass, and across the whole catalog at the
+[scan cadence](processing-workflows.md#scheduled-scan-cadence) (hourly, and at once
+after an `identity_version` change), so new mail is grouped within one interval and the
+backlog drains behind it. For each one it reads only the first 64 KiB of the original
+(the MIME header budget) with a ranged R2 read and writes one row. Rows are never
+updated; a row of an older `identity_version` is replaced by the backfill, and reads use
+only current rows. A read that throws (an R2 outage) writes nothing for that original,
+which stays pending for a later run without holding back the others; the run reports it
+as `deferred`.
 
 | Column | Value |
 | --- | --- |
@@ -126,9 +138,75 @@ within one page or call, drop a match whose group, part and text digest were alr
 shown. Later pages are not deduplicated. `coverage.duplicate_copies_omitted` counts
 the dropped matches, and `expand_copies: true` keeps them.
 
-Every collapsed page scans all originals that match its filters and sorts them twice,
-and the cursor applies after the collapse. That is bounded by the archive size, not by
-the page size.
+### Page cost
+
+Until 2026-11-23, every page of `search_emails` and `search_email_ids` collapsed all
+originals that matched its filters up to the snapshot, then applied the cursor, so even
+page 1 of an empty query read the whole archive. Each page now reads rows in proportion
+to the page size:
+
+1. A walk reads the next `4 × (max_results + 1)` matching originals after the token's
+   position, newest first, through the `archive_sources_search_order` index on
+   `(COALESCE(received_at,''), external_id)`, the page order. With `archive_source`
+   `gmail` or `email_routing`, it walks `archive_sources_search_kind_order` on
+   `(source_kind, COALESCE(received_at,''), external_id)` within that kind instead.
+   `after:`, `before:` and the token bound where the walk starts and stops in the index.
+2. A collapse runs the same SQL as before over only the walked originals and every
+   original whose `mail_identity` row has the `group_id` of a walked one, then keeps
+   representatives no older than the last walked original.
+3. When the walk filled its window but that yields `max_results` or fewer results, the
+   walk repeats with `32 × (max_results + 1)` originals, and after that one statement
+   collapses every matching original as before.
+
+The pages are the same as collapsing everything: a representative after the token is
+itself a matching original, so each one down to the last walked original was walked, and
+its whole group (every original with that identity `group_id`, a superset of the
+members whatever their identity version, status or snapshot) was collapsed with it. So
+its representative and `copies` are the same. `test/search-page-cost.test.ts` compares
+full traversals against the previous statement on random archives with groups across
+page boundaries, Gmail labels, `archive_source`, `in:` and `expand_copies`.
+
+Measured on 2026-11-23 at 02:00 UTC with the local D1 of the test runtime
+(`meta.rows_read` summed over every statement of a page, 20 results per page), over
+`archiveMessages(generator(1), n, …)` of `test/search-page-cost.test.ts` with 1,530 and
+3,100 messages, about 15% of them in groups of two to four copies:
+
+| Archive | Search | Page 1 before | Page 10 before | Page 1 after | Page 10 after |
+| --- | --- | --- | --- | --- | --- |
+| 1,996 originals | empty query | 24,374 | 23,896 | 1,757 | 1,720 |
+| 1,996 originals | `from:alpha` | 11,856 | 11,359 | 2,076 | 2,144 |
+| 1,996 originals | `in:inbox` | 17,457 | 17,018 | 2,251 | 2,065 |
+| 1,996 originals | `archive_source: gmail` | 17,266 | 16,733 | 1,840 | 1,759 |
+| 1,996 originals | `archive_source: email_routing` | 7,551 | 7,189 | 1,746 | 1,806 |
+| 4,011 originals | empty query | 49,035 | 48,557 | 1,757 | 1,720 |
+| 4,011 originals | `from:alpha` | 23,516 | 23,019 | 2,076 | 2,144 |
+| 4,011 originals | `in:inbox` | 35,107 | 34,668 | 2,251 | 2,065 |
+| 4,011 originals | `archive_source: gmail` | 34,245 | 33,712 | 1,840 | 1,759 |
+| 4,011 originals | `archive_source: email_routing` | 15,659 | 15,297 | 1,746 | 1,806 |
+
+The test asserts that pages 1 and 10 read exactly as many rows whether the older
+archive below them holds 1,500 or 3,000 more messages, and that every page of an
+`archive_source: email_routing` traversal reads as many rows whether a Gmail-only import
+below the live captures holds 1,500 or 3,000 messages. Walked through the page-order
+index alone, the last pages of that traversal read every older Gmail original (4,095
+and 8,018 rows on the last page with 3,000 and 6,000 older messages, against 151 through
+the kind index). Limits:
+
+- A filter that matches few originals (a rare `from:` or `in:sent`) still walks every
+  original between the token and enough matches, and the last page of a traversal walks
+  every older original; no index covers extracted metadata or Gmail labels.
+- A page whose walks reach mostly copies whose representative lies outside them (many
+  copies per group spread over time) falls back to collapsing everything.
+- The walk and the collapse are two statements, so a write that lands between them
+  (an extraction finishing) can be seen by one and not the other, like a write between
+  two pages.
+- The walk names its index with `INDEXED BY`, and the search clauses on `source_kind`
+  carry a unary `+`: otherwise SQLite reads every source of that kind through the
+  primary key and sorts it.
+
+Migration `0023` adds both indexes. It changes no table, so the running Worker reads the
+same rows while the deploy job applies it, and its inserts maintain the indexes. The
+owner approved both indexes and the `INDEXED BY` clauses on 2026-11-24.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
 rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a

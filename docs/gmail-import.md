@@ -92,11 +92,13 @@ The three-dispatch bound is independent of the declared 25-instance
 capacity after acknowledgment; archive progress is not a processing-start or
 search-completion measurement.
 
-Raw import supports originals up to 25 MiB, while the unchanged MIME input limit
-is 4 MiB. Larger originals remain archived with explicit blocked extraction and
-omitted search coverage; immediate dispatch does not make them searchable.
-Gmail internal date is a provider fact; it is not a claimed SMTP receipt date.
-There is no fabricated SMTP envelope or forwarding success for historical sources.
+The API transports hold a whole message in memory, so they accept originals up to 25
+MiB; the Takeout transport has no size limit (below). Imported mail has no common limit:
+Email Routing's 25 MiB applies only to live capture (owner, 2026-11-23 17:55 UTC). The
+unchanged MIME input limit is 4 MiB. Larger originals remain archived with explicit
+blocked extraction and omitted search coverage; immediate dispatch does not make them
+searchable. Gmail internal date is a provider fact; it is not a claimed SMTP receipt
+date. There is no fabricated SMTP envelope or forwarding success for historical sources.
 
 SHA-256 of the trusted namespace and provider message ID produces a deterministic
 UUID-shaped public Fumi identity. Gmail originals use the existing validated
@@ -146,7 +148,8 @@ new run; the runner never silently resets the traversal.
 
 ## Bounds and integration
 
-Raw MIME is bounded at 25 MiB, matching live capture. The transport incrementally
+The API transports bound raw MIME at 25 MiB, a memory bound of these transports, not
+an import limit. The transport incrementally
 decodes the base64 raw field into a bounded buffer, retains at most 32 KiB of JSON
 metadata, and applies a fifteen-second deadline to each attempt. With up to four
 attempts and 1, 2 and 4 second backoff between them, one request that keeps timing
@@ -234,8 +237,8 @@ read and the query plan. They do not establish production import coverage.
 
 ## Google Takeout transport
 
-Status: implemented and tested with synthetic mbox files; no Takeout run has been
-configured in production. It follows
+Status: implemented, tested with synthetic mbox files, and run in production for two
+accounts (see [production runs](#production-takeout-runs)). It follows
 [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md).
 
 An operator stores each account's Takeout mbox files in the private R2 bucket
@@ -268,42 +271,84 @@ behaviour:
   `takeout_import_failed`), so a broken run does not restart every five minutes. Only
   the instance the run last started can stop it; a step that timed out may still
   hold the lease, so every entry write is also fenced on the run still `running`.
-- [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The
-  stored raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels`
-  and Takeout's separator removed. A malformed or cut-off stream stops the run with
-  the splitter's fixed code and stream offset, once every entry split before the error
-  is processed. An `X-GM-THRID` or `X-Gmail-Labels` line may have at most 65,536 bytes
-  before its CRLF; a longer one stops with `takeout_header_limit`. Where the reads
-  split the stream never changes the entries, the code or the offset.
-- The splitter's memory is bounded. Between reads it keeps at most the raw limit plus
-  149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of
-  `From_` line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds
-  25 MiB + 149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates
-  the buffer at that size, so a normal run never grows it by copying; a buffer smaller
-  than one read (after short reads at the end of an object) doubles until a read needs
-  more, and is then replaced by one of that size. Each entry's raw bytes are a view of
-  the buffer, handled before the next read, so the splitter makes no copy of a
-  message; the R2 binding still copies the bytes it uploads, at most the raw limit,
-  outside the JavaScript heap during the put. A step holds about 41.0 MiB of Takeout
-  data in the JavaScript heap (the buffer and one read), and at most 49.0 MiB while a
-  small buffer is replaced, of the 128 MB the Worker shares with the rest of the
-  isolate. The buffer is released when the stream ends or fails.
-  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the raw limit
+- [`src/gmail-takeout-mbox.ts`](../src/gmail-takeout-mbox.ts) splits entries. The stored
+  raw bytes are the entry with the `From_` line, `X-GM-THRID`, `X-Gmail-Labels` and
+  Takeout's separator removed, and with one `>` removed from each line of one or more
+  `>` followed by `From` and a space (mboxrd escaping; the splitter returns the escaped
+  bytes and the import calls `unescapeMboxrd` per entry). A malformed or cut-off stream
+  stops the run with the splitter's fixed code and stream offset, once every entry split
+  before the error is processed. An `X-GM-THRID` or `X-Gmail-Labels` header may have at
+  most 65,536 bytes before its last CRLF, folds included; a longer one stops with
+  `takeout_header_limit`. Where the reads split the stream never changes the entries,
+  the code or the offset.
+- The format was measured on the main account's export of 2026-11-23 (40,598 entries and
+  4 over 25 MiB, 3,952,532,507 bytes), against the 4,810 messages the connector
+  had already stored for that account:
+  - Takeout folds a long `X-Gmail-Labels` onto lines that start with a space (159
+    entries). The splitter unfolds them: it removes the CRLF and keeps the space. A
+    valid message cannot start with a space or tab, so every line after the labels
+    that starts with one is read as a fold. An invalid message that does start with
+    one would lose that line to the labels, and stops only if the labels then fail a
+    check (UTF-8, the header limit or `takeout_labels_too_long`); this risk is
+    accepted with the owner's choice below.
+  - A message that ends in a bare LF gets only the separator CRLF (241 entries); a
+    message without a final line break gets a CRLF before the separator.
+  - No body line starts with `From` and a space; 291 lines start with `>From` and 12
+    with `>>From`, each followed by a space. All 44 stored messages with such lines
+    match their stored SHA-256 once one `>` is removed, so the export is mboxrd.
+  - 4,693 of the 4,810 stored messages have the same raw SHA-256 after splitting. 114
+    differ only by the CRLF Takeout added to a message without a final line break,
+    which cannot be told apart from a real one, so it is kept. 3 are 653 to 1,856
+    bytes larger in Takeout for reasons not yet known. Those 117 are `conflict`
+    entries below; the stored originals are kept.
+  - Every entry's Gmail ID agrees with its `From_` date (`checkIdDate` below). The
+    `From_` date is not Gmail's `internalDate`: for the 4,810 stored messages it is
+    later by up to a minute for most, by up to an hour for 227, by more for 27, and
+    earlier for 38.
+  - The owner chose to unfold labels, accept LF endings and remove mboxrd escaping,
+    and to keep the added CRLF (2026-11-23 02:36 UTC).
+- No entry is too large to import. The splitter returns an entry of at most 25 MiB
+  (the buffer limit, a memory bound) with its bytes, and a larger one as `large`: the
+  same fields with the stream offset and size of its message instead of the bytes. The
+  import reads a large message again from the Takeout objects in 8 MiB ranges, across
+  object boundaries, and removes the mboxrd escaping in a streaming pass that holds at
+  most six bytes between reads. A first pass computes the SHA-256 and size; a second
+  streams the bytes into one conditional R2 put with that length and SHA-256, which R2
+  checks, so bytes that changed between the passes are never stored. A large entry then
+  goes through the same `verified`, `conflict` and `imported` outcomes as any other.
+  Until this change (2026-11-23), an entry over 25 MiB was recorded as `oversize` and
+  not stored. No run had reached the 4 such entries in the main account's export
+  then, so its run imports them; a run that already recorded `oversize` entries needs a
+  new run to store them.
+- The splitter's memory is bounded. Between reads it keeps at most the buffer limit plus
+  149 bytes of unread stream (what a boundary check needs), or 131,206 bytes of `From_`
+  line and Gmail headers. With 8 MiB reads its buffer therefore never exceeds 25 MiB +
+  149 + 8 MiB = 34,603,157 bytes (33.0 MiB). The first full read allocates the buffer at
+  that size, so a normal run never grows it by copying; a buffer smaller than one read
+  (after short reads at the end of an object) doubles until a read needs more, and is
+  then replaced by one of that size. Each entry's raw bytes are a view of the buffer,
+  handled before the next read, so the splitter makes no copy of a message. The import
+  makes one unescaped copy, at most the buffer limit, only for an entry with an escaped
+  line, and drops it before the next entry; the R2 binding still copies the bytes it
+  uploads, at most the buffer limit, outside the JavaScript heap during the put. A large
+  entry adds one 8 MiB read and its unescaped copy while it is hashed or streamed. A
+  step holds about 41.0 MiB of Takeout data in the JavaScript heap (the buffer and one
+  read), at most 66.0 MiB while an unescaped copy exists, and at most 49.0 MiB while a
+  small buffer is replaced (no copy exists then), of the 128 MB the Worker shares with
+  the rest of the isolate. The buffer is released when the stream ends or fails.
+  `test/gmail-takeout-mbox.test.ts` checks the bound for an entry at the buffer limit
   that starts 1000 bytes before the end of a read.
 - With `checkIdDate` (the default), each entry's Gmail message ID must agree with its
   `From_` date: a Gmail ID's high bits (`id >> 20`) are the receipt time in
   milliseconds, and the `From_` date is that time cut to seconds, so the difference
   must be 0 to 999 ms. A mismatch stops the run with `takeout_id_date_mismatch`. This
   catches a message body that imitates a Takeout separator with a made-up ID.
-  - It does not stop a sender who writes a full separator with a consistent made-up
-    ID and date into a body line. That entry would import as an ordinary new message,
-    and the carrier message would be cut short. Whether this is possible depends on
-    whether Takeout escapes body lines that start with `From `. Gate 1 measures that
-    on the real export before any run is configured, and this risk is reported to
-    the owner with the result.
-  - Some genuine messages may break the rule, for example mail added through the
-    Gmail API or fetched by POP. Gate 1 also counts mismatches over the whole export.
-    A reviewed entry is passed with `skip` rather than by turning the check off.
+  - A sender cannot write a full separator into a body: Takeout escapes every body line
+    that starts with `From` and a space (above), so such a line never reaches the
+    boundary check unescaped.
+  - Some genuine messages could break the rule, for example mail added through the
+    Gmail API or fetched by POP. None did in the 2026-11-23 export. A reviewed entry
+    is passed with `skip` rather than by turning the check off.
 - The checkpoint `gmail_takeout_runs.next_offset` is the stream offset of the next
   unprocessed entry. It advances in the same D1 batch that records the entry in
   `gmail_takeout_items` with one outcome:
@@ -317,7 +362,8 @@ behaviour:
     run stops at that entry with `takeout_raw_conflict`. After review, the same run
     resumes with `onConflict: "record"`; a stopped run accepts a changed
     configuration only when its account and objects are unchanged.
-  - `oversize`: over the 25 MiB raw limit; not stored.
+  - `oversize`: no longer recorded; until 2026-11-23 an entry over 25 MiB got it and
+    was not stored. The value stays allowed in D1 for older rows.
   - `skipped`: its stream offset is in the configuration's `skip` list; not stored.
 - A stopped run resumes from its checkpoint when the configuration changes. Raise
   `attempt` after a transient failure. For a stop a split entry causes
@@ -348,6 +394,40 @@ separately: the raw SHA-256 and the entry offset identify the entry.
 Progress and outcomes are D1 rows. The run's `status`, `stop_code` and `stop_offset`,
 and the per-outcome counts and `from_date` range in `gmail_takeout_items`, are the
 evidence for the per-account verification in the ADR.
+
+### Production Takeout runs
+
+One row per account, checked with read-only queries on the production D1 catalog. The
+namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address.
+
+| Account | Run | Entries | Outcomes | `from_date` range (UTC) | Checked |
+| --- | --- | --- | --- | --- | --- |
+| momonga | `takeout-d592e62e-2026-11-22` | 379 (17,012,473 bytes, one object) | 379 `imported` | 2022-07-11 01:04:54 .. 2026-11-08 08:24:05 | 2026-11-23 18:12 UTC |
+| risu.minecraft | `takeout-32483026-2026-11-23` | 1,137 (15,440,548 bytes, one object) | 1,137 `imported` | 2022-06-14 18:29:43 .. 2026-11-22 20:41:01 | 2026-11-23 20:21 UTC |
+
+- momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
+  run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
+  entries have 379 distinct Gmail IDs; `gmail_messages` holds 379 rows for the
+  namespace (342 threads, imported 14:16:15..14:52:43 UTC, about 5.8 s per entry) and
+  `gmail_takeout_labels` 379. All 379 have a complete `mime-v1` extraction and a
+  complete processing job, so the one blocked extraction and one failed processing job
+  that mail health showed at 15:06 UTC are not from this run. The newest of each is one
+  live-capture source of 2026-11-18 (`input_too_large`, `workflow_failed`). The count
+  agrees with the 379 messages counted in the export before it was uploaded.
+- Production had no `fumi-gmail-takeout` Workflow before the momonga run. CI deploys a
+  version with `deploy-triggers: false`, which does not register a new Workflow, so it
+  was created through the Cloudflare API on 2026-11-23 before the momonga run started.
+- risu.minecraft (`gmail-3248302638620a7725a9706e`, run started about 2026-11-23 18:26
+  UTC after the owner's go at 18:22 UTC; `GMAIL_TAKEOUT_CONFIG` was replaced at about
+  18:23 UTC): the run is `complete` with no stop code, and
+  `next_offset` equals `total_bytes`. The 1,137 entries have 1,137 distinct Gmail IDs
+  (15,293,276 raw bytes, largest 224,012); `gmail_messages` holds 1,137 rows for the
+  namespace (1,047 threads, imported 18:26:17..20:10:11 UTC, about 5.5 s per entry) and
+  `gmail_takeout_labels` 1,137 for the run. All 1,137 have a complete `mime-v1`
+  extraction and a complete processing job. The count agrees with the 1,137 messages
+  counted in the export before it was uploaded.
+- The main account is not started; it waits for the owner's go (owner, 2026-11-23
+  18:22 UTC: risu.minecraft only).
 
 ## Primary references
 

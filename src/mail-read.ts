@@ -497,15 +497,17 @@ const D1_BOUND_PARAMETERS = 100;
 /**
  * The most parameters a caller binds besides the parsed filters. search_mail_semantic binds
  * the most: an item key, a policy hash, up to ten approved source raw keys, an archive source
- * and two per label for up to ten labels (33). search_emails binds at most 27 in its archive
- * statement (two snapshots, archive source, 20 for labels, three for the cursor, limit) and
- * 7 in its sent statement (principal, snapshot, four for the cursor, limit), and
- * search_mail_content 3.
+ * and two per label for up to ten labels (33). search_emails binds at most 32 in its archive
+ * collapse (two snapshots, archive source, 20 for labels, two key lists, three for the
+ * cursor, three for the walk's last row, limit), 28 in its archive walk (snapshot, archive
+ * source twice, 20 for labels, four for the cursor, limit) and 7 in its sent statement
+ * (principal, snapshot, four for the cursor, limit), and search_mail_content 3.
  */
 const CALLER_BOUND_PARAMETERS = 33;
 /**
  * Each filter binds at most two values: a from:, to: or subject: value with uppercase
- * non-ASCII, in the archive and the sent statement alike. in: binds none.
+ * non-ASCII, in the archive and the sent statement alike, and after: or before: in the
+ * archive walk, which also bounds the walk by it. in: binds none.
  */
 export const MAX_SEARCH_FILTERS = Math.floor((D1_BOUND_PARAMETERS - CALLER_BOUND_PARAMETERS) / 2);
 /**
@@ -570,7 +572,7 @@ function parseSearchFilters(query: string, mailbox: boolean): SearchFilter[] {
 const containsAny = (column: string, needles: string[]) =>
   `(${needles.map(() => `instr(${column},?)>0`).join(" OR ")})`;
 const gmailLabel = (label: "INBOX" | "SENT") =>
-  `(s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value='${label}'))`;
+  `(+s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value='${label}'))`;
 /** Clauses over archive_sources `s`, mail_extractions `e` and gmail_messages `g`. */
 function archiveFilterSql(filters: SearchFilter[]) {
   const clauses: string[] = [];
@@ -580,7 +582,7 @@ function archiveFilterSql(filters: SearchFilter[]) {
       // Live ingress is INBOX; imported Gmail keeps its provider label IDs.
       clauses.push(
         filter.label === "INBOX"
-          ? `(s.source_kind='email_routing' OR ${gmailLabel("INBOX")})`
+          ? `(+s.source_kind='email_routing' OR ${gmailLabel("INBOX")})`
           : gmailLabel("SENT"),
       );
     else if (filter.kind === "attachment") clauses.push("COALESCE(e.attachment_count,0)>0");
@@ -724,6 +726,118 @@ async function searchSentMail(
     unavailable: (unavailable!.results[0] as { count: number }).count,
   };
 }
+/** Walk sizes as multiples of limit + 1. Past the last, one statement collapses everything. */
+const WALK_WINDOWS = [4, 32];
+interface ArchivePage {
+  /** The index the walk follows: the page order, or the page order within one source kind. */
+  index: "archive_sources_search_order" | "archive_sources_search_kind_order";
+  /** Filters over `s`, `e` and `g`, and their values starting with the archive snapshot. */
+  where: string;
+  values: (string | number)[];
+  /** The walk's source kind and the bounds of the order key that the filters and the
+   * cursor imply. */
+  range: string[];
+  rangeValues: string[];
+  /** The cursor condition and its values; empty on the first page. */
+  after: string;
+  afterValues: string[];
+  groups: number;
+  expand: boolean;
+  limit: number;
+}
+interface WalkedRow {
+  time: string;
+  external_id: string;
+  raw_key: string;
+  group_id: string | null;
+}
+/**
+ * The archive rows of one search page: the first limit + 1 representatives (with expand,
+ * originals) after the cursor, newest first, as collapsedSql returns them over every
+ * matching original. Collapsing all of them reads the whole archive on every page, so
+ * this walks a window of matching originals newest first from the cursor through
+ * archive_sources_search_order (with an archive_source, archive_sources_search_kind_order
+ * within that kind), then collapses only the walked originals and every
+ * original that shares an identity group_id with one, and keeps results no older than
+ * the last walked original.
+ *
+ * The result is the same. A representative after the cursor is itself a matching
+ * original, so each one at or above the last walked original was walked. A copy group
+ * with a walked member is complete in the collapse: it is either that original alone or
+ * the group_id of its identity row, and the group_id lookup ignores version, status and
+ * snapshot, so it finds a superset of the members. Its representative and `copies` are
+ * therefore the same as over the whole archive. A walk that did not fill its window
+ * reached every matching original after the cursor, so no lower bound applies. When a
+ * full window yields too few results, a larger one runs.
+ */
+async function archivePage(env: MailReadEnvironment, page: ArchivePage): Promise<MailRow[]> {
+  const collapse = async (walked: WalkedRow[] | null, last: WalkedRow | null) =>
+    (
+      await env.MAIL_CATALOG.prepare(
+        collapsedSql(
+          walked
+            ? `${page.where} AND s.raw_key IN (SELECT value FROM json_each(?)
+    UNION SELECT raw_key FROM mail_identity WHERE group_id IN (SELECT value FROM json_each(?)))`
+            : page.where,
+          NEWEST_FIRST,
+          page.expand,
+          {
+            after: [
+              page.after,
+              last
+                ? "(COALESCE(s.received_at,'') > ? OR (COALESCE(s.received_at,'') = ? AND s.external_id >= ?))"
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" AND "),
+          },
+        ),
+      )
+        .bind(
+          page.groups,
+          ...page.values,
+          ...(walked
+            ? [
+                JSON.stringify(walked.map((row) => row.raw_key)),
+                JSON.stringify([
+                  ...new Set(
+                    walked.flatMap((row) => (row.group_id === null ? [] : [row.group_id])),
+                  ),
+                ]),
+              ]
+            : []),
+          ...page.afterValues,
+          ...(last ? [last.time, last.time, last.external_id] : []),
+          page.limit + 1,
+        )
+        .all<MailRow>()
+    ).results;
+  const walk = async (window: number) =>
+    (
+      await env.MAIL_CATALOG.prepare(
+        // Without INDEXED BY, a source_kind filter (archive_source, label_ids, in:inbox)
+        // makes SQLite read every source of that kind through the primary key and sort.
+        `SELECT COALESCE(s.received_at,'') AS time,s.external_id,s.raw_key,i.group_id
+         FROM archive_sources s INDEXED BY ${page.index} ${MAIL_JOINS}
+         LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
+         WHERE ${[page.where, ...page.range, ...(page.after ? [page.after] : [])].join(" AND ")}
+         ORDER BY ${NEWEST_FIRST} LIMIT ?`,
+      )
+        .bind(...page.values, ...page.rangeValues, ...page.afterValues, window)
+        .all<WalkedRow>()
+    ).results;
+  for (const factor of WALK_WINDOWS) {
+    const window = factor * (page.limit + 1);
+    // oxlint-disable-next-line no-await-in-loop -- A larger walk runs only when the last fell short.
+    const walked = await walk(window);
+    if (!walked.length) return [];
+    const last = walked.length === window ? walked.at(-1)! : null;
+    // oxlint-disable-next-line no-await-in-loop -- See the walk above.
+    const rows = await collapse(walked, last);
+    if (!last || rows.length > page.limit) return rows;
+  }
+  return collapse(null, null);
+}
 /** Descending by time, then by public ID; the SQL order of each source agrees with it. */
 function newerFirst(a: { time: string; id: string }, b: { time: string; id: string }) {
   if (a.time !== b.time) return a.time < b.time ? 1 : -1;
@@ -767,33 +881,62 @@ export async function searchMail(
       // rowid: it moves only with this principal's own sends, never with other principals'.
       .bind(principal.id)
       .first<{ snapshot: number; groups: number; sent: number }>())!;
+  // The unary `+` on source_kind here and in archiveFilterSql keeps SQLite from reading
+  // every source of the kind through the primary key instead of the page's own originals.
   const clauses = ["s.rowid<=?", ...parsed.clauses];
-  const values: (string | number)[] = [snapshots.groups, snapshots.snapshot, ...parsed.values];
+  const values: (string | number)[] = [snapshots.snapshot, ...parsed.values];
   if (source !== "all") {
-    clauses.push("s.source_kind=?");
+    clauses.push("+s.source_kind=?");
     values.push(source);
   }
   for (const label of labels) {
     clauses.push(
-      "((s.source_kind='email_routing' AND ?='INBOX') OR (s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value=?)))",
+      "((+s.source_kind='email_routing' AND ?='INBOX') OR (+s.source_kind='gmail' AND EXISTS(SELECT 1 FROM json_each(COALESCE(g.label_ids_json,'[]')) WHERE value=?)))",
     );
     values.push(label, label);
   }
-  // The cursor follows representatives, so it applies after the copies collapse.
-  const after = cursor
-    ? "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND 'mail_'||s.external_id < ?))"
-    : "";
-  if (cursor) values.push(cursor.beforeTime, cursor.beforeTime, cursor.beforeId);
+  // Bounds of the page order that the filters and the cursor imply, so the walk starts
+  // and stops in the index: received_at >= v (or < v) implies the same of the order key.
+  const range: string[] = [];
+  const rangeValues: string[] = [];
+  for (const filter of filters)
+    if (filter.kind === "date") {
+      range.push(`COALESCE(s.received_at,'') ${filter.operator === "after" ? ">=" : "<"} ?`);
+      rangeValues.push(`${filter.value}T00:00:00.000Z`);
+    }
+  if (cursor) {
+    range.push("COALESCE(s.received_at,'')<=?");
+    rangeValues.push(cursor.beforeTime);
+  }
+  // An archive_source walks the order within its kind, so a search of live captures
+  // never reads the Gmail copies around and below them.
+  if (source !== "all") {
+    range.unshift("s.source_kind=?");
+    rangeValues.unshift(source);
+  }
   const [archived, sent] = await Promise.all([
-    env.MAIL_CATALOG.prepare(collapsedSql(clauses.join(" AND "), NEWEST_FIRST, expand, { after }))
-      .bind(...values, limit + 1)
-      .all<MailRow>(),
+    archivePage(env, {
+      index:
+        source === "all" ? "archive_sources_search_order" : "archive_sources_search_kind_order",
+      where: clauses.join(" AND "),
+      values,
+      range,
+      rangeValues,
+      // The cursor follows representatives, so it applies after the copies collapse.
+      after: cursor
+        ? "(COALESCE(s.received_at,'') < ? OR (COALESCE(s.received_at,'') = ? AND 'mail_'||s.external_id < ?))"
+        : "",
+      afterValues: cursor ? [cursor.beforeTime, cursor.beforeTime, cursor.beforeId] : [],
+      groups: snapshots.groups,
+      expand,
+      limit,
+    }),
     sentFilters ? searchSentMail(env, principal, sentFilters, snapshots.sent, cursor, limit) : null,
   ]);
   // Each source returns at most limit + 1 rows after the cursor in the same order, so
   // the first limit rows of their merge are the page and the next row proves more.
   const merged = [
-    ...archived.results.map((row) => ({
+    ...archived.map((row) => ({
       time: row.received_at ?? "",
       id: inboundMessageId(row.external_id),
       archived: row,

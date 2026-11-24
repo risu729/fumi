@@ -21,6 +21,21 @@ Cloudflare acceptance, not Gmail inbox placement. An exception does not establis
 that SMTP will retry. If either operation is interrupted, inspect both outcomes
 before recovery; never blindly forward every archived message again.
 
+A failed forward of a stored original does not fail the email event (owner decision,
+2026-11-23 17:53 UTC: Gmail forwarding is optional and the copy in fumi is enough,
+"gmailへの転送は必須じゃないので、fumiにあればいいよ"). The handler returns normally, so
+Email Routing accepts the message and the sender does not retry; the receipt and the log
+keep the failure and its [reason](#forward-failure-reasons), and
+[health](archive-health.md#failed-forwards-and-retry-recovery) lists it. This includes
+`invalid_target`: a missing or unsafe `FORWARD_TO` no longer makes senders retry while
+the configuration is fixed. The handler still throws "Forwarding did not complete" when
+the forward failed and either the original or its receipt was not stored, so the
+sender's retry is the recovery path and the failure is not left without a record.
+Evidence: from 2026-11-22 13:24 UTC one message whose sender passes DMARC only through
+SPF under `p=reject` failed every forward (Email Routing rewrites the envelope sender,
+so it then fails DMARC at Gmail), and its sender retried every three hours, adding an
+archived copy each time.
+
 ### Forward failure reasons
 
 Status (2026-11-22 07:46 UTC): implemented for
@@ -168,15 +183,17 @@ applies pending catalog migrations, and skips a commit that is no longer the mai
 ([ADR 0002](adr/0002-continuous-deployment.md)). The SHA-pinned shared deploy action
 validates that exact build, uploads a version, activates it, and verifies the returned
 deployment and active version at 100 percent traffic. It preserves existing secrets and
-leaves trigger synchronization disabled. See
+then synchronizes the configured Cron, Workflows, queue consumer and `fumi.takuk.me`
+Custom Domain (ADR 0002, amended 2026-11-23). See
 [repository conventions](repository-conventions.md) for the comparison with other
 repositories.
 
 `mise run deploy:bootstrap` retains the full `cf deploy --no-provision` path for
-explicit initial setup or maintenance. Routine production publishing uses the
-workflow's versions strategy and its deployment readback. Deploying code does
-not certify that Email Routing, Gmail delivery or archival succeeded; record
-their acceptance separately.
+explicit initial setup or maintenance. Routine production publishing uses the workflow's
+versions strategy, its deployment readback and trigger synchronization. The
+configuration declares no Email Routing rules, so deployment never changes them.
+Deploying code does not certify that Email Routing, Gmail delivery or archival
+succeeded; record their acceptance separately.
 
 ## Migrating the remaining routes
 

@@ -58,13 +58,15 @@ archive gaps from Gmail, and Gmail inbox management are out of scope.
       the initial keep-all behavior.
 - [x] Complete and record staged production acceptance for selected routes.
 - [ ] Extend capture to remaining routes after checking specialist compatibility.
-- [x] Capture mail delivered directly to Gmail: Gmail forwards every incoming message
-      to fumi, which never forwards it back and drops the copies it already holds
+- [x] Capture mail delivered directly to Gmail: Gmail forwards every incoming message to
+      fumi, which never forwards it back and drops the copies it already holds
       ([#161](https://github.com/risu729/fumi/issues/161),
       [ADR 0005](adr/0005-capture-mail-delivered-directly-to-gmail.md)). See
-      [mail delivered directly to Gmail](gmail-relay.md). Synthetic tests only.
-- [ ] Turn on Gmail forwarding to fumi and record its acceptance; see the
-      [operator steps](gmail-relay.md#operator-steps).
+      [mail delivered directly to Gmail](gmail-relay.md). Accepted in production
+      (below).
+- [x] Turn on Gmail forwarding to fumi and record its acceptance. Accepted in
+      production on 2026-11-23 02:15 UTC; see
+      [mail delivered directly to Gmail](gmail-relay.md).
 
 See the [ingress implementation and runbook](ingress.md). Private route inventory,
 rollback snapshots and real-message acceptance evidence stay outside this public repo.
@@ -82,10 +84,19 @@ establish production delivery.
 - [ ] Complete and independently verify the historical scope from Google Takeout
       per account, and group copies of one message across accounts and live capture
       ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)). Grouping is
-      implemented ([copies of one message](copy-grouping.md)); its production check of
-      the 276 live/Gmail pairs is pending. The connector
+      implemented ([copies of one message](copy-grouping.md)); its production check
+      passed on 2026-11-23, with all 276 live/Gmail pairs collapsed. The connector
       transport committed 4,810 messages (internal dates 2026-08-24..2026-11-11)
-      before it stopped on 2026-11-12. No Gmail writes are supported.
+      before it stopped on 2026-11-12. No Gmail writes are supported. Per account
+      ([production runs](gmail-import.md#production-takeout-runs)): momonga is done
+      and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23);
+      risu.minecraft is done and verified (1,137 of 1,137 imported,
+      2022-06-14..2026-11-22, 2026-11-23); the main account waits for the owner's go
+      (2026-11-23 18:22 UTC).
+- [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
+      which grows with the Takeout import (owner request, 2026-11-23). Full repair
+      passes run hourly and runs in between read only new sources and due retries. See
+      [scheduled scan cadence](processing-workflows.md#scheduled-scan-cadence).
 - [ ] On hold (owner, 2026-11-17 17:44 UTC): keep importing Gmail SENT mail after the
       historical cutoff. Do not implement until the owner picks the design. The owner
       sends by hand from Gmail through Cloudflare Email Sending SMTP. Those messages do

@@ -51,7 +51,10 @@ attachment text; a `text/plain` attachment that is not UTF-8 is only omitted), b
 reading the same object again gives the same answer. D1 and R2 request failures still
 use the step retries.
 
-The scheduled repair indexes at most three extracted messages per invocation. It selects
+The scheduled repair indexes at most three extracted messages per invocation. Between
+full passes at the [scan cadence](processing-workflows.md#scheduled-scan-cadence) it
+reads only projection retries that are due and messages whose projection a trigger
+removed (`mail_search_pending`). It selects
 present Email Routing sources before historical Gmail sources, then uses remaining
 capacity for backfill. Retry delays still apply within both groups. Each invocation
 reports `indexed`, the messages whose projection it published, and `deferred`, the

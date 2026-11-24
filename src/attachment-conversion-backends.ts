@@ -6,6 +6,7 @@ import {
   redactCandidates,
 } from "./attachment-conversion-io.ts";
 import { unlockZip } from "./attachment-conversion-zip.ts";
+import zipPackage from "@zip.js/zip.js/package.json" with { type: "json" };
 
 /** Actual Workers AI / AI Search instance binding methods, deliberately no configuration mutations. */
 export interface ManagedDocuments {
@@ -210,7 +211,7 @@ export async function convertZip(
       : new TextEncoder().encode(JSON.stringify({ members: provenance, searchable_text: false })),
     representation: decoded ? "local_zip_text" : "local_zip_manifest",
     provenance: {
-      service: "zip.js-2.24.0",
+      service: `zip.js-${zipPackage.version}`,
       members: provenance,
       recursive: false,
       original_sha256: await digest(bytes),

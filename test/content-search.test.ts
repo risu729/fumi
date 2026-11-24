@@ -9,6 +9,7 @@ import {
 } from "../src/content-search.ts";
 import { dispatchMailTool } from "../src/mcp.ts";
 import { MAX_SEARCH_FILTERS, readMailResource } from "../src/mail-read.ts";
+import { FULL_SCAN_INTERVAL } from "../src/scan-schedule.ts";
 import type { MailPrincipal } from "../src/principal.ts";
 
 const reader: MailPrincipal = { id: "synthetic-reader", scopes: ["mail:read"], fromAddresses: [] };
@@ -267,6 +268,66 @@ describe("bounded content retrieval", () => {
     expect(JSON.parse(coverage!.coverage_json)).toMatchObject({
       omitted: ["html_only_body", "part_0:conversion_not_enabled_or_pending"],
     });
+  });
+  it("reads only due retries between full scheduled passes", async () => {
+    await env.MAIL_CATALOG.exec(
+      "DELETE FROM catalog_scans; DELETE FROM mail_search_documents; DELETE FROM mail_search_pending;",
+    );
+    const broken = await insert("scheduled-broken", "scheduled retry needle");
+    await env.MAIL_ARCHIVE.delete(broken.body_text_key!);
+    expect(await repairContentSearch(env, 100, true)).toEqual({ indexed: 0, deferred: 1 });
+    // A source the Workflow never indexed waits for the next full pass.
+    const missed = await insert("scheduled-missed", "scheduled missed needle");
+    expect(await repairContentSearch(env, 101, true)).toEqual({ indexed: 0, deferred: 0 });
+    await object("scheduled retry needle");
+    expect(await repairContentSearch(env, 300100, true)).toEqual({ indexed: 1, deferred: 0 });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT raw_key FROM mail_search_documents WHERE raw_key=?")
+        .bind(missed.raw_key)
+        .first(),
+    ).toBeNull();
+    expect(await repairContentSearch(env, 100 + FULL_SCAN_INTERVAL, true)).toEqual({
+      indexed: 1,
+      deferred: 0,
+    });
+    expect(
+      (await searchMailContent(env, reader, { query: "scheduled" }, base)).matches,
+    ).toHaveLength(2);
+    // An attachment conversion or extraction change removes a projection through its
+    // trigger; the next run indexes that message again without a full pass.
+    await env.MAIL_CATALOG.prepare("DELETE FROM mail_search_documents WHERE raw_key=?")
+      .bind(missed.raw_key)
+      .run();
+    expect(await repairContentSearch(env, 200 + FULL_SCAN_INTERVAL, true)).toEqual({
+      indexed: 1,
+      deferred: 0,
+    });
+    expect(
+      await env.MAIL_CATALOG.prepare("SELECT COUNT(*) AS count FROM mail_search_pending").first(
+        "count",
+      ),
+    ).toBe(0);
+  });
+  it("closes a full pass while recorded retries stay due", async () => {
+    await env.MAIL_CATALOG.exec(
+      "DELETE FROM catalog_scans; DELETE FROM mail_search_documents; DELETE FROM mail_search_pending;",
+    );
+    for (const id of ["retry-a", "retry-b", "retry-c"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Synthetic rows in order.
+      const row = await insert(id, `${id} text`);
+      // oxlint-disable-next-line no-await-in-loop -- Remove the derivative to force a retry.
+      await env.MAIL_ARCHIVE.delete(row.body_text_key!);
+    }
+    expect(await repairContentSearch(env, 100, true)).toEqual({ indexed: 0, deferred: 3 });
+    const state = () =>
+      env.MAIL_CATALOG.prepare(
+        "SELECT next_full_at FROM catalog_scans WHERE name='content_search'",
+      ).first("next_full_at");
+    expect(await state()).toBeNull();
+    expect(await repairContentSearch(env, 101, true)).toEqual({ indexed: 0, deferred: 0 });
+    expect(await state()).toBe(101 + FULL_SCAN_INTERVAL);
+    // The cheap pass still retries them when due.
+    expect(await repairContentSearch(env, 300100, true)).toEqual({ indexed: 0, deferred: 3 });
   });
   it("retries corrupt or missing derivatives without publishing partial results or starving work", async () => {
     const broken = await insert("a-broken", "private missing content");

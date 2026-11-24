@@ -13,7 +13,8 @@ import {
 } from "../src/gmail-takeout-import.ts";
 import { parseGmailProvenance } from "../src/gmail-provenance.ts";
 import { reconcileArchive } from "../src/reconcile.ts";
-import { GMAIL_IMPORT_RAW_LIMIT, GmailImportError } from "../src/gmail-transport.ts";
+import { GmailImportError } from "../src/gmail-transport.ts";
+import { TAKEOUT_BUFFER_BYTES } from "../src/gmail-takeout-mbox.ts";
 import { takeoutStepError } from "../src/gmail-takeout-workflow.ts";
 
 const workflow = {
@@ -29,6 +30,8 @@ const env = { ...runtimeEnv, MAIL_PROCESSING: workflow };
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const namespace = "synthetic-takeout";
+const hex = (bytes: ArrayBuffer) =>
+  Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 
 // Synthetic entries only; the From_ dates are real weekdays.
 const message = (n: number, body = `Body ${n}.`) =>
@@ -192,6 +195,25 @@ describe("Google Takeout import", () => {
     );
   });
 
+  it("stores a message with mboxrd-escaped From lines unescaped", async () => {
+    const escaped = entry(0, ">From the start\r\n>>From a quote");
+    const objects = await upload(escaped + entry(1), ["a/escaped.mbox"]);
+    expect(await drain(config("escaped", objects))).toMatchObject({ status: "complete" });
+    const key = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_key FROM gmail_takeout_items WHERE run_id='escaped' AND entry_offset=0",
+    ).first<string>("raw_key");
+    const stored = await (await env.MAIL_ARCHIVE.get(key!))!.arrayBuffer();
+    expect(decoder.decode(stored)).toBe(message(0, "From the start\r\n>From a quote"));
+    const sha = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_sha256,raw_size FROM gmail_takeout_items WHERE run_id='escaped' AND entry_offset=0",
+    ).first<{ raw_sha256: string; raw_size: number }>();
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", stored));
+    expect(sha).toEqual({
+      raw_sha256: Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join(""),
+      raw_size: stored.byteLength,
+    });
+  });
+
   it("stops at a changed copy of an existing message, then records it when told to", async () => {
     const first = await upload(mbox(3), ["a/first.mbox"]);
     await drain(config("first", first));
@@ -294,21 +316,65 @@ describe("Google Takeout import", () => {
     expect((await env.MAIL_ARCHIVE.list()).objects).toEqual([]);
   });
 
-  it("records an entry over the raw limit as oversize without storing it", async () => {
-    const big = entry(0) + entry(1, "x".repeat(GMAIL_IMPORT_RAW_LIMIT)) + entry(2);
+  it("streams an entry over the buffer limit into the archive with exact bytes", async () => {
+    // Escaped as Takeout writes it; the original lines start "From " and ">From ".
+    const escaped = `>From a\r\n${"x".repeat(TAKEOUT_BUFFER_BYTES)}\r\n>>From b`;
+    const original = encoder.encode(message(1, escaped.replace(/^>(>*From )/gm, "$1")));
+    const big = entry(0) + entry(1, escaped) + entry(2);
+    // Two objects, so the large entry is read across the object boundary.
     const objects = await upload(big, ["a/big-1.mbox", "a/big-2.mbox"]);
     expect(await drain(config("big", objects))).toMatchObject({ status: "complete" });
-    expect(await outcomes("big")).toEqual({ imported: 2, oversize: 1 });
+    expect(await outcomes("big")).toEqual({ imported: 3 });
+    const digest = hex(await crypto.subtle.digest("SHA-256", original));
+    const row = await env.MAIL_CATALOG.prepare(
+      "SELECT raw_key,raw_size,raw_sha256 FROM gmail_takeout_items WHERE run_id='big' AND message_id=?",
+    )
+      .bind(gmailId(1).toString(16))
+      .first<{ raw_key: string; raw_size: number; raw_sha256: string }>();
+    expect(row).toMatchObject({ raw_size: original.byteLength, raw_sha256: digest });
+    const stored = await env.MAIL_ARCHIVE.get(row!.raw_key);
+    expect(stored?.size).toBe(original.byteLength);
+    expect(stored?.customMetadata?.["sha256"]).toBe(digest);
+    expect(hex(await crypto.subtle.digest("SHA-256", await stored!.arrayBuffer()))).toBe(digest);
+    const receipt = parseGmailProvenance(
+      await (await env.MAIL_ARCHIVE.get(row!.raw_key.replace(/raw\.eml$/, "receipt.json")))!.json(),
+    );
+    expect(receipt).toMatchObject({ rawSize: original.byteLength, rawSha256: digest });
     expect(
       await env.MAIL_CATALOG.prepare(
-        "SELECT raw_size > ? AS over FROM gmail_takeout_items WHERE outcome='oversize'",
+        "SELECT raw_size,raw_sha256 FROM archive_sources WHERE raw_key=?",
       )
-        .bind(GMAIL_IMPORT_RAW_LIMIT)
-        .first("over"),
-    ).toBe(1);
-    const stored = (await env.MAIL_ARCHIVE.list({ prefix: "ingest/" })).objects;
-    expect(stored.filter((object) => object.key.endsWith("/raw.eml"))).toHaveLength(2);
-  }, 30_000);
+        .bind(row!.raw_key)
+        .first(),
+    ).toEqual({ raw_size: original.byteLength, raw_sha256: digest });
+
+    // A second export of the same mailbox verifies the stored original, large one included.
+    expect(await drain(config("big-again", objects))).toMatchObject({ status: "complete" });
+    expect(await outcomes("big-again")).toEqual({ verified: 3 });
+  }, 60_000);
+
+  it("stores nothing and reports the read error when a large entry's object fails mid-stream", async () => {
+    const big = entry(0, "x".repeat(TAKEOUT_BUFFER_BYTES + 1));
+    const objects = await upload(big, ["a/fail-1.mbox", "a/fail-2.mbox"]);
+    const run = config("fail", objects);
+    await startTakeoutRun(env.MAIL_CATALOG, run);
+    // The splitter's read and the hash pass succeed; the put pass loses the second object.
+    const get = env.TAKEOUT_ARCHIVE.get.bind(env.TAKEOUT_ARCHIVE);
+    let reads = 0;
+    vi.spyOn(env.TAKEOUT_ARCHIVE, "get").mockImplementation(((
+      key: string,
+      options?: R2GetOptions,
+    ) =>
+      key === "a/fail-2.mbox" && ++reads > 2
+        ? Promise.resolve(null)
+        : get(key, options)) as typeof get);
+    await expect(runTakeoutChunk(env, run)).rejects.toThrow("takeout_object_missing");
+    vi.restoreAllMocks();
+    expect((await env.MAIL_ARCHIVE.list({ prefix: "ingest/" })).objects).toEqual([]);
+    // The checkpoint did not move, so the next chunk stores the entry.
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    expect(await outcomes("fail")).toEqual({ imported: 1 });
+  }, 60_000);
 
   it("records an entry stored just before a lost commit as imported, not verified", async () => {
     const objects = await upload(mbox(2), ["a/crash.mbox"]);

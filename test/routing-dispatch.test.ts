@@ -25,6 +25,7 @@ import {
   routingOperationId,
 } from "../src/routing-dispatch.ts";
 import type { RoutingDispatchRuntime } from "../src/routing-dispatch.ts";
+import { FULL_SCAN_INTERVAL } from "../src/scan-schedule.ts";
 
 type Artifact = DispatchConfiguration["artifact"];
 type Request = PluginOfferRequest & {
@@ -568,6 +569,35 @@ describe("durable routing dispatch in workerd", () => {
     await repairRoutingDispatch(env, run);
     expect(destination.requests).toHaveLength(1);
     expect((await rows())[0]?.state).toBe("handled");
+  });
+  it("reads only due jobs between full scheduled passes", async () => {
+    await env.MAIL_CATALOG.prepare("DELETE FROM catalog_scans").run();
+    const config = artifact();
+    await configure(config);
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    const scheduled = () => repairRoutingDispatch(env, run, undefined, true);
+    const first = await source(1);
+    expect((await scheduled()).processed).toBe(1);
+    // A source the MIME Workflow did not dispatch waits for the next full pass.
+    await source(2);
+    expect((await scheduled()).processed).toBe(0);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE routing_dispatch_jobs SET state='waiting',next_attempt_at=? WHERE raw_key=?",
+    )
+      .bind(clock, first.rawKey)
+      .run();
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(1);
+    clock += FULL_SCAN_INTERVAL;
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(2);
+    await source(3);
+    config.revision = 2;
+    await configure(config);
+    // A new configuration revision makes the next pass full.
+    expect((await scheduled()).processed).toBe(3);
+    expect(destination.requests).toHaveLength(3);
   });
   it("an unrelated OTP owner's not_applicable result falls through to ordinary routing", async () => {
     await configure(await withOwner(artifact()));
@@ -1465,6 +1495,27 @@ describe("durable routing dispatch in workerd", () => {
     expect(await activateRoutingDispatch(env)).toBe("active");
     await repairRoutingDispatch(env, run);
     expect(destination.requests).toHaveLength(1);
+  });
+  it("makes the first scheduled pass after a drain full", async () => {
+    await env.MAIL_CATALOG.prepare("DELETE FROM catalog_scans").run();
+    await configure(artifact());
+    const destination = service();
+    const run = runtime({ "active-a": destination.binding });
+    const scheduled = () => repairRoutingDispatch(env, run, undefined, true);
+    expect((await scheduled()).processed).toBe(0);
+    await drainRoutingDispatch(env.MAIL_CATALOG);
+    await source();
+    expect((await scheduled()).status).toBe("paused");
+    expect(await activateRoutingDispatch(env)).toBe("active");
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(1);
+    // A pause between two Cron runs that only the Workflow hook saw.
+    await drainRoutingDispatch(env.MAIL_CATALOG);
+    const missed = await source(2);
+    expect((await dispatchRoutingSource(env, missed.rawKey, run)).status).toBe("paused");
+    expect(await activateRoutingDispatch(env)).toBe("active");
+    expect((await scheduled()).processed).toBe(1);
+    expect(destination.requests).toHaveLength(2);
   });
   it("only one concurrent administrative receipt can resolve an uncertain operation", async () => {
     await configure(artifact());

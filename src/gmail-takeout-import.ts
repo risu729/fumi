@@ -7,7 +7,7 @@
 
 import * as v from "valibot";
 import { requestProcessing, type ProcessingParams } from "./processing-jobs.ts";
-import { gmailIngestId, storeGmailSource } from "./gmail-import.ts";
+import { gmailIngestId, storeGmailSource, type GmailRawStream } from "./gmail-import.ts";
 import {
   gmailNamespace,
   parseGmailProvenance,
@@ -15,12 +15,15 @@ import {
   takeoutObjectKey,
 } from "./gmail-provenance.ts";
 import { MAX_RECEIPT_BYTES } from "./reconcile.ts";
-import { GMAIL_IMPORT_RAW_LIMIT, GmailImportError } from "./gmail-transport.ts";
+import { GmailImportError } from "./gmail-transport.ts";
 import {
+  MboxrdUnescaper,
   TAKEOUT_READ_BYTES,
   TakeoutMboxError,
   TakeoutMboxSplitter,
   type TakeoutItem,
+  type TakeoutLarge,
+  unescapeMboxrd,
 } from "./gmail-takeout-mbox.ts";
 
 declare global {
@@ -166,11 +169,16 @@ export async function startTakeoutRun(db: D1Database, config: TakeoutConfig): Pr
   return row;
 }
 
-/** Reads the configured objects from `offset` as one stream, in bounded ranged reads. */
-async function* readStream(bucket: R2Bucket, config: TakeoutConfig, offset: number) {
+/** Reads the stream from `offset` to `until` (default: its end) in ranged reads. */
+async function* readStream(
+  bucket: R2Bucket,
+  config: TakeoutConfig,
+  offset: number,
+  until = totalBytes(config),
+) {
   let start = 0;
   for (const object of config.objects) {
-    const end = start + object.size;
+    const end = Math.min(start + object.size, until);
     for (let position = Math.max(offset, start); position < end;) {
       const length = Math.min(TAKEOUT_READ_BYTES, end - position);
       // oxlint-disable-next-line no-await-in-loop -- One bounded range in memory at a time.
@@ -182,8 +190,40 @@ async function* readStream(bucket: R2Bucket, config: TakeoutConfig, offset: numb
       position += length;
       yield { bytes, last: position === totalBytes(config) };
     }
-    start = end;
+    start += object.size;
+    if (start >= until) return;
   }
+}
+
+/**
+ * A message too large to buffer, read from the archive and unescaped in chunks. Each
+ * call of `chunks` reads the object again, so a pass holds one read at a time.
+ */
+function largeRaw(bucket: R2Bucket, config: TakeoutConfig, item: TakeoutLarge) {
+  return async function* () {
+    const unescaper = new MboxrdUnescaper();
+    for await (const { bytes } of readStream(
+      bucket,
+      config,
+      item.rawOffset,
+      item.rawOffset + item.size,
+    ))
+      yield unescaper.push(bytes);
+    yield unescaper.end();
+  };
+}
+
+/** The original's SHA-256 and size: one hashing pass over a streamed message. */
+async function digestChunks(chunks: () => AsyncIterable<Uint8Array>) {
+  const digest = new crypto.DigestStream("SHA-256");
+  const writer = digest.getWriter();
+  let size = 0;
+  for await (const chunk of chunks()) {
+    size += chunk.byteLength;
+    await writer.write(chunk);
+  }
+  await writer.close();
+  return { rawSha256: hex(await digest.digest), size };
 }
 
 function objectAt(config: TakeoutConfig, offset: number): string {
@@ -195,7 +235,7 @@ function objectAt(config: TakeoutConfig, offset: number): string {
   throw new GmailImportError("takeout_offset_outside_objects");
 }
 
-type Outcome = "imported" | "verified" | "conflict" | "oversize" | "skipped";
+type Outcome = "imported" | "verified" | "conflict" | "skipped";
 
 async function stop(db: D1Database, runId: string, lease: string, code: string, offset: number) {
   await db
@@ -213,8 +253,9 @@ export type TakeoutChunkResult =
 
 /**
  * Processes up to TAKEOUT_CHUNK_ENTRIES entries from the run's checkpoint. The memory
- * held is the splitter's bounded buffer and one read range: each raw message is a view
- * of that buffer, handled before the next push.
+ * held is the splitter's bounded buffer, one read range and at most one unescaped copy
+ * of a message: each entry is a view of that buffer, handled before the next push. A
+ * large entry adds one more read range and its unescaped copy while it is streamed.
  */
 export async function runTakeoutChunk(
   env: TakeoutEnvironment,
@@ -328,10 +369,6 @@ export async function runTakeoutChunk(
         await stop(db, config.runId, lease, code, item.offset);
         return { status: "stopped", processed, code, offset: item.offset };
       };
-      if (item.kind === "oversize") {
-        await record(item, "oversize", { size: item.size });
-        return null;
-      }
       if (skip.has(item.offset)) {
         // A step that timed out may have stored this entry after the run stopped.
         const stored = await db
@@ -349,8 +386,21 @@ export async function runTakeoutChunk(
         if (!(lag >= 0 && lag < 1000)) return halt("takeout_id_date_mismatch");
       }
       if (!takeoutLabelsFit(item.labels)) return halt("takeout_labels_too_long");
-      const rawSha256 = hex(await crypto.subtle.digest("SHA-256", item.raw));
-      const details = { rawSha256, size: item.raw.byteLength, fromDate: item.fromDate };
+      // One unescaped copy at a time: made here, per entry, not for a whole push. A large
+      // entry is never held whole: it is hashed in one pass and stored in a second.
+      let raw: Uint8Array | GmailRawStream;
+      let rawSha256: string;
+      let size: number;
+      if (item.kind === "entry") {
+        raw = unescapeMboxrd(item.raw);
+        rawSha256 = hex(await crypto.subtle.digest("SHA-256", raw));
+        size = raw.byteLength;
+      } else {
+        const chunks = largeRaw(env.TAKEOUT_ARCHIVE, config, item);
+        ({ rawSha256, size } = await digestChunks(chunks));
+        raw = { size, chunks };
+      }
+      const details = { rawSha256, size, fromDate: item.fromDate };
       const existing = await db
         .prepare(`SELECT g.raw_key,s.raw_sha256,s.raw_state,s.receipt_state,l.run_id,l.entry_offset
           FROM gmail_messages g JOIN archive_sources s ON s.raw_key=g.raw_key
@@ -383,15 +433,7 @@ export async function runTakeoutChunk(
               `INSERT INTO gmail_takeout_items(run_id,entry_offset,message_id,outcome,from_date,raw_size,raw_sha256,raw_key)
               VALUES (?,?,?,'conflict',?,?,?,?) ON CONFLICT(run_id,entry_offset) DO NOTHING`,
             )
-            .bind(
-              config.runId,
-              item.offset,
-              item.messageId,
-              item.fromDate,
-              item.raw.byteLength,
-              rawSha256,
-              rawKey,
-            )
+            .bind(config.runId, item.offset, item.messageId, item.fromDate, size, rawSha256, rawKey)
             .run();
           return halt("takeout_raw_conflict");
         }
@@ -412,7 +454,7 @@ export async function runTakeoutChunk(
         labelIds: [],
         importedAt: new Date().toISOString(),
         rawKey,
-        rawSize: item.raw.byteLength,
+        rawSize: size,
         rawSha256,
         takeout: {
           runId: config.runId,
@@ -424,7 +466,7 @@ export async function runTakeoutChunk(
       if (!proposed) return halt("takeout_invalid_provenance");
       if (new TextEncoder().encode(JSON.stringify(proposed)).length > MAX_RECEIPT_BYTES)
         return halt("takeout_receipt_too_large");
-      await storeGmailSource(env, proposed, item.raw);
+      await storeGmailSource(env, proposed, raw);
       await requestProcessing(db, env.MAIL_PROCESSING, rawKey);
       await record(item, "imported", { ...details, rawKey });
       return null;
@@ -440,7 +482,7 @@ export async function runTakeoutChunk(
         .run();
       return { status: "complete", processed, nextOffset: offset };
     }
-    const splitter = new TakeoutMboxSplitter(GMAIL_IMPORT_RAW_LIMIT, offset);
+    const splitter = new TakeoutMboxSplitter(undefined, offset);
     let read = 0;
     try {
       // The splitter returns the entries before an error and throws it on the next call,
