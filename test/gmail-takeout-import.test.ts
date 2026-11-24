@@ -494,8 +494,32 @@ describe("Google Takeout import", () => {
       status: "created",
     });
     expect(takeout.create.mock.calls.map(([options]) => options)).toEqual([
-      { id: "takeout-cron-1", params: { runId: "cron" } },
-      { id: "takeout-cron-3", params: { runId: "cron" } },
+      { id: "takeout-cron-1", params: { runId: "cron" }, locationHint: "apac" },
+      { id: "takeout-cron-3", params: { runId: "cron" }, locationHint: "apac" },
+    ]);
+  });
+
+  it("creates the Workflow instance without the location hint when the hint is refused", async () => {
+    const objects = await upload(mbox(1), ["a/hint.mbox"]);
+    const takeout = {
+      create: vi.fn(async (options?: WorkflowInstanceCreateOptions<{ runId: string }>) => {
+        if (options?.locationHint) throw new Error("invalid locationHint");
+        return { id: options?.id } as WorkflowInstance;
+      }),
+      get: vi.fn(async () => ({}) as WorkflowInstance),
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const GMAIL_TAKEOUT_CONFIG = JSON.stringify({
+      runId: "hint",
+      accountNamespace: namespace,
+      objects,
+    });
+    expect(
+      await ensureTakeoutWorkflow({ ...env, GMAIL_TAKEOUT: takeout, GMAIL_TAKEOUT_CONFIG }, 1),
+    ).toEqual({ status: "created" });
+    expect(takeout.create.mock.calls.map(([options]) => options)).toEqual([
+      { id: "takeout-hint-1", params: { runId: "hint" }, locationHint: "apac" },
+      { id: "takeout-hint-1", params: { runId: "hint" } },
     ]);
   });
 
