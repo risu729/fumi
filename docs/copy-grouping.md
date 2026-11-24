@@ -209,5 +209,32 @@ same rows while the deploy job applies it, and its inserts maintain the indexes.
 owner approved both indexes and the `INDEXED BY` clauses on 2026-11-24.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
-rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a
-group with more than one copy.
+rows. Its counts follow the rule collapsed reads use to group an original: a
+`mail_identity` row of the current `identity_version` whose `raw_sha256` equals the
+catalog's, on an original whose `raw_state` is `present`.
+
+| Count | Originals in the window |
+| --- | --- |
+| `indexed` | With a `complete` row under that rule; these are the originals reads give a `group_id` |
+| `blocked` | With a `blocked` row under that rule |
+| `pending` | `present` with a SHA-256 and no row of the current `identity_version`, as the backfill selects them |
+| `unknown` | Every other original, such as one that is not `present` or whose row was written for a different SHA-256 |
+| `message_id_conflicts` | `indexed` originals with `message_id_conflict` set |
+| `in_multi_copy_groups` | `indexed` originals whose group has another original under the same rule, inside or outside the window |
+
+`indexed`, `blocked`, `pending` and `unknown` add up to the window's records. The
+backfill does not select an original whose current-version row has another SHA-256 (a
+scan recorded a replaced object), so such an original stays in `unknown` and stands
+alone in reads. For `in_multi_copy_groups`, each group with an `indexed` original in the
+window is searched once, in `mail_identity` insertion order, and the search stops at the
+group's second original under the rule. Rows before it that do not count, such as older
+originals that are no longer `present`, are read on the way, so a group costs at most
+its size once, however many of its originals are in the window.
+
+Until this change (2026-11-23 02:00 UTC), `indexed` and `in_multi_copy_groups` also
+counted originals whose row was written for a replaced SHA-256, which reads never group,
+and originals that were not `present`; `in_multi_copy_groups` counted every row with the
+same `group_id`, whatever its version, and `pending` did not require a SHA-256.
+`unknown` was added then. Requiring `present` matches collapsed reads, which require it
+since [#173](https://github.com/risu729/fumi/pull/173) (2026-11-23 02:12 UTC).
+The owner approved the `unknown` count and the narrower meanings on 2026-11-24.

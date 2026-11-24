@@ -3,6 +3,7 @@ import { applyD1Migrations } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDENTITY_HEADER_BYTES,
+  IDENTITY_VERSION,
   parseHeaderIdentity,
   repairMailIdentity,
 } from "../src/mail-identity.ts";
@@ -293,6 +294,7 @@ describe("header-only mail identity", () => {
         indexed: 12,
         blocked: 0,
         pending: 0,
+        unknown: 0,
         message_id_conflicts: 3,
         in_multi_copy_groups: 6,
       },
@@ -402,6 +404,118 @@ describe("header-only mail identity", () => {
       [changed.key, "blocked", "source_changed", null],
       [unreadable.key, "complete", null, expect.any(String)],
     ]);
+  });
+
+  it("reports in health only the identity rows that collapsed reads group", async () => {
+    const copies = async (messageId: string, count: number) => {
+      const originals = [];
+      for (let index = 0; index < count; index++) {
+        // oxlint-disable-next-line no-await-in-loop -- Archive order decides catalog rowids.
+        const original = await archive(
+          "gmail",
+          `2026-11-07T06:02:0${index}.000Z`,
+          mime(headers({ messageId, bh: [BH_A], hop: `hop-${index}` })),
+          { namespace: `account-${index}` },
+        );
+        originals.push(original);
+      }
+      return originals;
+    };
+    await copies("<both-present@example.invalid>", 2);
+    const absent = await copies("<one-present@example.invalid>", 3);
+    const [replaced] = await copies("<replaced@example.invalid>", 2);
+    const [leftover] = await copies("<leftover@example.invalid>", 2);
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 9, blocked: 0 });
+    await archive("email_routing", "2026-11-07T06:03:00.000Z", mime(headers({})));
+    // A scan that finds the object replaced records its new SHA-256; the row keeps the old
+    // one, and the backfill selects only originals without a current-version row.
+    await env.MAIL_CATALOG.prepare("UPDATE archive_sources SET raw_sha256=? WHERE raw_key=?")
+      .bind("1".repeat(64), replaced!.key)
+      .run();
+    // A row an older identity version wrote. The counts must not rely on its group ID
+    // differing from the current version's.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE mail_identity SET identity_version='identity-v1' WHERE raw_key=?",
+    )
+      .bind(leftover!.key)
+      .run();
+    // Every original matches an unfiltered read, so the window and the read agree.
+    const matchesReads = async (counts: { pending: number; unknown: number }) => {
+      const read = (await searchMail(env, principal, { expand_copies: true })).emails;
+      expect(read).toHaveLength(10);
+      const { copy_grouping: grouping } = (await getMailHealth(env, principal)).sections;
+      expect(grouping).toMatchObject({
+        status: "observed",
+        window: { records: 10, truncated: false },
+        counts: {
+          indexed: read.filter((mail) => mail.group_id !== null).length,
+          blocked: 0,
+          message_id_conflicts: 0,
+          in_multi_copy_groups: read.filter((mail) => (mail.copies ?? 0) > 1).length,
+          ...counts,
+        },
+      });
+      return grouping;
+    };
+    expect(await matchesReads({ pending: 2, unknown: 1 })).toMatchObject({
+      counts: { indexed: 7, in_multi_copy_groups: 5 },
+    });
+    // Reads group only present originals, as for current extractions, and so does health.
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE archive_sources SET raw_state=CASE raw_key WHEN ? THEN 'missing' ELSE 'invalid' END WHERE raw_key IN (?,?)",
+    )
+      .bind(absent[0]!.key, absent[0]!.key, absent[1]!.key)
+      .run();
+    expect(await matchesReads({ pending: 2, unknown: 3 })).toMatchObject({
+      counts: { indexed: 5, in_multi_copy_groups: 2 },
+    });
+  });
+
+  it("reads each copy group in the health window at most once", async () => {
+    // One group of 1,300 originals. Its 300 oldest rows lead the group index but no longer
+    // describe a present original, so finding another member that counts passes them.
+    const statements = [];
+    for (let index = 0; index < 1300; index++) {
+      const key = `ingest/2026-11-07/bulk-${index}/raw.eml`;
+      const digest = index.toString(16).padStart(64, "0");
+      statements.push(
+        env.MAIL_CATALOG.prepare(
+          `INSERT INTO archive_sources (source_kind,source_namespace,external_id,raw_key,receipt_key,received_at,raw_state,receipt_state,raw_size,raw_sha256,observed_pass,observed_revision) VALUES ('gmail',?,?,?,?,'2026-11-07T06:02:00.000Z',?,'missing',1,?,0,0)`,
+        ).bind(
+          `account-${index}`,
+          `bulk-${index}`,
+          key,
+          `${key}.receipt`,
+          index < 300 ? "missing" : "present",
+          digest,
+        ),
+        env.MAIL_CATALOG.prepare(
+          `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,group_id,group_rule,indexed_at) VALUES (?,?,?,'complete','synthetic-group','message_id_dkim','2026-11-07T06:03:00.000Z')`,
+        ).bind(key, IDENTITY_VERSION, digest),
+      );
+    }
+    for (let start = 0; start < statements.length; start += 500)
+      // oxlint-disable-next-line no-await-in-loop -- Bounded synthetic setup batches.
+      await env.MAIL_CATALOG.batch(statements.slice(start, start + 500));
+    const prepare = env.MAIL_CATALOG.prepare.bind(env.MAIL_CATALOG);
+    let sql = "";
+    const spy = vi.spyOn(env.MAIL_CATALOG, "prepare").mockImplementation((query) => {
+      if (query.includes("in_multi_copy_groups")) sql = query;
+      return prepare(query);
+    });
+    try {
+      expect((await getMailHealth(env, principal)).sections.copy_grouping).toMatchObject({
+        window: { records: 1000, truncated: true },
+        counts: { indexed: 1000, pending: 0, unknown: 0, in_multi_copy_groups: 1000 },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const { meta } = await env.MAIL_CATALOG.prepare(sql).all();
+    // Searching from each of the 1,000 originals passes the 300 rows every time (about
+    // 600,000 rows); searching once for the group reads them once (about 10,000 rows with
+    // the window itself).
+    expect(meta.rows_read).toBeLessThan(20_000);
   });
 });
 

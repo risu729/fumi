@@ -362,16 +362,33 @@ export async function getMailHealth(
           1,
         ),
         forwardFailures(),
+        // Counts follow collapsed reads: only a current-version row whose SHA-256 is the
+        // catalog's, on a present original, groups (docs/copy-grouping.md#reads). A group
+        // is shared when a second such original exists; each group in the window is
+        // searched once, and the search stops at that second original.
         section(
           ["archive_sources", "mail_identity"],
-          `${catalogWindow}, identity AS (SELECT s.raw_state,i.status,i.group_id,i.message_id_conflict FROM sample s
-        LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND ${CURRENT_IDENTITY_SQL})
-        SELECT ${windowCount},COALESCE(SUM(status='complete'),0) AS indexed,COALESCE(SUM(status='blocked'),0) AS blocked,
-        COALESCE(SUM(status IS NULL AND raw_state='present'),0) AS pending,
-        COALESCE(SUM(message_id_conflict=1),0) AS message_id_conflicts,
-        COALESCE(SUM(status='complete' AND (SELECT COUNT(*) FROM mail_identity m WHERE m.group_id=identity.group_id)>1),0) AS in_multi_copy_groups
+          `${catalogWindow}, identity AS (SELECT s.raw_key,s.raw_state,i.status,i.group_id,i.message_id_conflict,
+        s.raw_state='present' AND i.raw_sha256=s.raw_sha256 AS for_original,
+        i.raw_key IS NULL AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL AS queued FROM sample s
+        LEFT JOIN mail_identity i ON i.raw_key=s.raw_key AND ${CURRENT_IDENTITY_SQL}),
+        shared AS (SELECT g.group_id FROM (SELECT DISTINCT group_id FROM identity WHERE for_original AND status='complete') g
+          WHERE (SELECT 1 FROM mail_identity i JOIN archive_sources o ON o.raw_key=i.raw_key WHERE i.group_id=g.group_id
+          AND ${CURRENT_IDENTITY_SQL} AND o.raw_state='present' AND i.raw_sha256=o.raw_sha256 LIMIT 1 OFFSET 1) IS NOT NULL)
+        SELECT ${windowCount},COALESCE(SUM(for_original AND status='complete'),0) AS indexed,
+        COALESCE(SUM(for_original AND status='blocked'),0) AS blocked,
+        COALESCE(SUM(queued),0) AS pending,COUNT(*)-COALESCE(SUM(for_original OR queued),0) AS unknown,
+        COALESCE(SUM(for_original AND message_id_conflict=1),0) AS message_id_conflicts,
+        COALESCE(SUM(for_original AND status='complete' AND group_id IN (SELECT group_id FROM shared)),0) AS in_multi_copy_groups
         FROM identity`,
-          ["indexed", "blocked", "pending", "message_id_conflicts", "in_multi_copy_groups"],
+          [
+            "indexed",
+            "blocked",
+            "pending",
+            "unknown",
+            "message_id_conflicts",
+            "in_multi_copy_groups",
+          ],
         ),
         // Deliveries Gmail forwarded back (#161). Rows are best-effort observations; a
         // dropped copy always has one, because a copy is archived when its row fails.

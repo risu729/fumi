@@ -35,9 +35,11 @@ pending scopes, staged pages, current leases and checkpointed memberships. The
 durable-membership window can include messages saved before a page checkpoint;
 overlapping import scopes can count the same original more than once. Completing
 a configured date range does not prove whole-mailbox completeness.
-Copy grouping (`copy_grouping`) counts indexed, blocked and pending
-[identity rows](copy-grouping.md), Message-ID conflicts, and originals in a group with
-more than one copy, over the same catalog window.
+Copy grouping (`copy_grouping`) counts, over the same catalog window, originals
+indexed, blocked or pending for [copy grouping](copy-grouping.md#reads), the rest as
+unknown, Message-ID conflicts, and originals in a group with more than one copy. A
+counted identity row is one collapsed reads use: the current version, written for the
+catalog's SHA-256, on a present original.
 
 Each catalog, processing and membership section examines at most the latest 1,000
 inserted rows; import scopes examine at most 100. One additional row determines
