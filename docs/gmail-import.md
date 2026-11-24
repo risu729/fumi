@@ -419,10 +419,11 @@ The owner chose (2026-11-24 04:59 UTC):
    API schema (`location_hint` on
    `POST /accounts/{account_id}/workflows/{name}/instances`), but the
    [Workflows Workers API guide](https://developers.cloudflare.com/workflows/build/workers-api/)
-   does not describe it yet. If `create` refuses it, the cron logs
-   `{"event":"gmail_takeout_location_hint","status":"refused"}` and creates the instance
-   without it. It applies to instances created after the change; a running instance
-   keeps its place.
+   does not describe it yet. If `create` with the hint fails for any reason, the cron
+   logs `{"event":"gmail_takeout_create","status":"retry_without_hint","error":"Error"}`
+   (the error's name only) and creates the same instance without the hint, which then
+   runs wherever Workflows places it. It applies to instances created after the change;
+   a running instance keeps its place.
 2. Cut the sequential calls per entry (planned, separate change).
 3. Decide on handling several entries of one read concurrently only after measuring 1
    and 2 on the larva06online run (5,407 entries), which waits for them.
