@@ -47,7 +47,9 @@ check interval. These bounds are for the small live archive, not bulk import: th
 [Takeout import](gmail-import.md#google-takeout-transport) starts its own jobs in
 batches of up to 100 (`dispatchProcessingJobs`), and each of its steps first starts up
 to 100 due jobs that were never started (`dispatchDueProcessingJobs`), so leftovers do
-not wait for these ten per run.
+not wait for these ten per run. That query reads only the partial index
+`processing_jobs_undispatched` (migration 0025), not the started jobs that wait for a
+Workflow slot.
 
 ### Scheduled scan cadence
 

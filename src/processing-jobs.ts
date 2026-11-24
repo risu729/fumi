@@ -224,7 +224,9 @@ export async function dispatchDueProcessingJobs(
   now = Date.now(),
 ): Promise<{ claimed: number; acknowledged: number }> {
   const due = await db
-    .prepare(`SELECT raw_key FROM processing_jobs
+    // Without it SQLite prefers processing_jobs_due, which also holds every started job
+    // still waiting for a Workflow slot.
+    .prepare(`SELECT raw_key FROM processing_jobs INDEXED BY processing_jobs_undispatched
     WHERE state = 'pending' AND next_check_at <= ? AND dispatched_at IS NULL
       AND pipeline_version = ? AND created_at > ?
     ORDER BY next_check_at, raw_key LIMIT ?`)

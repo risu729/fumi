@@ -472,7 +472,8 @@ describe("Google Takeout import", () => {
     expect(await drain(run)).toMatchObject({ status: "complete" });
     expect(
       await env.MAIL_CATALOG.prepare(
-        "SELECT COUNT(*) AS n FROM processing_jobs WHERE dispatched_at IS NOT NULL",
+        `SELECT COUNT(*) AS n FROM processing_jobs j JOIN gmail_takeout_items i ON i.raw_key=j.raw_key
+        WHERE i.run_id='fail-late' AND j.dispatched_at IS NOT NULL`,
       ).first("n"),
     ).toBe(3);
   });
