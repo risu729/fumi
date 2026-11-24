@@ -398,7 +398,8 @@ evidence for the per-account verification in the ADR.
 ### Import speed
 
 Measured: about 5.5 s per entry (risu.minecraft, 1,137 entries in 6,234 s on
-2026-11-23), so the main account's 40,600 entries would take about 62 h. Almost all of
+2026-11-23), so the main account's 40,600 entries would take about 62 h and
+larva06online's 5,407 about 8.3 h. Almost all of
 it is network time. Each new entry makes its calls one after another: 10 D1 calls, 4 R2
 calls on `fumi-mail` and 3 Workflows API calls. `fumi-catalog`'s primary is in APAC
 (served by HKG) and `fumi-mail` is APAC, while fumi's Workflow calls ran from DFW, LHR
@@ -413,13 +414,18 @@ and AMS. Workers Observability spans (sampled, 2026-11-20..24, medians):
 The owner chose (2026-11-24 04:59 UTC):
 
 1. Create each Takeout Workflow instance with `locationHint: "apac"`
-   (`TAKEOUT_LOCATION_HINT`). The hint is best effort; the option is in the Workers
-   runtime types and the Cloudflare API schema (`location_hint`), but not yet described
-   in the Workflows guides. It applies to instances created after the change; a running
-   instance keeps its place.
+   (`TAKEOUT_LOCATION_HINT`). The hint is best effort. The option is in the Workers
+   runtime types (`WorkflowInstanceCreateOptions.locationHint`) and in the Cloudflare
+   API schema (`location_hint` on
+   `POST /accounts/{account_id}/workflows/{name}/instances`), but the
+   [Workflows Workers API guide](https://developers.cloudflare.com/workflows/build/workers-api/)
+   does not describe it yet. If `create` refuses it, the cron logs
+   `{"event":"gmail_takeout_location_hint","status":"refused"}` and creates the instance
+   without it. It applies to instances created after the change; a running instance
+   keeps its place.
 2. Cut the sequential calls per entry (planned, separate change).
 3. Decide on handling several entries of one read concurrently only after measuring 1
-   and 2 on the larva06online run.
+   and 2 on the larva06online run (5,407 entries), which waits for them.
 
 ### Production Takeout runs
 

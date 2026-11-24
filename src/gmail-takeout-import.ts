@@ -578,7 +578,7 @@ export async function stopTakeoutRun(
 
 export const TAKEOUT_INSTANCE_PREFIX = "takeout-";
 /** Where the Takeout Workflow instance should run: near `fumi-catalog` and `fumi-mail`. */
-export const TAKEOUT_LOCATION_HINT = "apac";
+export const TAKEOUT_LOCATION_HINT = "apac" satisfies WorkflowInstanceLocationHint;
 
 /**
  * Called from the cron: makes sure a configured, running Takeout run has a live
@@ -612,11 +612,16 @@ export async function ensureTakeoutWorkflow(
     .run();
   if (!claimed.meta.changes) return { status: "active" };
   // The catalog's D1 primary and the archive bucket are in APAC, and each entry makes
-  // several sequential calls to them, so the instance is asked to run there.
-  await env.GMAIL_TAKEOUT.create({
-    id,
-    params: { runId: config.runId },
-    locationHint: TAKEOUT_LOCATION_HINT,
-  });
+  // several sequential calls to them, so the instance is asked to run there. The hint is
+  // not in the Workflows guides yet: if it is refused, the run starts without it.
+  const params = { runId: config.runId };
+  await env.GMAIL_TAKEOUT.create({ id, params, locationHint: TAKEOUT_LOCATION_HINT }).catch(
+    (error: unknown) => {
+      console.error(JSON.stringify({ event: "gmail_takeout_location_hint", status: "refused" }));
+      return env.GMAIL_TAKEOUT.create({ id, params }).catch(() => {
+        throw error;
+      });
+    },
+  );
   return { status: "created" };
 }
