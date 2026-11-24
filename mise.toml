@@ -5,7 +5,7 @@ min_version = "2026.11.3"
 [tools]
 bun = "1.4.5"
 node = "26.13.1"
-hk = "2.13.0"
+hk = "2.14.0"
 "npm:oxlint" = "1.94.0"
 oxfmt = "0.75.0"
 jactionlint = "v2.6.0"
