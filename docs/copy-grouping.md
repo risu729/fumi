@@ -205,7 +205,8 @@ the kind index). Limits:
   primary key and sorts it.
 
 Migration `0023` adds both indexes. It changes no table, so the running Worker reads the
-same rows while the deploy job applies it, and its inserts maintain the indexes.
+same rows while the deploy job applies it, and its inserts maintain the indexes. The owner
+approved both indexes and the `INDEXED BY` clauses on 2026-11-24.
 
 `get_mail_health` reports `sections.copy_grouping` over the newest 1,000 catalog
 rows: indexed, blocked and pending originals, Message-ID conflicts and originals in a
