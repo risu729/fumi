@@ -237,7 +237,7 @@ read and the query plan. They do not establish production import coverage.
 
 ## Google Takeout transport
 
-Status: implemented, tested with synthetic mbox files, and run in production for two
+Status: implemented, tested with synthetic mbox files, and run in production for three
 accounts (see [production runs](#production-takeout-runs)). It follows
 [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md).
 
@@ -467,6 +467,7 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 | --- | --- | --- | --- | --- | --- |
 | momonga | `takeout-d592e62e-2026-11-22` | 379 (17,012,473 bytes, one object) | 379 `imported` | 2022-07-11 01:04:54 .. 2026-11-08 08:24:05 | 2026-11-23 18:12 UTC |
 | risu.minecraft | `takeout-32483026-2026-11-23` | 1,137 (15,440,548 bytes, one object) | 1,137 `imported` | 2022-06-14 18:29:43 .. 2026-11-22 20:41:01 | 2026-11-23 20:21 UTC |
+| larva06online | `takeout-cdd6472a-2026-11-23` | 5,407 (175,910,760 bytes, one object) | 5,407 `imported` | 2023-01-09 12:33:29 .. 2026-11-22 20:54:41 | 2026-11-24 07:18 UTC |
 
 - momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
   run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
@@ -489,8 +490,18 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   `gmail_takeout_labels` 1,137 for the run. All 1,137 have a complete `mime-v1`
   extraction and a complete processing job. The count agrees with the 1,137 messages
   counted in the export before it was uploaded.
-- The main account is not started; it waits for the owner's go (owner, 2026-11-23
-  18:22 UTC: risu.minecraft only).
+- larva06online (`gmail-cdd6472a601c7ebf1388bfd2`, owner's go 2026-11-24 02:15 UTC;
+  held for the [speed-up](#import-speed) and started after it, with
+  `GMAIL_TAKEOUT_CONFIG` replaced at 05:35 UTC): the export came from the owner's
+  computer, and the uploaded object's SHA-256 read back from R2 equals the extracted
+  mbox's. The run is `complete` with no stop code, and `next_offset` equals
+  `total_bytes`. The 5,407 entries have 5,407 distinct Gmail IDs (174,652,160 raw bytes,
+  largest 3,996,609, none over the 4 MiB MIME limit); `gmail_messages` holds 5,407 rows
+  for the namespace (2,825 threads, imported 05:36:18..07:11:39 UTC, about 1.1 s per
+  entry over the whole run) and `gmail_takeout_labels` 5,407 for the run. All 5,407
+  have a complete `mime-v1` extraction and one complete processing job. The count
+  agrees with the 5,407 messages counted in the export before it was uploaded.
+- The main account is not started; it waits for the owner's go.
 
 ## Primary references
 
