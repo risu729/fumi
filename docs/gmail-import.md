@@ -451,12 +451,16 @@ The owner chose (2026-11-24 04:59 UTC):
 
 Measured after 1 and 2 ([#196](https://github.com/risu729/fumi/pull/196),
 [#197](https://github.com/risu729/fumi/pull/197), deployed 2026-11-24 05:31 UTC): the
-larva06online run imported 730 entries from 05:36:18 to 05:43:35 UTC, about 0.6 s per
-entry, nine times faster. Change 2 alone was estimated at about 2.3 s per entry from
-outside APAC, so the hint took effect. At this rate the main account's 40,600 entries
-take about 7 h. The owner chose not to handle entries concurrently (2026-11-24 05:44
-UTC): the main account is the only large import left, and 7 h does not justify a more
-complex import loop.
+larva06online run imported its first 730 entries from 05:36:18 to 05:43:35 UTC, about
+0.6 s per entry, nine times faster. Change 2 alone was estimated at about 2.3 s per
+entry from outside APAC, so the hint took effect. From that sample the main account's
+40,600 entries were estimated at about 7 h, and the owner chose not to handle entries
+concurrently (2026-11-24 05:44 UTC): the main account is the only large import left,
+and 7 h did not justify a more complex import loop.
+
+The whole larva06online run (5,407 entries) imported from 05:36:18 to 07:11:39 UTC,
+5,720 s, about 1.06 s per entry, five times faster than before; later entries were
+larger than the first 730. At that rate the main account takes about 12 h.
 
 ### Production Takeout runs
 
