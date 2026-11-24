@@ -249,14 +249,19 @@ export default {
       failed = true;
     }
     try {
-      const processing = await repairProcessing(env.MAIL_CATALOG, env.MAIL_PROCESSING);
+      const processing = await repairProcessing(
+        env.MAIL_CATALOG,
+        env.MAIL_PROCESSING,
+        Date.now(),
+        true,
+      );
       console.log(JSON.stringify({ event: "processing_repair", ...processing }));
     } catch {
       console.error(JSON.stringify({ event: "processing_repair", status: "failed" }));
       failed = true;
     }
     try {
-      const identity = await repairMailIdentity(env);
+      const identity = await repairMailIdentity(env, undefined, undefined, true);
       console.log(JSON.stringify({ event: "mail_identity", ...identity }));
     } catch {
       console.error(JSON.stringify({ event: "mail_identity", status: "deferred" }));
@@ -273,7 +278,7 @@ export default {
       failed = true;
     }
     try {
-      const search = await repairContentSearch(env);
+      const search = await repairContentSearch(env, Date.now(), true);
       console.log(JSON.stringify({ event: "content_search_repair", ...search }));
     } catch {
       console.error(JSON.stringify({ event: "content_search_repair", status: "deferred" }));
@@ -310,7 +315,7 @@ export default {
       failed = true;
     }
     try {
-      const routing = await repairRoutingDispatch(env, routingRuntime(env));
+      const routing = await repairRoutingDispatch(env, routingRuntime(env), undefined, true);
       if (["invalid_config", "stale", "draining"].includes(routing.status)) failed = true;
       console.log(JSON.stringify({ event: "routing_dispatch", ...routing }));
     } catch {
@@ -488,9 +493,17 @@ export default {
         }),
       );
     }
-    // Preserve successful forwarding across R2 failures. Surface forwarding failure
-    // to Email Routing only after saving whatever recovery evidence was possible.
-    if (forwarding?.status === "failed") throw new Error("Forwarding did not complete");
+    // Gmail forwarding is optional and fumi's archive is the copy that counts (owner,
+    // 2026-11-23 17:53 UTC). A failed forward asks the sender to retry only when the
+    // original or its receipt (the failure's only durable record) is not stored: a retry
+    // cannot fix a forward that fails every time (a DMARC-strict sender) and only
+    // archives another copy. Successful forwarding is preserved across R2 failures.
+    if (
+      forwarding?.status === "failed" &&
+      (archive.status !== "stored" || receiptStatus !== "stored")
+    ) {
+      throw new Error("Forwarding did not complete");
+    }
     // Gmail keeps its copy, but fumi sees relayed mail nowhere else: ask for a retry like a
     // failed forward. Archive-only mode has already rejected it above.
     // A declared size that cannot be stored fails the same way on every retry.
