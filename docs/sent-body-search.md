@@ -1,6 +1,7 @@
 # Sent mail body search
 
-Status: implemented with synthetic tests; not yet verified in production. Written
+Status: implemented and verified in production (see
+[production check](#production-check)). Written
 2026-11-23 02:30 UTC and approved by the owner on 2026-11-24 02:14 UTC (see
 [owner decisions](#owner-decisions)), as part 2 of the owner's request (2026-11-23,
 before 00:14 UTC) to make sent mail searchable over MCP. Part 1, metadata search, is
@@ -531,6 +532,21 @@ Measured in workerd's local D1 with synthetic rows (`test/sent-body-search.test.
   column is added (question 6).
 - The trigram index size for real mail was not measured: repeated synthetic text
   compresses unlike mail.
+
+## Production check
+
+Deployed 2026-11-24 03:02 UTC with
+[08504ec](https://github.com/risu729/fumi/commit/08504ec) (migration `0024` applied by
+the deploy job). Checked through the owner's MCP Portal with `search_mail_content` and
+`in:sent`:
+
+- 03:12 UTC: a `sent_` match of a reply returned with a `/text` citation, a
+  `sent-text-v1` coverage of `composed: "reply"` and a sent-phase continuation token;
+  `sent_operations` read 10 indexed, 81 pending, 0 unavailable.
+- 04:51 UTC: the backfill had finished: 91 indexed, 0 pending, 0 unavailable, 0
+  HTML-only.
+
+The searched content and IDs are kept out of this repository.
 
 ## Tests
 

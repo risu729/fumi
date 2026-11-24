@@ -266,7 +266,7 @@ establish production delivery.
       index (approved by the owner on 2026-11-24 in
       [sent mail body search](sent-body-search.md), which keeps
       `search_mail_semantic` archive-only). Migration `0024` adds the index; a
-      scheduled stage fills it. Synthetic tests only.
+      scheduled stage fills it. Verified in production on 2026-11-24.
 - [ ] Find Takeout-imported Gmail SENT mail with `in:sent` once the owner confirms
       the Takeout label name of Gmail's Sent label.
 - [ ] Deferred: verify signed MCP Events end to end with ChatGPT, the only known
