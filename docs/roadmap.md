@@ -93,10 +93,12 @@ establish production delivery.
       risu.minecraft is done and verified (1,137 of 1,137 imported,
       2022-06-14..2026-11-22, 2026-11-23); the main account waits for the owner's go
       (2026-11-23 18:22 UTC).
-  - [ ] Speed up the import before larva06online and the main account
+  - [x] Speed up the import before larva06online and the main account
         ([import speed](gmail-import.md#import-speed), owner 2026-11-24 04:59 UTC): run
         the Workflow in APAC, cut the sequential calls per entry, measure on
-        larva06online, then decide whether entries of one read run concurrently.
+        larva06online, then decide whether entries of one read run concurrently. Done:
+        about 0.6 s per entry instead of 5.5 s; no concurrency (owner, 2026-11-24 05:44
+        UTC).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
