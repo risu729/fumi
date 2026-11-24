@@ -237,8 +237,8 @@ read and the query plan. They do not establish production import coverage.
 
 ## Google Takeout transport
 
-Status: implemented, tested with synthetic mbox files, and run in production for one
-account (see [production runs](#production-takeout-runs)). It follows
+Status: implemented, tested with synthetic mbox files, and run in production for two
+accounts (see [production runs](#production-takeout-runs)). It follows
 [ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md).
 
 An operator stores each account's Takeout mbox files in the private R2 bucket
@@ -403,6 +403,7 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 | Account | Run | Entries | Outcomes | `from_date` range (UTC) | Checked |
 | --- | --- | --- | --- | --- | --- |
 | momonga | `takeout-d592e62e-2026-11-22` | 379 (17,012,473 bytes, one object) | 379 `imported` | 2022-07-11 01:04:54 .. 2026-11-08 08:24:05 | 2026-11-23 18:12 UTC |
+| risu.minecraft | `takeout-32483026-2026-11-23` | 1,137 (15,440,548 bytes, one object) | 1,137 `imported` | 2022-06-14 18:29:43 .. 2026-11-22 20:41:01 | 2026-11-23 20:21 UTC |
 
 - momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
   run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
@@ -413,11 +414,20 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   that mail health showed at 15:06 UTC are not from this run. The newest of each is one
   live-capture source of 2026-11-18 (`input_too_large`, `workflow_failed`). The count
   agrees with the 379 messages counted in the export before it was uploaded.
-- Production had no `fumi-gmail-takeout` Workflow before this run. CI deploys a
+- Production had no `fumi-gmail-takeout` Workflow before the momonga run. CI deploys a
   version with `deploy-triggers: false`, which does not register a new Workflow, so it
-  was created through the Cloudflare API on 2026-11-23 before the run started.
-- The other accounts (the main account and risu.minecraft) are not started; the owner
-  asked to stop after momonga (2026-11-23 14:34 UTC).
+  was created through the Cloudflare API on 2026-11-23 before the momonga run started.
+- risu.minecraft (`gmail-3248302638620a7725a9706e`, run started about 2026-11-23 18:26
+  UTC after the owner's go at 18:22 UTC; `GMAIL_TAKEOUT_CONFIG` was replaced at about
+  18:23 UTC): the run is `complete` with no stop code, and
+  `next_offset` equals `total_bytes`. The 1,137 entries have 1,137 distinct Gmail IDs
+  (15,293,276 raw bytes, largest 224,012); `gmail_messages` holds 1,137 rows for the
+  namespace (1,047 threads, imported 18:26:17..20:10:11 UTC, about 5.5 s per entry) and
+  `gmail_takeout_labels` 1,137 for the run. All 1,137 have a complete `mime-v1`
+  extraction and a complete processing job. The count agrees with the 1,137 messages
+  counted in the export before it was uploaded.
+- The main account is not started; it waits for the owner's go (owner, 2026-11-23
+  18:22 UTC: risu.minecraft only).
 
 ## Primary references
 
