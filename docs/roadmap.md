@@ -91,8 +91,9 @@ establish production delivery.
       ([production runs](gmail-import.md#production-takeout-runs)): momonga is done
       and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23);
       risu.minecraft is done and verified (1,137 of 1,137 imported,
-      2022-06-14..2026-11-22, 2026-11-23); the main account waits for the owner's go
-      (2026-11-23 18:22 UTC).
+      2022-06-14..2026-11-22, 2026-11-23); larva06online is done and verified (5,407
+      of 5,407 imported, 2023-01-09..2026-11-22, 2026-11-24); the main account waits
+      for the owner's go.
   - [x] Speed up the import before larva06online and the main account
         ([import speed](gmail-import.md#import-speed), owner 2026-11-24 04:59 UTC): run
         the Workflow in APAC, cut the sequential calls per entry, measure on
