@@ -461,6 +461,8 @@ and 7 h did not justify a more complex import loop.
 The whole larva06online run (5,407 entries) imported from 05:36:18 to 07:11:39 UTC,
 5,720 s, about 1.06 s per entry, five times faster than before; later entries were
 larger than the first 730. At that rate the main account takes about 12 h.
+The owner kept the decision not to handle entries concurrently at that estimate
+(2026-11-25 02:07 UTC).
 
 ### Production Takeout runs
 
