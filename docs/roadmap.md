@@ -100,7 +100,8 @@ establish production delivery.
         larva06online, then decide whether entries of one read run concurrently. Done:
         about 1.06 s per entry over the whole larva06online run instead of 5.5 s; no
         concurrency (owner, 2026-11-24 05:44 UTC, decided on the first 730 entries at
-        about 0.6 s).
+        about 0.6 s; kept at about 12 h for the main account, owner 2026-11-25 02:07
+        UTC).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
