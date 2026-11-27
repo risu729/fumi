@@ -3,8 +3,9 @@
 Status: implemented for synthetic local validation. OAuth provisioning, production
 migration, activation and real-mail import require explicit operator execution. This is
 a historical migration, not Gmail synchronization or archive-gap recovery. The backfill
-is to be finished from Google Takeout instead
-([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md)); the connector run
+was finished from Google Takeout instead for all four accounts on 2026-11-27
+([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
+[production runs](#production-takeout-runs)). That supersedes the connector run, which
 stopped on 2026-11-12 after 4,810 messages (internal dates 2026-08-24T09:21:29Z to
 2026-11-11T16:59:42Z, measured 2026-11-17 14:10 UTC). Ongoing capture of Gmail SENT mail
 after the frozen cutoff is planned separately in the [roadmap](roadmap.md) (owner,
@@ -464,6 +465,9 @@ larger than the first 730. At that rate the main account takes about 12 h.
 The owner kept the decision not to handle entries concurrently at that estimate
 (2026-11-25 02:07 UTC).
 
+The main account's run (40,602 entries, 2026-11-27) took 11 h 31 min, about 1.02 s per
+entry ([production runs](#production-takeout-runs)).
+
 ### Production Takeout runs
 
 One row per account, checked with read-only queries on the production D1 catalog. The
@@ -474,6 +478,7 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 | momonga | `takeout-d592e62e-2026-11-22` | 379 (17,012,473 bytes, one object) | 379 `imported` | 2022-07-11 01:04:54 .. 2026-11-08 08:24:05 | 2026-11-23 18:12 UTC |
 | risu.minecraft | `takeout-32483026-2026-11-23` | 1,137 (15,440,548 bytes, one object) | 1,137 `imported` | 2022-06-14 18:29:43 .. 2026-11-22 20:41:01 | 2026-11-23 20:21 UTC |
 | larva06online | `takeout-cdd6472a-2026-11-23` | 5,407 (175,910,760 bytes, one object) | 5,407 `imported` | 2023-01-09 12:33:29 .. 2026-11-22 20:54:41 | 2026-11-24 07:18 UTC |
+| main account | `takeout-309a1c7e-2026-11-23` | 40,602 (3,952,532,507 bytes, one object) | 35,792 `imported`, 4,693 `verified`, 117 `conflict` | 2020-06-10 13:15:53 .. 2026-11-22 21:05:40 | 2026-11-27 23:50 UTC |
 
 - momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
   run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
@@ -507,7 +512,26 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   entry over the whole run) and `gmail_takeout_labels` 5,407 for the run. All 5,407 have
   a complete `mime-v1` extraction and one complete processing job. The count agrees with
   the 5,407 messages counted in the export before it was uploaded.
-- The main account is not started; it waits for the owner's go.
+- Main account (`gmail-309a1c7e944f72b8a4a26c0d`, owner's go 2026-11-27 12:00 UTC;
+  `GMAIL_TAKEOUT_CONFIG` replaced at 12:02 UTC with `onConflict: "record"` and run
+  started 12:06 UTC): the run is `complete` with no stop code, and `next_offset` equals
+  `total_bytes`. The 40,602 entries have 40,602 distinct Gmail IDs (3,946,599,794 raw
+  bytes, largest 29,789,263). 4,693 match a message the connector had stored and are
+  `verified`; 117 differ from it and are `conflict`, the same 117 that the format
+  measurement above found, and the stored originals are kept. The other 35,792 are
+  `imported` (12:06:17..23:37:41 UTC, about 1.02 s per entry over the whole run), so
+  `gmail_messages` holds 40,602 rows for the namespace (31,769 threads), the 4,810
+  connector messages included, and `gmail_takeout_labels` 40,485 for the run
+  (`imported` plus `verified`). The 4 entries over 25 MiB (27,361,874 to 29,789,263
+  bytes) were streamed and are `imported`. Of the 35,792 imported entries, 35,619 have
+  a complete `mime-v1` extraction and a complete processing job. The other 173 are over
+  the 4 MiB [MIME extraction](mime-extraction.md) input limit: their extraction is
+  `blocked` with `input_too_large` and their job `failed` with `workflow_failed`, and
+  the originals are stored. The count agrees with the 40,602 messages counted in the
+  export before it was uploaded.
+- The connector run that stopped on 2026-11-12 is superseded by this run: every message
+  it stored is in the export and was `verified` or recorded as a `conflict`, so it is
+  not resumed.
 
 ## Primary references
 
