@@ -17,7 +17,7 @@
     "@cloudflare/vitest-plugin": "1.9.2",
     "@modelcontextprotocol/client": "2.4.0",
     "@risu729/tsconfigs": "3.0.1",
-    "cf": "1.0.0-rc.5",
+    "cf": "1.0.0-rc.6",
     "miniflare": "5.20261123.1-beta",
     "typescript": "7.0.2",
     "vite": "8.3.8",
