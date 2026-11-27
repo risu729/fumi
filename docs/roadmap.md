@@ -92,8 +92,11 @@ establish production delivery.
       and verified (379 of 379 imported, 2022-07-11..2026-11-08, 2026-11-23);
       risu.minecraft is done and verified (1,137 of 1,137 imported,
       2022-06-14..2026-11-22, 2026-11-23); larva06online is done and verified (5,407
-      of 5,407 imported, 2023-01-09..2026-11-22, 2026-11-24); the main account waits
-      for the owner's go.
+      of 5,407 imported, 2023-01-09..2026-11-22, 2026-11-24); the main account is done
+      and verified (40,602 entries: 35,792 imported, 4,693 verified against the
+      connector's copies, 117 conflicts kept as stored, 2020-06-10..2026-11-22,
+      2026-11-27), which supersedes the stopped connector run. Left: delete the Takeout
+      exports from R2 and the upload token (owner approves the destroy).
   - [x] Speed up the import before larva06online and the main account
         ([import speed](gmail-import.md#import-speed), owner 2026-11-24 04:59 UTC): run
         the Workflow in APAC, cut the sequential calls per entry, measure on
