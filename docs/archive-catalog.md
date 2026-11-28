@@ -22,7 +22,13 @@ provenance with deterministic UUID-shaped Fumi identities. Its `gmail` source ki
 has no SMTP forwarding outcome and never emits historical mail notifications.
 The reconciler restores its provider provenance from the private Gmail receipt;
 incomplete pairs remain coverage issues. Outgoing submissions retain their own
-independent identities.
+independent identities. The `mailbox_export` source kind (migration
+`0026_mailbox_export_source.sql`, [ADR 0006](adr/0006-outlook-pst-import.md)) holds
+originals converted from a mailbox export such as an
+[Outlook PST file](outlook-pst-import.md). Like `gmail`, the catalog refuses SMTP
+forwarding evidence and notifications for it. The migration rebuilds `archive_sources`
+with every rowid and index kept and restores both routing tables around the rebuild, as
+`0014` did.
 
 The first validated receipt is retained as immutable historical evidence in D1.
 Current R2 observations are separate from that snapshot. Later missing or invalid
