@@ -8,7 +8,9 @@ refinements in the 2026-11-22 amendment below. The Takeout transport is implemen
 has been configured. It replaces the connector transport as the way to finish the
 historical Gmail backfill in [historical Gmail import](../gmail-import.md) and
 [connector import](../gmail-connector-import.md); both transports stay in the code until
-this import is accepted.
+this import is accepted. [ADR 0006](0006-outlook-pst-import.md) (2026-11-28) amends
+it: grouping gets one more rule for PST originals, and (agent) PST exports use the
+`fumi-takeout` bucket too.
 
 Date: 2026-11-22
 
