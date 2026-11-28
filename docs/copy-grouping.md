@@ -87,12 +87,12 @@ From does not match that row and has `message_id_conflict` set. It can still joi
 row's group through a third row, as `[b]` does in the second order above, so the flag
 does not mean the row stands alone. A signed and an unsigned copy with the same
 Message-ID are not grouped, unless the unsigned one is a
-[mailbox copy](#mailbox-copies). Signatures that
-fumi's own forwarding route adds sit above `X-Fumi-Ingest-ID` and are ignored, so an
-unsigned live capture still groups with its Gmail copy. A signature added by a hop
-before fumi captured the mail (for example a Gmail account that forwards to fumi) is on
-both the live capture and the Gmail copy fumi forwarded. Any other hop that signs only
-one copy keeps the two results apart. Hops only add headers on top, so the bottom-most
+[mailbox copy](#mailbox-copies). Signatures that fumi's own forwarding route adds sit
+above `X-Fumi-Ingest-ID` and are ignored, so an unsigned live capture still groups with
+its Gmail copy. A signature added by a hop before fumi captured the mail (for example a
+Gmail account that forwards to fumi) is on both the live capture and the Gmail copy fumi
+forwarded. Any other hop that signs only one copy keeps the two results apart when the
+unsigned one is a live capture. Hops only add headers on top, so the bottom-most
 `X-Fumi-Ingest-ID` is the same header in every copy, even when the original already
 carried one. A header named `X-Fumi-Ingest-ID` inside the original mail therefore makes
 every copy ignore the signatures above it, which an unsigned sender gets anyway.
@@ -107,7 +107,8 @@ a signature that another copy of the same mail carries:
 - Gmail stores the sender's copy of a sent mail (the `Sent` label) before it adds its
   outgoing `DKIM-Signature`, so the sender's account holds the mail unsigned while the
   copy a recipient received, in another imported account or as a live capture, is
-  signed (owner, 2026-11-28 12:25 UTC, amendment to ADR 0006).
+  signed. The owner asked for these to be grouped on 2026-11-28 at 12:25 UTC
+  (amendment to ADR 0006); the explanation is the agent's reading of the data below.
 - A PST item is rebuilt from the mailbox, so it lacks any signature a later hop added,
   such as the forwarding route that brought the same mail to Gmail.
 
@@ -115,9 +116,10 @@ An unsigned mailbox copy (`message_id_from_date`) and a signed original
 (`message_id_dkim`) with the same Message-ID, equal From and equal Date are one group:
 
 - An unsigned mailbox copy first looks for its own rule's match. Without one, it joins
-  the earliest signed row with that Message-ID, From and Date. Preferring the unsigned
-  match keeps an unsigned live capture and its Gmail copy together when a signed copy
-  was indexed before both.
+  the earliest signed row with that Message-ID, From and Date, but only while every
+  signed row of that Message-ID is in one group: with two signed groups (a conflict,
+  possibly forged) it joins neither. Preferring the unsigned match keeps an unsigned
+  live capture and its Gmail copy together when a signed copy was indexed before both.
 - A signed row first looks for its own rule's match. Without one, and only when no
   signed row with that Message-ID exists yet, it joins the earliest unsigned mailbox
   copy with the same Message-ID, From and Date. So for one unsigned mailbox copy and
@@ -125,16 +127,26 @@ An unsigned mailbox copy (`message_id_from_date`) and a signed original
   a later signed copy with another body hash (a conflict, possibly forged) cannot enter
   the group through the unsigned copy.
 
+"Earlier" and "later" are indexing order, not arrival. A full re-backfill indexes the
+newest catalog row first, so a forged signed live capture that arrived after an import
+is indexed before the imported copies. When the unsigned copy is indexed after the
+forged one and before the genuine signed copy, it joins the forged one, which as a live
+capture becomes the representative; the genuine copy then stands alone with
+`message_id_conflict`. When the genuine copy is indexed first of the two, the unsigned
+copy sees two signed groups and joins neither. Either way the bound below holds: one
+copy is hidden at most, as a forged copy that copies `bh=` could already do.
+
 An unsigned live capture (`email_routing`) is not a mailbox copy: fumi captures it in
 transit, and the signatures its forwarding route adds are already ignored (above). A
 signed and an unsigned live capture stay apart, unless a mailbox copy links them: with
 three copies of one Message-ID, From and Date (a signed one S, an unsigned live capture
-U and an unsigned mailbox copy E), E joins U, and S joins them only when it is indexed
-after E and no signed row of that Message-ID came before it. Rows are written once, so
-an order that leaves S apart is not reconciled.
+U and an unsigned mailbox copy E), all three are one group in every indexing order
+except the two where S and U are both indexed before E. Then E joins U and S stays
+apart, and since rows are written once, that is not reconciled.
 
 Group keys and the other rules are unchanged. Until 2026-11-28 the rule covered only
-`mailbox_export`, and an unsigned mailbox export joined the earliest row of either rule.
+`mailbox_export`, and an unsigned mailbox export joined the earliest row of either rule,
+also with two signed groups of its Message-ID.
 Rows written under that rule keep their groups. The Gmail rows it left apart (below) are
 not regrouped by this change alone, because rows are never rewritten; they need to be
 indexed again.

@@ -221,7 +221,7 @@ const OVERLAP =
  * Source kinds whose originals are read from a mailbox rather than captured in transit:
  * Gmail copies (Takeout or API import) and mailbox exports such as PST items (ADR 0006).
  */
-export const MAILBOX_SOURCE_KINDS = ["gmail", "mailbox_export"] as const;
+const MAILBOX_SOURCE_KINDS = ["gmail", "mailbox_export"] as const;
 /** An identity row `m` whose original is a mailbox copy. */
 const MAILBOX_SQL = `EXISTS(SELECT 1 FROM archive_sources x WHERE x.raw_key=m.raw_key AND x.source_kind IN (${MAILBOX_SOURCE_KINDS.map((kind) => `'${kind}'`).join(",")}))`;
 /**
@@ -230,19 +230,24 @@ const MAILBOX_SQL = `EXISTS(SELECT 1 FROM archive_sources x WHERE x.raw_key=m.ra
  * that another copy carries: Gmail stores a sent mail before its outgoing DKIM signature
  * (amendment 2026-11-28), and a PST item is rebuilt without the signature a later hop
  * added, such as the forwarding route to Gmail. The rule holds in both indexing orders:
- * an unsigned mailbox copy joins an earlier signed row when no unsigned row matches it,
+ * an unsigned mailbox copy joins an earlier signed group when no unsigned row matches it,
  * and a signed row joins an earlier unsigned mailbox copy when no signed row matches it.
  */
 function mailboxMatchSql(rule: GroupRule, mailbox: boolean) {
   const base = `SELECT m.group_id FROM mail_identity m WHERE m.identity_version='${IDENTITY_VERSION}' AND m.status='complete'`;
+  // Only while every signed row of the Message-ID is in one group: with two (a conflict,
+  // possibly forged) nothing tells which one the unsigned copy belongs to.
   if (rule === "message_id_from_date" && mailbox)
     return {
-      sql: `${base} AND m.group_rule='message_id_dkim' AND m.message_id=? AND m.from_address=? AND m.header_date=? ORDER BY m.rowid LIMIT 1`,
-      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date],
+      sql: `${base} AND m.group_rule='message_id_dkim' AND m.message_id=? AND m.from_address=? AND m.header_date=?
+        AND NOT EXISTS(SELECT 1 FROM mail_identity d WHERE d.identity_version='${IDENTITY_VERSION}' AND d.status='complete' AND d.group_rule='message_id_dkim' AND d.message_id=? AND d.group_id!=m.group_id)
+        ORDER BY m.rowid LIMIT 1`,
+      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date, i.messageId],
     };
   // Only the first signed copy joins this way: a later one with another body hash is a
   // conflict with that copy, not a copy of the unsigned one, so a forged signature cannot
-  // use the unsigned copy to enter the group.
+  // use the unsigned copy to enter the group. "First" and "later" follow indexing order,
+  // which a full re-backfill reverses (newest catalog row first).
   if (rule === "message_id_dkim")
     return {
       sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${MAILBOX_SQL}

@@ -547,6 +547,50 @@ describe("header-only mail identity", () => {
     expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
     expect(await groupOf(genuine.key)).toBe(await groupOf(sentFirst.key));
     expect(await groupOf(forged.key)).not.toBe(await groupOf(sentFirst.key));
+
+    // A signed copy indexed after an unsigned live capture stays apart: a live capture is
+    // not a mailbox copy.
+    const fifth = "Wed, 11 Nov 2026 06:01:24 +0000";
+    const liveFirst = await archive(
+      "email_routing",
+      "2026-11-11T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-e"), date: fifth })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const signedAfterLive = await archive(
+      "gmail",
+      "2026-11-11T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-e"), bh: [BH_A], date: fifth })),
+      { namespace: "recipient" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(signedAfterLive.key)).not.toBe(await groupOf(liveFirst.key));
+
+    // A full re-backfill indexes newest first, so a forged signed live capture can come
+    // before the genuine copy. With two signed groups of the Message-ID, the sent copy
+    // joins neither.
+    const sixth = "Thu, 12 Nov 2026 06:01:24 +0000";
+    const sentOld = await archive(
+      "gmail",
+      "2026-11-12T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-f"), date: sixth })),
+      { namespace: "sender" },
+    );
+    const genuineOld = await archive(
+      "gmail",
+      "2026-11-12T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-f"), bh: [BH_A], date: sixth })),
+      { namespace: "recipient" },
+    );
+    const forgedNew = await archive(
+      "email_routing",
+      "2026-11-12T06:01:40.000Z",
+      mime(headers({ messageId: id("sent-f"), bh: [BH_B], date: sixth })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 3 });
+    expect(await groupOf(sentOld.key)).not.toBe(await groupOf(forgedNew.key));
+    expect(await groupOf(sentOld.key)).not.toBe(await groupOf(genuineOld.key));
+    expect(await groupOf(genuineOld.key)).not.toBe(await groupOf(forgedNew.key));
   });
 
   it("records originals it cannot read as blocked and never rewrites a row", async () => {
