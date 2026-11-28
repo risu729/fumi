@@ -1,11 +1,13 @@
 # ADR 0006: Import Outlook PST exports and group them with existing copies
 
-Status: accepted by the owner on 2026-11-28 at 08:59 UTC ("はい、まとめる理由を足すべきと思う",
-"yes, I think the reason to group them should be added"), answering the proposal to store
-every PST item and add a grouping rule (option B below). Not implemented. Points marked
-"agent" are not confirmed by the owner. Amends
-[ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md) (a new transport into the
-Takeout bucket, and one more grouping rule).
+Status: accepted by the owner on 2026-11-28 at 08:59 UTC
+("はい、まとめる理由を足すべきと思う", "yes, I think the reason to group them should be
+added"), answering the proposal to store every PST item as its own original and add a
+grouping rule so that the copies collapse (option 1 below). Not implemented. Everything
+else, including the reasoning under "Why group instead of dropping", was written by an
+agent and is not confirmed by the owner. Amends
+[ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md): one more grouping rule, and
+(agent) a new transport that uses the Takeout bucket.
 
 Date: 2026-11-28
 
@@ -13,8 +15,8 @@ Date: 2026-11-28
 
 - The owner exported two Microsoft mailboxes from Outlook (classic) on 2026-11-28 as
   `.pst` files, whole mailbox, root with subfolders: a university Microsoft 365
-  mailbox (477,447,168 bytes) and a personal Microsoft account mailbox (10,429,440
-  bytes). The files stay in the owner's Drive as the archive. fumi can import only Gmail
+  mailbox (about 477 MB) and a personal Microsoft account mailbox (about 10 MB). The
+  files stay in the owner's Drive as the archive. fumi can import only Gmail
   Takeout mbox files ([historical Gmail import](../gmail-import.md)).
 - Trial conversion on 2026-11-28 with libpst `readpst` 0.6.76 (`-r -e -D`, one `.eml`
   per item), cross-checked with libpff `pffexport` 20180714:
@@ -40,7 +42,8 @@ Date: 2026-11-28
   2,755 items have a Message-ID fumi already holds, almost all from the main Gmail
   account's Takeout; 113 are new (80 university Inbox notifications from Teams,
   SharePoint and internal senders the university forwarding did not pass on, 31 sent
-  items, 2 personal Inbox items). With the current rules only 1,470 of the 2,642 would
+  items (18 sent mails, 11 meeting responses and 2 Archive items), 2 personal Inbox
+  items). With the current rules only 1,470 of the 2,642 would
   group with the existing copy. For 1,166 the PST copy is unsigned while fumi's copy
   carries exactly one `DKIM-Signature`, with equal From and Date: most likely the
   signature of the hop that forwarded the mail to Gmail. 4 are sent items whose
@@ -54,18 +57,21 @@ Date: 2026-11-28
 2. Import only the 113 new items and skip the rest before storage by Message-ID, DKIM
    `bh=`, From and Date. Rejected: it decides on header values that anyone who has
    seen a message can copy, so a forged earlier copy would keep a PST item out of the
-   archive entirely, and it breaks ADR 0004's "each route keeps its own original".
-3. Do nothing and keep the PST only in Drive. Rejected: the 113 new items, 18 of them
-   unique sent mail, would stay unsearchable.
+   archive entirely, and it breaks ADR 0004's rule that "each route keeps its own source
+   and provenance".
+3. Do nothing and keep the PST only in Drive. Rejected: the 113 new items, including the
+   owner's 18 sent mails found nowhere else in fumi, would stay unsearchable.
 
 ## Decision
 
 ### Why group instead of dropping
 
-[ADR 0005](0005-capture-mail-delivered-directly-to-gmail.md) drops a copy before storage
-only when a fumi-minted `X-Fumi-Ingest-ID` names a stored live ingest and the
-Message-ID matches, and archives everything else (fail open). No PST item has that
-header, so under that rule no PST item is dropped. Grouping then does what dropping
+Agent reasoning, asked for by the owner.
+[ADR 0005](0005-capture-mail-delivered-directly-to-gmail.md) drops a Gmail-forwarded
+delivery before storage only when an `X-Fumi-Ingest-ID` value names a stored live ingest
+with the same Message-ID, and archives everything else (fail open). It applies to live
+deliveries, not imports, and no PST item has that header anyway, so its rule would drop
+nothing here. Grouping then does what dropping
 would have done for readers, without losing anything: a duplicate is hidden in default
 listings, `expand_copies` still shows it, and a forged header can at most hide a copy
 (ADR 0004, Consequences). The PST copy also carries what no other copy has: the Outlook
@@ -73,13 +79,13 @@ folder, and the mailbox's own view of the message.
 
 ### Import
 
-1. **Every mail item is stored as its own original**, in a new source kind with one
-   namespace per mailbox, through a new transport. The Gmail Takeout transport is not
-   extended: its splitter depends on mboxrd, `X-GM-THRID`, `X-Gmail-Labels` and the
-   Gmail ID/date check.
-2. **Grouping gets one more rule.** A PST original without DKIM joins an earlier
-   original with the same Message-ID, From and Date even when that one is signed. Every
-   other rule is unchanged.
+1. **Every mail item is stored as its own original** (owner). Agent: in a new source
+   kind with one namespace per mailbox, through a new transport. The Gmail Takeout
+   transport is not extended: its splitter depends on mboxrd, `X-GM-THRID`,
+   `X-Gmail-Labels` and the Gmail ID/date check.
+2. **Grouping gets one more rule** (owner). Agent: a PST original without DKIM joins an
+   earlier original with the same Message-ID, From and Date even when that one is
+   signed. Every other rule is unchanged.
 
 Agent specification:
 
@@ -100,15 +106,22 @@ Agent specification:
   never from the `Date` header.
 - Catalog: new `source_kind` `mailbox_export`. `archive_sources` is rebuilt with rowids
   kept, as migrations 0008 and 0014 did, with `notify_events = 0` and no forward status
-  for the new kind; the `archive_source` filter, catalog, reconciler and health learn
-  the kind. In a copy group it ranks after live capture and every Gmail copy.
+  for the new kind. As in 0014, the tables that reference `archive_sources` with
+  `ON DELETE CASCADE` (the two routing policy tables of 0012) are backed up and
+  restored around the rebuild. The `archive_source` filter, catalog, reconciler and
+  health learn the kind.
+- Representative order: today every source that is not live capture is ordered by
+  `received_at` (`src/mail-read.ts`, `src/content-search.ts`). A PST delivery time is
+  earlier than the Gmail receipt time, so the order gets an explicit rank: live
+  capture, then Gmail copies, then `mailbox_export`.
 - Receipt schema `outlook-pst-v1`: `{runId, objectKey, manifestLine, exportSha256,
   pstNodeId, converter, folder, itemKind, headers}`. Run and item ledgers are new
   tables (`pst_import_runs`, `pst_import_items`); the Takeout tables hold Gmail IDs.
   Lease, checkpoint (manifest line), one Workflow instance at a time and `mime-v1`
   jobs work as in the Takeout runner.
 - Folders: a table like `gmail_takeout_labels`, keyed by the PST original's raw key.
-  `in:inbox` and `in:sent` are unchanged; a folder filter can come later.
+  `in:inbox` and `in:sent` are unchanged, so they match no PST original (they select
+  live capture and Gmail labels); a folder filter can come later.
 - `headers: "synthesized"` is kept in the receipt and shown by readers. For sent items
   the manifest also records the account's own address and the recipients' SMTP
   addresses from the PST recipient table, as data; the stored bytes are not rewritten.
@@ -131,6 +144,8 @@ Agent specification:
 - The new grouping rule trusts Message-ID, From and Date across a signed/unsigned pair
   for PST originals only. As with the other rules, a forged copy can at most hide one
   in default listings.
+- `in:inbox` and `in:sent` do not find PST originals, including the 31 new sent items,
+  until a folder filter exists. Other searches find them.
 - A production run still needs the owner's go, after the code is merged.
 
 ## Verification

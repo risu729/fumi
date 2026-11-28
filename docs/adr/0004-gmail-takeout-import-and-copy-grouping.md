@@ -9,8 +9,8 @@ has been configured. It replaces the connector transport as the way to finish th
 historical Gmail backfill in [historical Gmail import](../gmail-import.md) and
 [connector import](../gmail-connector-import.md); both transports stay in the code until
 this import is accepted. [ADR 0006](0006-outlook-pst-import.md) (2026-11-28) amends
-it: Outlook PST exports use the `fumi-takeout` bucket too, and grouping gets one more
-rule for PST originals.
+it: grouping gets one more rule for PST originals, and (agent) PST exports use the
+`fumi-takeout` bucket too.
 
 Date: 2026-11-22
 
