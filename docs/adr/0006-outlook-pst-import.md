@@ -167,3 +167,5 @@ points differ from the agent specification above:
   account. readpst's `To` display names stay in the stored bytes.
 - The namespace hashes the account's sign-in address (lower case), the address the
   owner types when exporting, which is not always the mailbox's primary SMTP address.
+  Every later export of the same mailbox must hash the same address, or it gets a
+  second namespace and its items become separate originals.

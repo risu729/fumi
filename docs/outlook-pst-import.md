@@ -37,7 +37,7 @@ unpacked with `dpkg-deb -x <deb> <dir>` and used with `LD_LIBRARY_PATH` and
 2. Build the run:
 
    ```sh
-   python3 tools/outlook-pst/pst-manifest.py --pst export.pst --readpst-dir out/ \
+   python3 -s tools/outlook-pst/pst-manifest.py --pst export.pst --readpst-dir out/ \
      --namespace outlook-<24 hex> --export-date 2026-11-28 --dest upload/
    ```
 
@@ -46,24 +46,33 @@ unpacked with `dpkg-deb -x <deb> <dir>` and used with `LD_LIBRARY_PATH` and
    ([historical Gmail import](gmail-import.md)). The address is typed only on the
    owner's computer.
 
-3. Check the printed summary (items per folder, items with synthesized headers) against
-   the folder counts Outlook shows. Upload `upload/<namespace>/<export-date>/` (the
+3. Check the printed summary (items per folder, items with synthesized headers, and
+   non-mail items skipped per message class) against the folder counts Outlook shows.
+   The script writes `<dest>/<namespace>/<export-date>.partial/` and renames it only
+   when every item is written; it refuses an existing destination
+   (`destination_exists`). Upload `upload/<namespace>/<export-date>/` (the
    `items/` objects and `manifest.jsonl`) only after the owner's go.
 
 ## How items are paired
 
-readpst writes the mail items of a folder as `1.eml`, `2.eml`, … in the folder's
-descriptor order, and pypff lists the folder's items in the same order. The script
-keeps the PST items whose message class is mail (`IPM`, `IPM.Note*`,
-`IPM.Schedule.Meeting*`, `REPORT.IPM.Note*`, readpst's email types) and pairs them by
-position. It stops with a fixed error instead of guessing:
+readpst numbers every item of a folder in the folder's descriptor order (mail, other
+items and subfolders share the counter), so the `.eml` files of a folder can have gaps.
+pypff lists the folder's items in the same order. The script starts at the store's IPM
+subtree (`PR_IPM_SUBTREE_ENTRYID`), keeps the PST items whose message class is mail
+(`IPM`, `IPM.Note*`, `IPM.Schedule.Meeting*`, `REPORT.IPM.Note*`, readpst's email
+types), and pairs them by rank with the `.eml` files in numeric order. Folder names
+follow readpst's directory names: `/`, `\` and `:` become `_`, and a repeated sibling
+name gets `1`, `2`, … appended. Every pair is checked, and the script stops with a
+fixed error instead of guessing:
 
 - `folder_count_mismatch`: a folder's mail item count differs from its `.eml` files.
-- `pair_mismatch`: the Message-ID of the PST item's transport headers differs from the
-  `.eml`'s, or, for an item without transport headers, its subject is not in the
-  `.eml`'s `Subject` (an RFC 2047 encoded subject is not compared).
+- `pair_mismatch`: the item's `PR_INTERNET_MESSAGE_ID` differs from the `.eml`'s
+  `Message-ID`; for an item with transport headers, their first `Received` line is not
+  in the `.eml`'s headers; for an item without them, the `.eml`'s `Date` is more than a
+  second from the item's submit time.
 - `item_without_time`, `duplicate_node_id`, `readpst_dir_not_one_store`,
-  `pst_top_folder_not_found`, `invalid_namespace`, `invalid_export_date`.
+  `pst_ipm_subtree_missing`, `pst_ipm_subtree_not_found`, `unsafe_folder_name`,
+  `invalid_namespace`, `invalid_export_date`, `destination_exists`.
 
 It prints no mail content, only counts and the export's SHA-256.
 
@@ -89,12 +98,14 @@ It prints no mail content, only counts and the export's SHA-256.
 
 - `itemKind` is `note`, `schedule` (meeting requests and responses) or `report`
   (delivery reports).
-- `headers` is `transport` when the PST kept the delivered headers
-  (`PR_TRANSPORT_MESSAGE_HEADERS`) and `synthesized` when readpst built them from item
-  properties (the owner's sent items).
-- `deliveredAt` is the PST delivery time for an item with transport headers, else the
-  client submit time, in UTC. It is the source for `received_at` and the
-  `ingest/<date>/` key, never the `Date` header.
+- `headers` is `transport` when readpst used the delivered headers
+  (`PR_TRANSPORT_MESSAGE_HEADERS`, when the block starts with a header readpst accepts,
+  as in readpst's `valid_headers`) and `synthesized` when it built them from item
+  properties (the owner's sent items, and any other item without usable transport
+  headers).
+- `deliveredAt` is the PST delivery time for an item with transport headers and the
+  client submit time for a synthesized one (each falls back to the other), in UTC. It is
+  the source for `received_at` and the `ingest/<date>/` key, never the `Date` header.
 - The folder names are the PST's, possibly localized (for example `受信トレイ`).
 - The object bytes are readpst's rebuilt MIME. readpst picks random MIME boundaries, so
   converting the same PST twice gives different `sha256` values; `pstNodeId` and
@@ -107,4 +118,6 @@ It prints no mail content, only counts and the export's SHA-256.
 | University Microsoft 365 | 2,666 (Inbox 2,614, Sent Items 33, Junk Email 17, Archive 2) | 35 (Sent Items, Archive) |
 | Personal Microsoft account | 89 (受信トレイ 2, Archive 87) | 0 |
 
-Every item paired. The objects total about 346 MB and 4.8 MB.
+Every item paired. The objects total about 354 MB. Skipped as non-mail: 87
+`IPM.Appointment` (university); 69 `IPM.Contact`, 124 `IPM.AbchPerson` and 1
+`IPM.Network` (personal).
