@@ -149,26 +149,32 @@ Only the Workflow reads it; HTTP and mail cannot configure a run:
 }
 ```
 
-- The manifest key must be `<accountNamespace>/<YYYY-MM-DD>/manifest.jsonl`, and the
-  object must have exactly the configured size, or the run stops
-  (`pst_manifest_size_mismatch`, `pst_manifest_missing`).
+- The manifest key must be `<accountNamespace>/<YYYY-MM-DD>/manifest.jsonl`, or the
+  configuration is refused (`invalid_pst_configuration`; the cron logs `deferred` and
+  starts nothing). The object must have exactly the configured size, or the run stops
+  (`pst_manifest_size_mismatch`, `pst_manifest_missing`). The first step records the
+  manifest's etag; a manifest replaced during the run, even by one of the same size,
+  stops it (`pst_manifest_changed`).
 - The five-minute cron starts the `PstImport` Workflow (`fumi-pst-import`, concurrency
   1) for a configured run that is still `running`. Each step processes at most 50 lines
   or 128 MiB of items. A step that fails after five retries stops the run with its
   fixed code. One secret configures one run; the next mailbox is a new run with a new
   `runId`, after the first one completes.
 - `attempt` resumes a stopped run with the same mailbox and manifest; `skip` lists
-  manifest line numbers an operator reviewed and chose not to import (`skipped`).
+  manifest line numbers an operator reviewed and chose not to import (`skipped`). A
+  skipped line is passed by its position, before it is parsed, so a line that does not
+  parse can be skipped too. If an earlier step of the run already stored that line, it
+  is recorded as `imported` instead.
 
 ### Per line
 
 1. The line must match the manifest format exactly (no other fields; `deliveredAt` in
-   `YYYY-MM-DDTHH:MM:SS.mmmZ`; folder names without control characters, at most 32
-   segments of 255 characters and 4 KiB as JSON), have the next line number, the key
+   `YYYY-MM-DDTHH:MM:SS.mmmZ`; the folder a JSON array of strings, at most 4 KiB as
+   JSON, possibly empty for an item at the root), have the next line number, the key
    `<prefix>/items/<line, 6 digits>.eml`, and the same `exportSha256` as every earlier
    line of the run. Otherwise the run stops at that line: `pst_manifest_invalid`,
    `pst_manifest_line_mismatch`, `pst_manifest_key_mismatch`, `pst_export_mismatch`,
-   `pst_manifest_line_too_long`.
+   `pst_manifest_line_too_long` (a line over 256 KiB).
 
 2. Ingest ID = UUID from SHA-256(`["outlook-pst-v1", namespace, pstNodeId]`); raw key
    `ingest/<deliveredAt date>/<ingest ID>/raw.eml`.
@@ -213,13 +219,23 @@ Only the Workflow reads it; HTTP and mail cannot configure a run:
    commit together, and the [reconciler](archive-catalog.md) restores both from the
    receipt.
 
+5. Writes are conditional, so an earlier run's objects are never replaced. If the raw
+   object and receipt already exist but their catalog rows do not (not yet
+   reconciled), the existing receipt is committed and decides the line as in step 3.
+   Existing objects that do not match the item (other raw bytes from a reconversion,
+   another identity or a receipt for another item) stop the run with
+   `pst_source_conflict`, `pst_identity_conflict` or `pst_receipt_conflict`; once the
+   reconciler has restored the catalog rows, a new `attempt` compares them as in
+   step 3.
+
 ### Tables
 
-- `pst_import_runs`: configuration, manifest size, `next_offset` and `next_line`, the
-  run's `export_sha256`, status, `stop_code` and `stop_line`, lease and Workflow
-  instance.
+- `pst_import_runs`: configuration, manifest size and etag, `next_offset` and
+  `next_line`, the run's `export_sha256`, status, `stop_code` and `stop_line`, lease and
+  Workflow instance.
 - `pst_import_items`: one row per manifest line with `imported`, `verified`,
-  `conflict` or `skipped`, the node ID and the stored original's key, size and SHA-256.
+  `conflict` or `skipped`, the node ID (empty for a skipped line that did not parse)
+  and the stored original's key, size and SHA-256.
 - `pst_messages`: one row per PST original, unique per mailbox and node ID.
 
 Useful checks after a run: `SELECT status,stop_code,stop_line,next_line FROM

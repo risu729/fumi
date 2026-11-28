@@ -28,18 +28,13 @@ const isoTime = v.pipe(
   v.string(),
   v.check((value) => validArchiveTime(value, value.slice(0, 10))),
 );
+/**
+ * The folder path as the converter writes it: the PST's own names, possibly localized,
+ * from the IPM subtree down (`[]` for mail directly in it). Names are data and stay
+ * JSON-escaped; only the total size is bounded, so every converter output fits a receipt.
+ */
 export const pstFolder = v.pipe(
-  v.array(
-    v.pipe(
-      v.string(),
-      v.minLength(1),
-      v.maxLength(255),
-      // Names are data; control characters are never part of a folder name readpst writes.
-      v.check((name) => ![...name].some((c) => c.charCodeAt(0) < 32 || c === "\u007f")),
-    ),
-  ),
-  v.minLength(1),
-  v.maxLength(32),
+  v.array(v.string()),
   v.check((folder) => utf8.encode(JSON.stringify(folder)).length <= PST_FOLDER_LIMIT),
 );
 export const pstItemKind = v.picklist(["note", "schedule", "report"]);

@@ -7,6 +7,8 @@ CREATE TABLE pst_import_runs (
   account_namespace TEXT NOT NULL,
   config_json TEXT NOT NULL,
   manifest_size INTEGER NOT NULL CHECK (manifest_size > 0),
+  -- The manifest object's etag when the run first read it; a replaced manifest stops it.
+  manifest_etag TEXT,
   next_offset INTEGER NOT NULL DEFAULT 0 CHECK (next_offset >= 0),
   next_line INTEGER NOT NULL DEFAULT 1 CHECK (next_line >= 1),
   -- The .pst file every manifest line names, set by the first line.
@@ -23,7 +25,8 @@ CREATE TABLE pst_import_runs (
 CREATE TABLE pst_import_items (
   run_id TEXT NOT NULL REFERENCES pst_import_runs(run_id),
   manifest_line INTEGER NOT NULL,
-  pst_node_id INTEGER NOT NULL,
+  -- NULL for a skipped line whose node ID could not be read.
+  pst_node_id INTEGER,
   outcome TEXT NOT NULL CHECK (outcome IN ('imported','verified','conflict','skipped')),
   raw_size INTEGER,
   raw_sha256 TEXT,
@@ -49,3 +52,4 @@ CREATE TABLE pst_messages (
   imported_at TEXT NOT NULL,
   UNIQUE (account_namespace,pst_node_id)
 );
+CREATE INDEX pst_messages_run_line ON pst_messages(run_id,manifest_line);

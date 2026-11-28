@@ -94,7 +94,7 @@ const config = (runId: string, size: number, extra = {}): PstConfig =>
     }),
   })!;
 
-async function drain(run: PstConfig, limits?: { bufferBytes?: number }) {
+async function drain(run: PstConfig, limits?: { bufferBytes?: number; readBytes?: number }) {
   await startPstRun(env.MAIL_CATALOG, run);
   for (let i = 0; i < 20; i++) {
     // oxlint-disable-next-line no-await-in-loop -- Chunks advance one checkpoint in order.
@@ -278,13 +278,32 @@ describe("Outlook PST import", () => {
       status: "complete",
     });
     expect(await outcomes("changed")).toEqual({ imported: 1, skipped: 1 });
+
+    // A reviewed line is skipped by its position, even one that does not parse.
+    const broken = await upload(items(3, 10), {
+      edit: (lines) => (lines[1] = { line: 2, note: "x".repeat(10) }),
+    });
+    expect(await drain(config("broken", broken))).toMatchObject({
+      status: "stopped",
+      code: "pst_manifest_invalid",
+      line: 2,
+    });
+    expect(await drain(config("broken", broken, { attempt: 1, skip: [2] }))).toMatchObject({
+      status: "complete",
+    });
+    expect(await outcomes("broken")).toEqual({ imported: 2, skipped: 1 });
+    expect(
+      await env.MAIL_CATALOG.prepare(
+        "SELECT pst_node_id,raw_key FROM pst_import_items WHERE run_id='broken' AND manifest_line=2",
+      ).first(),
+    ).toEqual({ pst_node_id: null, raw_key: null });
   });
 
   it("refuses manifest lines that are malformed, out of order, misplaced or from another export", async () => {
     const cases: [string, (lines: Record<string, unknown>[]) => void][] = [
       ["pst_manifest_invalid", (lines) => (lines[1]!["extra"] = true)],
       ["pst_manifest_invalid", (lines) => (lines[1]!["deliveredAt"] = "2025-07-08T09:44:00Z")],
-      ["pst_manifest_invalid", (lines) => (lines[1]!["folder"] = ["bad\u0001name"])],
+      ["pst_manifest_invalid", (lines) => (lines[1]!["folder"] = ["x".repeat(4096)])],
       ["pst_manifest_line_mismatch", (lines) => (lines[1]!["line"] = 3)],
       ["pst_manifest_key_mismatch", (lines) => (lines[1]!["key"] = `${prefix}/items/000001.eml`)],
       ["pst_export_mismatch", (lines) => (lines[1]!["exportSha256"] = "f".repeat(64))],
@@ -378,6 +397,153 @@ describe("Outlook PST import", () => {
     expect(await drain(config("resume", size, { attempt: 1 }))).toMatchObject({
       status: "complete",
     });
+  });
+
+  it("reads lines across manifest windows and stops at a line longer than a window", async () => {
+    const size = await upload(items(5));
+    expect(await drain(config("windows", size), { readBytes: 600 })).toMatchObject({
+      status: "complete",
+    });
+    expect(await outcomes("windows")).toEqual({ imported: 5 });
+    expect(await drain(config("narrow", size), { readBytes: 100 })).toMatchObject({
+      status: "stopped",
+      code: "pst_manifest_line_too_long",
+      line: 1,
+    });
+  });
+
+  it("stops when the manifest is replaced during a run, even by one of the same size", async () => {
+    const size = await upload(items(PST_CHUNK_ITEMS + 2));
+    const run = config("replaced", size);
+    await startPstRun(env.MAIL_CATALOG, run);
+    expect(await runPstChunk(env, run)).toMatchObject({ status: "advanced" });
+    expect(await upload(items(PST_CHUNK_ITEMS + 2), { exportSha: "f".repeat(64) })).toBe(size);
+    expect(await runPstChunk(env, run)).toMatchObject({
+      status: "stopped",
+      code: "pst_manifest_changed",
+      line: PST_CHUNK_ITEMS + 1,
+    });
+  });
+
+  it("waits while another runner holds the lease", async () => {
+    const size = await upload(items(1));
+    const run = config("leased", size);
+    await startPstRun(env.MAIL_CATALOG, run);
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE pst_import_runs SET lease_token='other',lease_until=? WHERE run_id='leased'",
+    )
+      .bind(Date.now() + 60_000)
+      .run();
+    expect(await runPstChunk(env, run)).toEqual({ status: "busy", processed: 0, nextLine: 1 });
+    expect(await outcomes("leased")).toEqual({});
+  });
+
+  it("decides an item whose catalog rows were lost by the receipt an earlier run wrote", async () => {
+    const size = await upload(items(2));
+    expect(await drain(config("first", size))).toMatchObject({ status: "complete" });
+    // The archive keeps raw objects and receipts; the catalog has not been reconciled yet.
+    await env.MAIL_CATALOG.prepare("DELETE FROM pst_messages").run();
+    await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources").run();
+    expect(await drain(config("again", size))).toMatchObject({ status: "complete" });
+    expect(await outcomes("again")).toEqual({ verified: 2 });
+    expect(
+      (
+        await env.MAIL_CATALOG.prepare("SELECT DISTINCT run_id FROM pst_messages").all<{
+          run_id: string;
+        }>()
+      ).results,
+    ).toEqual([{ run_id: "first" }]);
+
+    // A reconverted item has other bytes; the stored raw object differs, so the run stops
+    // until the reconciler restores the catalog row it can then be compared with.
+    await env.MAIL_CATALOG.prepare("DELETE FROM pst_messages").run();
+    await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources").run();
+    const other = await upload([{ n: 0, body: "Other boundary." }, { n: 1 }]);
+    expect(await drain(config("reconverted", other))).toMatchObject({
+      status: "stopped",
+      code: "pst_source_conflict",
+      line: 1,
+    });
+    for (let page = 0; page < 100; page++)
+      if ((await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG)).status === "complete") break;
+    expect(await drain(config("reconverted", other, { attempt: 1 }))).toMatchObject({
+      status: "complete",
+    });
+    expect(await outcomes("reconverted")).toEqual({ verified: 2 });
+  });
+
+  it("reports a PST original with a missing raw object or receipt as a coverage issue", async () => {
+    const size = await upload(items(2));
+    expect(await drain(config("partial", size))).toMatchObject({ status: "complete" });
+    const keys = (
+      await env.MAIL_CATALOG.prepare(
+        "SELECT raw_key FROM pst_messages ORDER BY manifest_line",
+      ).all<{ raw_key: string }>()
+    ).results.map((row) => row.raw_key);
+    await env.MAIL_ARCHIVE.delete(keys[0]!);
+    await env.MAIL_ARCHIVE.delete(keys[1]!.replace(/raw\.eml$/, "receipt.json"));
+    await env.MAIL_CATALOG.prepare("DELETE FROM pst_messages").run();
+    await env.MAIL_CATALOG.prepare("DELETE FROM archive_sources").run();
+    for (let page = 0; page < 100; page++)
+      if ((await reconcileArchive(env.MAIL_ARCHIVE, env.MAIL_CATALOG)).status === "complete") break;
+    expect(
+      (
+        await env.MAIL_CATALOG.prepare(
+          `SELECT s.raw_key,s.source_kind,s.source_namespace,s.raw_state,s.receipt_state,
+          p.raw_key IS NOT NULL AS has_provenance FROM archive_sources s
+          LEFT JOIN pst_messages p ON p.raw_key=s.raw_key ORDER BY s.raw_key=?`,
+        )
+          .bind(keys[1])
+          .all()
+      ).results,
+    ).toEqual([
+      {
+        raw_key: keys[0],
+        source_kind: "mailbox_export",
+        source_namespace: namespace,
+        raw_state: "missing",
+        receipt_state: "valid",
+        has_provenance: 1,
+      },
+      {
+        raw_key: keys[1],
+        source_kind: "mailbox_export",
+        source_namespace: namespace,
+        raw_state: "invalid",
+        receipt_state: "missing",
+        has_provenance: 0,
+      },
+    ]);
+    expect(
+      (
+        await env.MAIL_CATALOG.prepare("SELECT code FROM archive_issues ORDER BY code").all<{
+          code: string;
+        }>()
+      ).results.map((row) => row.code),
+    ).toEqual(["missing_raw", "missing_receipt"]);
+  });
+
+  it("records a skipped line that an earlier step of the run already stored", async () => {
+    const size = await upload(items(2));
+    const run = config("stored", size);
+    expect(await drain(run)).toMatchObject({ status: "complete" });
+    // As if line 2 was stored by a step that timed out, and the run then stopped there.
+    await env.MAIL_CATALOG.prepare("DELETE FROM pst_import_items WHERE manifest_line=2").run();
+    const first = (await (await env.TAKEOUT_ARCHIVE.get(manifestKey))!.text()).split("\n")[0]!;
+    await env.MAIL_CATALOG.prepare(
+      "UPDATE pst_import_runs SET status='stopped',stop_code='pst_import_failed',stop_line=2,next_line=2,next_offset=? WHERE run_id='stored'",
+    )
+      .bind(encoder.encode(first).length + 1)
+      .run();
+    expect(await drain(config("stored", size, { attempt: 1, skip: [2] }))).toMatchObject({
+      status: "complete",
+    });
+    const row = await env.MAIL_CATALOG.prepare(
+      `SELECT i.outcome,i.raw_key=s.raw_key AS same_key,i.raw_size=s.raw_size AS same_size,
+      i.raw_sha256=s.raw_sha256 AS same_sha FROM pst_import_items i
+      JOIN archive_sources s ON s.raw_key=i.raw_key WHERE i.run_id='stored' AND i.manifest_line=2`,
+    ).first();
+    expect(row).toEqual({ outcome: "imported", same_key: 1, same_size: 1, same_sha: 1 });
   });
 
   it("lets only fixed codes out of a Workflow step", () => {

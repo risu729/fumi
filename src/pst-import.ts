@@ -100,6 +100,13 @@ const lineSchema = v.strictObject({
 });
 type ManifestLine = v.InferOutput<typeof lineSchema>;
 
+/** storePstSource codes that mean stored objects disagree with the item: a run stops. */
+const STORE_CONFLICTS = new Set([
+  "pst_identity_conflict",
+  "pst_source_conflict",
+  "pst_receipt_conflict",
+]);
+
 /** Items processed per chunk, and the most item bytes one chunk reads. */
 export const PST_CHUNK_ITEMS = 50;
 export const PST_CHUNK_BYTES = 128 * 1024 * 1024;
@@ -203,14 +210,15 @@ export interface PstStoreContext {
 
 /**
  * Writes one PST original: raw object and receipt with conditional writes, then the
- * catalog row and its pst_messages row in one fenced commit. Returns the raw key.
+ * catalog row and its pst_messages row in one fenced commit. Returns the committed
+ * provenance: `proposed`, or the receipt an earlier run already wrote for this item.
  */
 export async function storePstSource(
   env: Pick<PstEnvironment, "MAIL_CATALOG" | "MAIL_ARCHIVE">,
   proposed: PstProvenance,
   bytes: Uint8Array | GmailRawStream,
   known: PstStoreContext = {},
-): Promise<string> {
+): Promise<PstProvenance> {
   if (!parsePstProvenance(proposed)) throw new PstImportError("pst_invalid_provenance");
   const size = bytes instanceof Uint8Array ? bytes.byteLength : bytes.size;
   const { rawKey, rawSha256 } = proposed;
@@ -305,7 +313,7 @@ export async function storePstSource(
       },
       [],
     );
-    if (result.committed && result.indexed === 1) return rawKey;
+    if (result.committed && result.indexed === 1) return provenance;
   }
   throw new PstImportError("pst_catalog_busy");
 }
@@ -358,9 +366,10 @@ export type PstChunkResult =
 export async function runPstChunk(
   env: PstEnvironment,
   config: PstConfig,
-  limits: { bufferBytes?: number } = {},
+  limits: { bufferBytes?: number; readBytes?: number } = {},
 ): Promise<PstChunkResult> {
   const bufferBytes = limits.bufferBytes ?? PST_BUFFER_BYTES;
+  const readBytes = limits.readBytes ?? PST_MANIFEST_READ_BYTES;
   const db = env.MAIL_CATALOG;
   const json = configJson(config);
   const total = config.manifest.size;
@@ -372,10 +381,15 @@ export async function runPstChunk(
     .prepare(
       `UPDATE pst_import_runs SET lease_token=?,lease_until=?
       WHERE run_id=? AND config_json=? AND status='running' AND lease_until<=?
-      RETURNING next_offset,next_line,export_sha256`,
+      RETURNING next_offset,next_line,export_sha256,manifest_etag`,
     )
     .bind(lease, now + LEASE_MS, config.runId, json, now)
-    .first<{ next_offset: number; next_line: number; export_sha256: string | null }>();
+    .first<{
+      next_offset: number;
+      next_line: number;
+      export_sha256: string | null;
+      manifest_etag: string | null;
+    }>();
   if (!claimed) {
     const row = await db
       .prepare(`SELECT ${RUN_COLUMNS},stop_code,stop_line FROM pst_import_runs WHERE run_id=?`)
@@ -430,10 +444,21 @@ export async function runPstChunk(
     const head = await env.TAKEOUT_ARCHIVE.head(config.manifest.key);
     if (!head) return await halt("pst_manifest_missing");
     if (head.size !== total) return await halt("pst_manifest_size_mismatch");
+    // The first chunk pins the manifest object; a replaced one, even of the same size,
+    // stops the run instead of mixing lines of two manifests.
+    const etag = head.etag;
+    if (claimed.manifest_etag === null)
+      await db
+        .prepare(
+          "UPDATE pst_import_runs SET manifest_etag=? WHERE run_id=? AND lease_token=? AND manifest_etag IS NULL",
+        )
+        .bind(etag, config.runId, lease)
+        .run();
+    else if (claimed.manifest_etag !== etag) return await halt("pst_manifest_changed");
 
     /** Records one line's outcome and moves the checkpoint past it, in one batch. */
     const record = async (
-      item: ManifestLine,
+      item: { pstNodeId: number | null; exportSha256: string | null },
       end: number,
       outcome: Outcome,
       details: { rawKey?: string; rawSha256?: string; size?: number } = {},
@@ -468,7 +493,7 @@ export async function runPstChunk(
             `UPDATE pst_import_runs SET next_offset=?,next_line=?,export_sha256=COALESCE(export_sha256,?),
               lease_until=?
             WHERE run_id=? AND lease_token=? AND lease_until>? AND next_line=? AND next_offset=?
-              AND status='running' AND (export_sha256 IS NULL OR export_sha256=?)`,
+              AND status='running' AND (? IS NULL OR export_sha256 IS NULL OR export_sha256=?)`,
           )
           .bind(
             end,
@@ -481,18 +506,60 @@ export async function runPstChunk(
             line,
             offset,
             item.exportSha256,
+            item.exportSha256,
           ),
       );
       const results = await db.batch(statements);
       if (!results.at(-1)?.meta.changes) throw new PstImportError("pst_lease_lost");
       offset = end;
       line++;
-      exportSha256 = item.exportSha256;
+      exportSha256 ??= item.exportSha256;
       processed++;
       if (outcome === "imported" && details.rawKey) {
         undispatched.push(details.rawKey);
         if (undispatched.length >= DISPATCH_ITEMS) await dispatch();
       }
+    };
+
+    /**
+     * Decides a line whose item is already stored. readpst output is not byte-stable, so
+     * a replay compares the manifest entry: the same export, folder, kind, headers and
+     * delivery time.
+     */
+    const compare = async (
+      item: ManifestLine,
+      end: number,
+      rawKey: string,
+      stored: {
+        rawKey: string;
+        exportSha256: string;
+        folder: string;
+        itemKind: string;
+        headers: string;
+        deliveredAt: string;
+        details: { rawKey: string; rawSha256: string; size: number };
+      },
+    ): Promise<PstChunkResult | null> => {
+      const same =
+        stored.rawKey === rawKey &&
+        stored.exportSha256 === item.exportSha256 &&
+        stored.folder === JSON.stringify(item.folder) &&
+        stored.itemKind === item.itemKind &&
+        stored.headers === item.headers &&
+        stored.deliveredAt === item.deliveredAt;
+      if (!same && config.onConflict === "stop") {
+        const { details } = stored;
+        await db
+          .prepare(
+            `INSERT INTO pst_import_items(run_id,manifest_line,pst_node_id,outcome,raw_size,raw_sha256,raw_key)
+            VALUES (?,?,?,'conflict',?,?,?) ON CONFLICT(run_id,manifest_line) DO NOTHING`,
+          )
+          .bind(config.runId, line, item.pstNodeId, details.size, details.rawSha256, details.rawKey)
+          .run();
+        return halt("pst_source_conflict");
+      }
+      await record(item, end, same ? "verified" : "conflict", stored.details);
+      return null;
     };
 
     const handle = async (text: Uint8Array, end: number): Promise<PstChunkResult | null> => {
@@ -502,8 +569,42 @@ export async function runPstChunk(
           new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(text),
         );
       } catch {
-        return halt("pst_manifest_invalid");
+        value = undefined;
       }
+      // A skipped line is found by its position, so a line the operator reviewed is passed
+      // even when it does not parse.
+      if (skip.has(line)) {
+        // A step that timed out may have stored this item after the run stopped.
+        const stored = await db
+          .prepare(`SELECT p.raw_key,p.pst_node_id,s.raw_size,s.raw_sha256 FROM pst_messages p
+            LEFT JOIN archive_sources s ON s.raw_key=p.raw_key WHERE p.run_id=? AND p.manifest_line=?`)
+          .bind(config.runId, line)
+          .first<{
+            raw_key: string;
+            pst_node_id: number;
+            raw_size: number | null;
+            raw_sha256: string | null;
+          }>();
+        const nodeId = (value as { pstNodeId?: unknown } | undefined)?.pstNodeId;
+        await record(
+          {
+            pstNodeId:
+              stored?.pst_node_id ?? (Number.isSafeInteger(nodeId) ? (nodeId as number) : null),
+            exportSha256: null,
+          },
+          end,
+          stored ? "imported" : "skipped",
+          stored
+            ? {
+                rawKey: stored.raw_key,
+                ...(stored.raw_size === null ? {} : { size: stored.raw_size }),
+                ...(stored.raw_sha256 === null ? {} : { rawSha256: stored.raw_sha256 }),
+              }
+            : {},
+        );
+        return null;
+      }
+      if (value === undefined) return halt("pst_manifest_invalid");
       const parsed = v.safeParse(lineSchema, value);
       if (!parsed.success) return halt("pst_manifest_invalid");
       const item = parsed.output;
@@ -512,15 +613,6 @@ export async function runPstChunk(
         return halt("pst_manifest_key_mismatch");
       if (exportSha256 !== null && item.exportSha256 !== exportSha256)
         return halt("pst_export_mismatch");
-      if (skip.has(line)) {
-        // A step that timed out may have stored this item after the run stopped.
-        const stored = await db
-          .prepare("SELECT raw_key FROM pst_messages WHERE run_id=? AND manifest_line=?")
-          .bind(config.runId, line)
-          .first<string>("raw_key");
-        await record(item, end, stored ? "imported" : "skipped", stored ? { rawKey: stored } : {});
-        return null;
-      }
       const ingestId = await pstIngestId(config.accountNamespace, item.pstNodeId);
       const rawKey = `ingest/${item.deliveredAt.slice(0, 10)}/${ingestId}/raw.eml`;
       const existing = await db
@@ -556,34 +648,15 @@ export async function runPstChunk(
           await record(item, end, "imported", details);
           return null;
         }
-        // readpst output is not byte-stable, so a replay compares the manifest entry: the
-        // same export, folder, kind, headers and delivery time.
-        const same =
-          existing.raw_key === rawKey &&
-          existing.export_sha256 === item.exportSha256 &&
-          existing.folder_json === JSON.stringify(item.folder) &&
-          existing.item_kind === item.itemKind &&
-          existing.headers === item.headers &&
-          existing.delivered_at === item.deliveredAt;
-        if (!same && config.onConflict === "stop") {
-          await db
-            .prepare(
-              `INSERT INTO pst_import_items(run_id,manifest_line,pst_node_id,outcome,raw_size,raw_sha256,raw_key)
-              VALUES (?,?,?,'conflict',?,?,?) ON CONFLICT(run_id,manifest_line) DO NOTHING`,
-            )
-            .bind(
-              config.runId,
-              line,
-              item.pstNodeId,
-              details.size,
-              details.rawSha256,
-              details.rawKey,
-            )
-            .run();
-          return halt("pst_source_conflict");
-        }
-        await record(item, end, same ? "verified" : "conflict", details);
-        return null;
+        return compare(item, end, rawKey, {
+          rawKey: existing.raw_key,
+          exportSha256: existing.export_sha256,
+          folder: existing.folder_json,
+          itemKind: existing.item_kind,
+          headers: existing.headers,
+          deliveredAt: existing.delivered_at,
+          details,
+        });
       }
       const object = await env.TAKEOUT_ARCHIVE.head(item.key);
       if (!object) return halt("pst_object_missing");
@@ -624,9 +697,29 @@ export async function runPstChunk(
       if (!parsePstProvenance(proposed)) return halt("pst_invalid_provenance");
       if (encoder.encode(JSON.stringify(proposed)).length > MAX_RECEIPT_BYTES)
         return halt("pst_receipt_too_large");
-      // The lookup above found no pst_messages row for this mailbox and node ID.
-      await storePstSource(env, proposed, raw, { absent: true, checkpoint: catalog });
-      await record(item, end, "imported", { rawKey, rawSha256, size: item.size });
+      let stored: PstProvenance;
+      try {
+        // The lookup above found no pst_messages row for this mailbox and node ID.
+        stored = await storePstSource(env, proposed, raw, { absent: true, checkpoint: catalog });
+      } catch (error) {
+        // Stored objects that disagree with this item do not change on a retry.
+        if (error instanceof PstImportError && STORE_CONFLICTS.has(error.code))
+          return halt(error.code);
+        throw error;
+      }
+      const details = { rawKey, rawSha256, size: item.size };
+      // A receipt an earlier run wrote (its catalog row was lost) decides like a row would.
+      if (stored.runId !== config.runId || stored.manifestLine !== line)
+        return compare(item, end, rawKey, {
+          rawKey: stored.rawKey,
+          exportSha256: stored.exportSha256,
+          folder: JSON.stringify(stored.folder),
+          itemKind: stored.itemKind,
+          headers: stored.headers,
+          deliveredAt: stored.deliveredAt,
+          details,
+        });
+      await record(item, end, "imported", details);
       return null;
     };
 
@@ -636,7 +729,7 @@ export async function runPstChunk(
     let failure: string | null = null;
     let outcome: PstChunkResult | null = null;
     while (!failure && !outcome && unread() && budgetLeft()) {
-      const length = Math.min(PST_MANIFEST_READ_BYTES, total - offset);
+      const length = Math.min(readBytes, total - offset);
       // oxlint-disable-next-line no-await-in-loop -- One manifest window at a time, in order.
       const part = await env.TAKEOUT_ARCHIVE.get(config.manifest.key, {
         range: { offset, length },
@@ -644,6 +737,7 @@ export async function runPstChunk(
       // oxlint-disable-next-line no-await-in-loop -- See above.
       const window = part ? new Uint8Array(await part.arrayBuffer()) : null;
       if (!window) failure = "pst_manifest_missing";
+      else if (part!.etag !== etag) failure = "pst_manifest_changed";
       else if (window.byteLength !== length) failure = "pst_manifest_size_mismatch";
       else {
         const start = offset;
