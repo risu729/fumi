@@ -112,8 +112,9 @@ establish production delivery.
       and a personal Microsoft account) as their own originals and group them with the
       copies fumi already has ([ADR 0006](adr/0006-outlook-pst-import.md), owner
       2026-11-28 08:59 UTC). Trial conversion and duplicate estimate done (2,755 mail
-      items, 2,642 already in fumi, 113 new). Left: the converter, the transport and
-      the grouping rule, then a production run on the owner's go.
+      items, 2,642 already in fumi, 113 new). The converter is done
+      ([Outlook PST import](outlook-pst-import.md)). Left: the transport and the
+      grouping rule, then a production run on the owner's go.
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
