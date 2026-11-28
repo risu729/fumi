@@ -6,6 +6,13 @@ import { canonicalReceipt, parseReceipt } from "./receipt-schema.ts";
 import type { CatalogIssue, IssueCode, SourceObservation } from "./catalog.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
 import { parseGmailProvenance, gmailRawMatches, gmailNamespace } from "./gmail-provenance.ts";
+import {
+  parsePstProvenance,
+  pstIngestId,
+  pstNamespace,
+  pstRawMatches,
+  type PstProvenance,
+} from "./pst-provenance.ts";
 
 export const RECONCILE_PAGE_SIZE = 20;
 export const MAX_RECEIPT_BYTES = 16 * 1024;
@@ -128,6 +135,67 @@ async function readReceipt(bucket: R2Bucket, candidate: Candidate): Promise<Rece
   return { state: "valid", receipt };
 }
 
+/**
+ * A mailbox export original (ADR 0006): an outlook-pst-v1 receipt, or a raw object whose
+ * metadata names the kind. Null when neither is one, so the other kinds are tried.
+ */
+async function observeExport(
+  candidate: Candidate,
+  raw: R2Object | null,
+  value: unknown,
+  receiptExists: boolean,
+): Promise<{ observation: SourceObservation; issues: CatalogIssue[] } | null> {
+  const rawKey = `${candidate.prefix}/raw.eml`;
+  const receiptKey = `${candidate.prefix}/receipt.json`;
+  let provenance: PstProvenance | null = parsePstProvenance(value);
+  if (
+    provenance &&
+    (provenance.rawKey !== rawKey ||
+      (await pstIngestId(provenance.accountNamespace, provenance.pstNodeId)) !== candidate.ingestId)
+  )
+    provenance = null;
+  const namespace = provenance?.accountNamespace ?? raw?.customMetadata?.["pstNamespace"];
+  if (
+    !provenance &&
+    !(raw?.customMetadata?.["sourceKind"] === "mailbox_export" && pstNamespace(namespace))
+  )
+    return null;
+  const valid = raw !== null && provenance !== null && pstRawMatches(raw, provenance);
+  // As for Gmail imports: a partial write is a coverage issue that a replay repairs.
+  return {
+    observation: {
+      ingestId: candidate.ingestId,
+      rawKey,
+      receiptKey,
+      receivedAt: provenance?.deliveredAt ?? null,
+      snapshot: null,
+      forward: null,
+      rawState: !raw ? "missing" : valid ? "present" : "invalid",
+      receiptState: provenance ? "valid" : receiptExists ? "invalid" : "missing",
+      rawSize: provenance?.rawSize ?? null,
+      rawSha256: provenance?.rawSha256 ?? null,
+      notifyEvents: false,
+      ...(provenance ? { pst: provenance } : {}),
+      sourceKind: "mailbox_export",
+      sourceNamespace: namespace!,
+    },
+    issues: valid
+      ? []
+      : [
+          {
+            key: !raw ? rawKey : receiptKey,
+            code: !raw
+              ? "missing_raw"
+              : provenance
+                ? "evidence_mismatch"
+                : receiptExists
+                  ? "invalid_receipt"
+                  : "missing_receipt",
+          },
+        ],
+  };
+}
+
 async function observe(
   bucket: R2Bucket,
   candidate: Candidate,
@@ -135,16 +203,22 @@ async function observe(
   const rawKey = `${candidate.prefix}/raw.eml`;
   const receiptKey = `${candidate.prefix}/receipt.json`;
   const gmailRaw = await bucket.head(rawKey);
-  if (gmailRaw?.customMetadata?.["sourceKind"] === "gmail" || !gmailRaw) {
+  const rawKind = gmailRaw?.customMetadata?.["sourceKind"];
+  if (rawKind === "gmail" || rawKind === "mailbox_export" || !gmailRaw) {
     const object = await bucket.get(receiptKey);
-    let provenance = null;
+    let value: unknown = null;
     if (object && object.size <= MAX_RECEIPT_BYTES) {
       try {
-        provenance = parseGmailProvenance(await object.json());
+        value = await object.json();
       } catch {
         /* Invalid evidence is recorded below. */
       }
     } else if (object) await object.body.cancel();
+    if (rawKind !== "gmail") {
+      const exported = await observeExport(candidate, gmailRaw, value, object !== null);
+      if (exported) return exported;
+    }
+    let provenance = rawKind === "mailbox_export" ? null : parseGmailProvenance(value);
     if (provenance?.rawKey !== rawKey) provenance = null;
     const namespace = provenance?.accountNamespace ?? gmailRaw?.customMetadata?.["gmailNamespace"];
     if (

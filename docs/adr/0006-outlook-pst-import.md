@@ -169,3 +169,19 @@ points differ from the agent specification above:
   owner types when exporting, which is not always the mailbox's primary SMTP address.
   Every later export of the same mailbox must hash the same address, or it gets a
   second namespace and its items become separate originals.
+
+## Amendment 2026-11-28: transport details (agent)
+
+The transport is implemented
+([Worker transport](../outlook-pst-import.md#worker-transport)). Details the
+specification above left open or that differ:
+
+- The folder table is `pst_messages`, keyed by raw key and unique per mailbox and node
+  ID. It also holds the item kind, `headers`, delivery time, export SHA-256, run and
+  manifest line, so it plays the part of `gmail_messages` for PST originals, and the
+  reconciler restores it from the receipt.
+- The receipt is flat: the fields listed above plus `schemaVersion`,
+  `accountNamespace`, `deliveredAt`, `importedAt`, `rawKey`, `rawSize` and `rawSha256`.
+- `PST_IMPORT_CONFIG` also takes `onConflict` (`stop` by default, or `record`), as the
+  Takeout configuration does. A conflict is an item whose node ID is already stored
+  from another export or with another folder, kind, headers or delivery time.

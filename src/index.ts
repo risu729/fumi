@@ -17,6 +17,7 @@ import { repairRoutingDispatch } from "./routing-dispatch.ts";
 import { routingRuntime } from "./routing-runtime.ts";
 import { repairManagedMailCorpus } from "./managed-mail-corpus.ts";
 import { ensureTakeoutWorkflow } from "./gmail-takeout-import.ts";
+import { ensurePstWorkflow } from "./pst-import.ts";
 import { repairMailIdentity } from "./mail-identity.ts";
 import { classifyForwardError, type ForwardErrorReason } from "./forward-failure.ts";
 import {
@@ -28,6 +29,7 @@ import {
 
 export { MailProcessing } from "./mail-processing.ts";
 export { TakeoutImport } from "./gmail-takeout-workflow.ts";
+export { PstImport } from "./pst-import-workflow.ts";
 import type { ArchiveReceipt } from "./receipt-schema.ts";
 
 export type Receipt = ArchiveReceipt;
@@ -313,6 +315,13 @@ export default {
       console.log(JSON.stringify({ event: "gmail_takeout", ...takeout }));
     } catch {
       console.error(JSON.stringify({ event: "gmail_takeout", status: "deferred" }));
+      failed = true;
+    }
+    try {
+      const pst = await ensurePstWorkflow(env);
+      console.log(JSON.stringify({ event: "pst_import", ...pst }));
+    } catch {
+      console.error(JSON.stringify({ event: "pst_import", status: "deferred" }));
       failed = true;
     }
     try {

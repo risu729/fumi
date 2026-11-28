@@ -26,7 +26,10 @@ independent identities. The `mailbox_export` source kind (migration
 `0026_mailbox_export_source.sql`, [ADR 0006](adr/0006-outlook-pst-import.md)) holds
 originals converted from a mailbox export such as an
 [Outlook PST file](outlook-pst-import.md). Like `gmail`, the catalog refuses SMTP
-forwarding evidence and notifications for it. The migration rebuilds `archive_sources`
+forwarding evidence and notifications for it. The reconciler restores each
+original's `pst_messages` row from its `outlook-pst-v1` receipt, as it does Gmail
+provenance; a raw object marked `mailbox_export` without a valid receipt is a coverage
+issue. The migration rebuilds `archive_sources`
 with every rowid and index kept and restores both routing tables around the rebuild, as
 `0014` did.
 

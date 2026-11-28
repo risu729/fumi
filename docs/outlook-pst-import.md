@@ -2,9 +2,11 @@
 
 Status: the converter is implemented and was run on the owner's two exports
 (2026-11-28). The catalog admits the `mailbox_export` source kind
-([archive catalog](archive-catalog.md#identity-and-evidence)). The Worker transport
-that reads the converter's output is not implemented yet. The design is
-[ADR 0006](adr/0006-outlook-pst-import.md).
+([archive catalog](archive-catalog.md#identity-and-evidence)), and the
+[Worker transport](#worker-transport) that reads the converter's output is
+implemented and tested with synthetic items; it has not run in production. Readers do
+not show PST folders yet, and the grouping rule of the ADR is not implemented. The
+design is [ADR 0006](adr/0006-outlook-pst-import.md).
 
 The converter turns one Outlook `.pst` export into the objects and the manifest of an
 `outlook-pst-v1` run. It runs on the owner's computer, never in the Worker, because the
@@ -119,6 +121,131 @@ It prints no mail content, only counts and the export's SHA-256.
 - The object bytes are readpst's rebuilt MIME. readpst picks random MIME boundaries, so
   converting the same PST twice gives different `sha256` values; `pstNodeId` and
   `exportSha256` identify an item.
+
+## Worker transport
+
+[`src/pst-import.ts`](../src/pst-import.ts) reads one converted export and stores every
+manifest line's object as its own original of source kind `mailbox_export`, with the
+same durability rules as the
+[Takeout transport](gmail-import.md#google-takeout-transport): a lease, a checkpoint
+that advances only in the batch that records the line's outcome, one Workflow instance
+at a time and a `mime-v1` processing job per imported item.
+
+### Configuration
+
+An operator uploads `<namespace>/<export-date>/` (the `items/` objects and
+`manifest.jsonl`) to the private bucket `fumi-takeout` (binding `TAKEOUT_ARCHIVE`) at
+the keys the manifest names, and sets the optional Worker secret `PST_IMPORT_CONFIG`.
+Only the Workflow reads it; HTTP and mail cannot configure a run:
+
+```json
+{
+  "runId": "pst-university-2026-11-28",
+  "accountNamespace": "outlook-<24 hex>",
+  "manifest": { "key": "outlook-<24 hex>/2026-11-28/manifest.jsonl", "size": 123456 },
+  "onConflict": "stop",
+  "attempt": 0,
+  "skip": []
+}
+```
+
+- The manifest key must be `<accountNamespace>/<YYYY-MM-DD>/manifest.jsonl`, or the
+  configuration is refused (`invalid_pst_configuration`; the cron logs `deferred` and
+  starts nothing). The object must have exactly the configured size, or the run stops
+  (`pst_manifest_size_mismatch`, `pst_manifest_missing`). The first step records the
+  manifest's etag; a manifest replaced during the run, even by one of the same size,
+  stops it (`pst_manifest_changed`). The run keeps the etag it recorded, so the way on
+  is to restore the original object or to start a new `runId`.
+- The five-minute cron starts the `PstImport` Workflow (`fumi-pst-import`, concurrency
+  1) for a configured run that is still `running`. Each step processes at most 50 lines
+  or 128 MiB of items. A step that fails after five retries stops the run with its
+  fixed code. One secret configures one run; the next mailbox is a new run with a new
+  `runId`, after the first one completes.
+- `attempt` resumes a stopped run with the same mailbox and manifest; `skip` lists
+  manifest line numbers an operator reviewed and chose not to import (`skipped`). A
+  skipped line is passed by its position, before it is parsed, so a line that does not
+  parse can be skipped too. If an earlier step of the run already stored that line, it
+  is recorded as `imported` instead. Two lines cannot be skipped, because their end is
+  not known: a line over 256 KiB and a last line without LF.
+
+### Per line
+
+1. The line must match the manifest format exactly (no other fields; `deliveredAt` in
+   `YYYY-MM-DDTHH:MM:SS.mmmZ`; the folder a JSON array of strings, at most 4 KiB as
+   JSON, possibly empty for an item at the root), have the next line number, the key
+   `<prefix>/items/<line, 6 digits>.eml`, and the same `exportSha256` as every earlier
+   line of the run. Otherwise the run stops at that line: `pst_manifest_invalid`,
+   `pst_manifest_line_mismatch`, `pst_manifest_key_mismatch`, `pst_export_mismatch`,
+   `pst_manifest_line_too_long` (a line over 256 KiB).
+
+2. Ingest ID = UUID from SHA-256(`["outlook-pst-v1", namespace, pstNodeId]`); raw key
+   `ingest/<deliveredAt date>/<ingest ID>/raw.eml`.
+
+3. If `pst_messages` already holds that mailbox and node ID, nothing is stored. The
+   outcome is `verified` when the stored original came from the same export with the
+   same folder, kind, headers and delivery time (a converter replay gives other bytes,
+   so the raw SHA-256 is not compared), and `conflict` otherwise; with
+   `onConflict: "stop"` a conflict stops the run (`pst_source_conflict`) after
+   recording it. A stored original that is not present and valid stops the run
+   (`pst_existing_source_invalid`).
+
+4. Otherwise the object must exist with the manifest's size and SHA-256
+   (`pst_object_missing`, `pst_object_size_mismatch`, `pst_object_sha256_mismatch`).
+   Items over 32 MiB are hashed and stored in two streamed passes. The raw object gets
+   metadata `sourceKind: mailbox_export`, `pstNamespace`, `pstNodeId` and
+   `eventNotifications: 0`, and the receipt is `outlook-pst-v1`:
+
+   ```json
+   {
+     "schemaVersion": "outlook-pst-v1",
+     "accountNamespace": "outlook-<24 hex>",
+     "pstNodeId": 2097220,
+     "deliveredAt": "2026-01-02T03:04:05.678Z",
+     "importedAt": "2026-11-28T12:00:00.000Z",
+     "rawKey": "ingest/2026-01-02/<ingest ID>/raw.eml",
+     "rawSize": 12345,
+     "rawSha256": "<64 hex>",
+     "runId": "pst-university-2026-11-28",
+     "objectKey": "outlook-<24 hex>/2026-11-28/items/000001.eml",
+     "manifestLine": 1,
+     "exportSha256": "<64 hex>",
+     "converter": "readpst 0.6.76 -j 0 -e -D; pypff 20180714",
+     "folder": ["Inbox"],
+     "itemKind": "note",
+     "headers": "transport"
+   }
+   ```
+
+   `received_at` is `deliveredAt`. The catalog row and its `pst_messages` row (raw key,
+   mailbox, node ID, folder JSON, kind, headers, delivery time, export, run and line)
+   commit together, and the [reconciler](archive-catalog.md) restores both from the
+   receipt.
+
+5. Writes are conditional, so an earlier run's objects are never replaced. If the raw
+   object and receipt already exist but their catalog rows do not (not yet
+   reconciled), the existing receipt is committed and decides the line as in step 3.
+   Existing objects that do not match the item (other raw bytes from a reconversion,
+   another identity or a receipt for another item) stop the run with
+   `pst_source_conflict`, `pst_identity_conflict` or `pst_receipt_conflict`. When a
+   valid earlier receipt exists, the reconciler restores the catalog rows and a new
+   `attempt` compares them as in step 3; otherwise the line needs `skip`. A
+   `pst_source_conflict` from step 3 leaves a `conflict` row in `pst_import_items` for
+   the line, one from this step does not.
+
+### Tables
+
+- `pst_import_runs`: configuration, manifest size and etag, `next_offset` and
+  `next_line`, the run's `export_sha256`, status, `stop_code` and `stop_line`, lease and
+  Workflow instance.
+- `pst_import_items`: one row per manifest line with `imported`, `verified`,
+  `conflict` or `skipped`, the node ID (empty for a skipped line that did not parse)
+  and the stored original's key, size and SHA-256.
+- `pst_messages`: one row per PST original, unique per mailbox and node ID.
+
+Useful checks after a run: `SELECT status,stop_code,stop_line,next_line FROM
+pst_import_runs`, `SELECT outcome,COUNT(*) FROM pst_import_items WHERE run_id=? GROUP
+BY outcome`, and the items' `raw_key` joined to `mail_extractions` and
+`processing_jobs`.
 
 ## Run of 2026-11-28 (not uploaded)
 
