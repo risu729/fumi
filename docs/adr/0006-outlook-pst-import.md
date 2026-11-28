@@ -145,8 +145,9 @@ Agent specification:
 - 6 items stay ungrouped with the current data (4 sent items with `From: MAILER-DAEMON`,
   2 others) and show as separate results.
 - The new grouping rule trusts Message-ID, From and Date across a signed/unsigned pair
-  for PST originals only. As with the other rules, a forged copy can at most hide one
-  in default listings.
+  for PST originals only (for every mailbox copy, Gmail copies too, since the amendment
+  "unsigned Gmail copies" below). As with the other rules, a forged copy can at most
+  hide one in default listings.
 - `in:inbox` and `in:sent` do not find PST originals, including the 31 new sent items,
   until a folder filter exists. Other searches find them.
 - A production run still needs the owner's go, after the code is merged.
@@ -190,7 +191,7 @@ specification above left open or that differ:
 
 ## Amendment 2026-11-28: grouping rule in both orders (agent)
 
-The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-exports)).
+The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-copies)).
 "Joins an earlier original" alone would depend on indexing order, which is newest
 catalog row first, so a full re-backfill would index the PST originals before the
 older Gmail copies and split them. A signed row therefore also joins an earlier
@@ -200,4 +201,31 @@ the ADR's bound on forgery: without it, a copy with any `DKIM-Signature` and the
 Message-ID, From and Date would join the group through the PST original and could
 become its representative. Order independence holds for one PST original and one
 signed copy; with a third, unsigned copy that is not a PST original, an import and a
-full re-backfill can group them differently (see the copy grouping page).
+full re-backfill can group them differently (see the copy grouping page). Since the
+next amendment, this holds only when the third copy is an unsigned live capture: an
+unsigned Gmail copy is a mailbox copy too.
+
+## Amendment 2026-11-28: unsigned Gmail copies (owner)
+
+The owner asked for the same grouping for Gmail copies (2026-11-28 12:25 UTC,
+"まとめるようにして", "group them"). Agent analysis: on 2026-11-28 production held 25
+pairs of an unsigned Gmail copy and a signed copy with the same Message-ID, From and
+Date that stayed apart. Every
+unsigned one carries the `Sent` Takeout label: Gmail stores the sender's copy before it
+adds its outgoing `DKIM-Signature`, while the recipient's copy (in another imported
+account, the same account for a mail sent to itself, or a live capture) is signed.
+
+Agent specification: the rule applies to every unsigned original read from a mailbox,
+source kinds `gmail` and `mailbox_export`, not only to PST originals, with the same
+guard (a signed row joins an unsigned mailbox copy only when no signed row with that
+Message-ID exists yet). An unsigned mailbox copy now prefers an unsigned match and joins
+a signed row only without one, so an unsigned live capture and its Gmail copy stay one
+group when a signed copy was indexed first. It also joins a signed row only while every
+signed row of its Message-ID is in one group, so with a conflict (possibly forged)
+already indexed it joins neither. Both guards follow indexing order, which a full
+re-backfill reverses (newest first); the copy grouping page gives the case where a
+forged copy then wins. Unsigned live captures (`email_routing`) are not covered: fumi
+captures them in transit, and no pair in the data needs it. The bound on forgery is
+unchanged: as with the other rules, a copy with forged headers can at most hide one copy
+in default listings. Details:
+[copy grouping](../copy-grouping.md#mailbox-copies).
