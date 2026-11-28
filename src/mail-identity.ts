@@ -235,10 +235,15 @@ function exportMatchSql(rule: GroupRule, exported: boolean) {
       sql: `${base} AND m.group_rule IN ('message_id_from_date','message_id_dkim') AND m.message_id=? AND m.from_address=? AND m.header_date=? ORDER BY m.rowid LIMIT 1`,
       values: (i: HeaderIdentity) => [i.messageId, i.from, i.date],
     };
+  // Only the first signed copy joins this way: a later one with another body hash is a
+  // conflict with that copy, not a copy of the export, so a forged signature cannot use
+  // the export to enter the group.
   if (rule === "message_id_dkim")
     return {
-      sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${EXPORTED_SQL} ORDER BY m.rowid LIMIT 1`,
-      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date],
+      sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${EXPORTED_SQL}
+        AND NOT EXISTS(SELECT 1 FROM mail_identity d WHERE d.identity_version='${IDENTITY_VERSION}' AND d.status='complete' AND d.group_rule='message_id_dkim' AND d.message_id=?)
+        ORDER BY m.rowid LIMIT 1`,
+      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date, i.messageId],
     };
   return null;
 }

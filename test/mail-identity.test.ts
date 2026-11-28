@@ -425,6 +425,34 @@ describe("header-only mail identity", () => {
         (mail) => mail.copies,
       ),
     ).toEqual([3]);
+
+    // Only the first signed copy joins through the export. A later signed copy with
+    // another body hash conflicts with that copy and stays apart, so copying the
+    // Message-ID, From and Date with any signature does not enter the group.
+    const date = "Mon, 09 Nov 2026 06:01:24 +0000";
+    const exported = await archive(
+      "mailbox_export",
+      "2026-11-09T06:01:20.000Z",
+      mime(headers({ messageId: id("d"), date })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const genuine = await archive(
+      "gmail",
+      "2026-11-09T06:01:30.000Z",
+      mime(headers({ messageId: id("d"), bh: [BH_A], date })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const forged = await archive(
+      "email_routing",
+      "2026-11-09T06:01:40.000Z",
+      mime(headers({ messageId: id("d"), bh: [BH_B], date })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(genuine.key)).toBe(await groupOf(exported.key));
+    expect(await groupOf(forged.key)).not.toBe(await groupOf(exported.key));
+    expect((await identities()).find((row) => row.raw_key === forged.key)).toMatchObject({
+      message_id_conflict: 1,
+    });
   });
 
   it("records originals it cannot read as blocked and never rewrites a row", async () => {

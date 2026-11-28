@@ -108,14 +108,22 @@ Message-ID, equal From and equal Date are one group:
 
 - An unsigned export joins the earliest row of either rule with that Message-ID, From
   and Date.
-- A signed row first looks for its own rule's match. Without one, it joins the earliest
-  unsigned export with the same Message-ID, From and Date, so the result does not depend
-  on which of the two is indexed first.
+- A signed row first looks for its own rule's match. Without one, and only when no
+  signed row with that Message-ID exists yet, it joins the earliest unsigned export
+  with the same Message-ID, From and Date. So for one export and one signed copy the
+  result does not depend on which of the two is indexed first, and a later signed copy
+  with another body hash (a conflict, possibly forged) cannot enter the group through
+  the export.
 
 Group keys and the other rules are unchanged, so existing rows keep their groups and no
 re-backfill is needed. A signed and an unsigned original that are both not exports still
-stay apart. With the 2026-11-28 data, the ADR expects 2,636 of the 2,642 PST items fumi
-already holds to group: 1,470 by the earlier rules and 1,166 by this one.
+stay apart, unless an export links them: with three copies of one Message-ID, From and
+Date (a signed one S, an unsigned non-export U and an export E), the export joins the
+earliest of S and U and the other stays apart when both were indexed before it, while a
+full re-backfill, which indexes the newer export first, puts all three in one group.
+Rows are written once, so the two results are not reconciled. With the 2026-11-28 data,
+the ADR expects 2,636 of the 2,642 PST items fumi already holds to group: 1,470 by the
+earlier rules and 1,166 by this one.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.

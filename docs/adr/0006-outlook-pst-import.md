@@ -194,4 +194,9 @@ The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-ex
 catalog row first, so a full re-backfill would index the PST originals before the
 older Gmail copies and split them. A signed row therefore also joins an earlier
 unsigned PST original with the same Message-ID, From and Date when no signed row
-matches it.
+matches it and no signed row with that Message-ID exists yet. That last condition keeps
+the ADR's bound on forgery: without it, a copy with any `DKIM-Signature` and the copied
+Message-ID, From and Date would join the group through the PST original and could
+become its representative. Order independence holds for one PST original and one
+signed copy; with a third, unsigned copy that is not a PST original, an import and a
+full re-backfill can group them differently (see the copy grouping page).
