@@ -217,6 +217,37 @@ export async function groupId(key: unknown[]) {
 
 const OVERLAP =
   "EXISTS(SELECT 1 FROM json_each(m.dkim_bh_json) a JOIN json_each(?) b ON a.value=b.value)";
+/** An identity row `m` whose original is a mailbox export (ADR 0006), such as a PST item. */
+const EXPORTED_SQL =
+  "EXISTS(SELECT 1 FROM archive_sources x WHERE x.raw_key=m.raw_key AND x.source_kind='mailbox_export')";
+/**
+ * ADR 0006: an unsigned mailbox export original and a signed original with the same
+ * Message-ID, From and Date are copies of one message. The export (a PST item) was
+ * rebuilt from the mailbox, which keeps no signature that a later hop added, such as
+ * the forwarding route to Gmail. The rule holds in both indexing orders: an unsigned
+ * export joins an earlier signed row, and a signed row joins an earlier unsigned export
+ * when no signed row matches it.
+ */
+function exportMatchSql(rule: GroupRule, exported: boolean) {
+  const base = `SELECT m.group_id FROM mail_identity m WHERE m.identity_version='${IDENTITY_VERSION}' AND m.status='complete'`;
+  if (rule === "message_id_from_date" && exported)
+    return {
+      sql: `${base} AND m.group_rule IN ('message_id_from_date','message_id_dkim') AND m.message_id=? AND m.from_address=? AND m.header_date=? ORDER BY m.rowid LIMIT 1`,
+      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date],
+    };
+  // Only the first signed copy joins this way: a later one with another body hash is a
+  // conflict with that copy, not a copy of the export, so a forged signature cannot use
+  // the export to enter the group.
+  if (rule === "message_id_dkim")
+    return {
+      sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${EXPORTED_SQL}
+        AND NOT EXISTS(SELECT 1 FROM mail_identity d WHERE d.identity_version='${IDENTITY_VERSION}' AND d.status='complete' AND d.group_rule='message_id_dkim' AND d.message_id=?)
+        ORDER BY m.rowid LIMIT 1`,
+      values: (i: HeaderIdentity) => [i.messageId, i.from, i.date, i.messageId],
+    };
+  return null;
+}
+
 /**
  * One INSERT per original. The earlier row it matches is found inside the same statement,
  * so concurrent or batched writes see every committed row. The earliest match wins.
@@ -262,6 +293,8 @@ export async function identityStatement(
   rawSha256: string,
   result: HeaderIdentity | IdentityFailure,
   now: string,
+  /** The original is a mailbox export (source kind `mailbox_export`). */
+  exported = false,
 ): Promise<D1PreparedStatement> {
   if (typeof result === "string")
     return db
@@ -271,13 +304,20 @@ export async function identityStatement(
       )
       .bind(rawKey, IDENTITY_VERSION, rawSha256, result, now);
   const { rule, key } = groupKey(result, rawKey);
-  const match = matchSql(rule);
+  // Tried in order. The export match of an unsigned export covers its own rule's match;
+  // a signed row prefers a signed match. A row without a Date has no export match
+  // (header_date=NULL never matches).
+  const exportMatch = exportMatchSql(rule, exported);
+  const matches =
+    exportMatch && rule === "message_id_from_date"
+      ? [exportMatch]
+      : [matchSql(rule), ...(exportMatch ? [exportMatch] : [])];
   const conflict = result.messageId && result.bodyHashes.length;
   return db
     .prepare(
       `INSERT INTO mail_identity (raw_key,identity_version,raw_sha256,status,message_id,dkim_bh_json,
       from_address,to_json,subject,header_date,group_id,group_rule,message_id_conflict,indexed_at)
-      SELECT ?,?,?,'complete',?,?,?,?,?,?,COALESCE((${match.sql}),?),?,${conflict ? CONFLICT_SQL : "0"},? WHERE 1
+      SELECT ?,?,?,'complete',?,?,?,?,?,?,COALESCE(${matches.map((match) => `(${match.sql})`).join(",")},?),?,${conflict ? CONFLICT_SQL : "0"},? WHERE 1
       ON CONFLICT(raw_key) DO NOTHING`,
     )
     .bind(
@@ -290,7 +330,7 @@ export async function identityStatement(
       JSON.stringify(result.to),
       result.subject,
       result.date,
-      ...match.values(result),
+      ...matches.flatMap((match) => match.values(result)),
       await groupId(key),
       rule,
       ...(conflict ? [result.messageId, JSON.stringify(result.bodyHashes), result.from] : []),
@@ -343,12 +383,12 @@ export async function repairMailIdentity(
     : FULL_SCAN;
   const pending = (
     await env.MAIL_CATALOG.prepare(
-      `SELECT s.raw_key,s.raw_sha256,i.raw_key IS NOT NULL AS replaced FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
+      `SELECT s.raw_key,s.raw_sha256,s.source_kind,i.raw_key IS NOT NULL AS replaced FROM archive_sources s LEFT JOIN mail_identity i ON i.raw_key=s.raw_key
       WHERE (i.raw_key IS NULL OR NOT ${CURRENT_IDENTITY_SQL}) AND s.raw_state='present' AND s.raw_sha256 IS NOT NULL
       AND s.rowid > ? AND s.rowid <= ? ORDER BY s.rowid DESC LIMIT ?`,
     )
       .bind(window.after, window.through, limit)
-      .all<{ raw_key: string; raw_sha256: string; replaced: number }>()
+      .all<{ raw_key: string; raw_sha256: string; source_kind: string; replaced: number }>()
   ).results;
   const results: (HeaderIdentity | IdentityFailure | null)[] = Array.from({
     length: pending.length,
@@ -385,7 +425,14 @@ export async function repairMailIdentity(
             ).bind(row.raw_key, IDENTITY_VERSION),
           ]
         : []),
-      await identityStatement(env.MAIL_CATALOG, row.raw_key, row.raw_sha256, result, time),
+      await identityStatement(
+        env.MAIL_CATALOG,
+        row.raw_key,
+        row.raw_sha256,
+        result,
+        time,
+        row.source_kind === "mailbox_export",
+      ),
     ]),
   );
   // Batches run in order, so a later original sees the rows of earlier ones. An
