@@ -114,8 +114,8 @@ establish production delivery.
       2026-11-28 08:59 UTC). Trial conversion and duplicate estimate done (2,755 mail
       items, 2,642 already in fumi, 113 new). The converter is done
       ([Outlook PST import](outlook-pst-import.md)), and so are the `mailbox_export`
-      source kind and the transport. Left: readers (folders, representative order) and
-      the grouping rule, then the production run (owner go for after the work,
+      source kind, the transport and the grouping rule. Left: readers (folders,
+      representative order), then the production run (owner go for after the work,
       2026-11-28 09:39 UTC).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
