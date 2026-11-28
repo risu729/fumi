@@ -3,8 +3,9 @@
 Status: accepted by the owner on 2026-11-28 at 08:59 UTC
 ("はい、まとめる理由を足すべきと思う", "yes, I think the reason to group them should be
 added"), answering the proposal to store every PST item as its own original and add a
-grouping rule so that the copies collapse (option 1 below). The converter is implemented
-(amendment 2026-11-28); the transport and the grouping rule are not. Everything
+grouping rule so that the copies collapse (option 1 below). The converter, the
+transport and the grouping rule are implemented (amendments 2026-11-28); the readers
+are not. Everything
 else, including the reasoning under "Why group instead of dropping", was written by an
 agent and is not confirmed by the owner. Amends
 [ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md): one more grouping rule, and
@@ -185,3 +186,12 @@ specification above left open or that differ:
 - `PST_IMPORT_CONFIG` also takes `onConflict` (`stop` by default, or `record`), as the
   Takeout configuration does. A conflict is an item whose node ID is already stored
   from another export or with another folder, kind, headers or delivery time.
+
+## Amendment 2026-11-28: grouping rule in both orders (agent)
+
+The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-exports)).
+"Joins an earlier original" alone would depend on indexing order, which is newest
+catalog row first, so a full re-backfill would index the PST originals before the
+older Gmail copies and split them. A signed row therefore also joins an earlier
+unsigned PST original with the same Message-ID, From and Date when no signed row
+matches it.

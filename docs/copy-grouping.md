@@ -86,7 +86,8 @@ the same Message-ID as an earlier one, both signed, but no shared body hash or a
 From does not match that row and has `message_id_conflict` set. It can still join that
 row's group through a third row, as `[b]` does in the second order above, so the flag
 does not mean the row stands alone. A signed and an unsigned copy with the same
-Message-ID are not grouped. Signatures that
+Message-ID are not grouped, unless the unsigned one is a
+[mailbox export](#mailbox-exports). Signatures that
 fumi's own forwarding route adds sit above `X-Fumi-Ingest-ID` and are ignored, so an
 unsigned live capture still groups with its Gmail copy. A signature added by a hop
 before fumi captured the mail (for example a Gmail account that forwards to fumi) is on
@@ -95,6 +96,26 @@ one copy keeps the two results apart. Hops only add headers on top, so the botto
 `X-Fumi-Ingest-ID` is the same header in every copy, even when the original already
 carried one. A header named `X-Fumi-Ingest-ID` inside the original mail therefore makes
 every copy ignore the signatures above it, which an unsigned sender gets anyway.
+
+### Mailbox exports
+
+[ADR 0006](adr/0006-outlook-pst-import.md) adds one rule for originals of source kind
+`mailbox_export` ([Outlook PST import](outlook-pst-import.md)). Such an original is
+rebuilt from the mailbox, so it lacks any signature a later hop added, such as the
+forwarding route that brought the same mail to Gmail. An unsigned export
+(`message_id_from_date`) and a signed original (`message_id_dkim`) with the same
+Message-ID, equal From and equal Date are one group:
+
+- An unsigned export joins the earliest row of either rule with that Message-ID, From
+  and Date.
+- A signed row first looks for its own rule's match. Without one, it joins the earliest
+  unsigned export with the same Message-ID, From and Date, so the result does not depend
+  on which of the two is indexed first.
+
+Group keys and the other rules are unchanged, so existing rows keep their groups and no
+re-backfill is needed. A signed and an unsigned original that are both not exports still
+stay apart. With the 2026-11-28 data, the ADR expects 2,636 of the 2,642 PST items fumi
+already holds to group: 1,470 by the earlier rules and 1,166 by this one.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.
