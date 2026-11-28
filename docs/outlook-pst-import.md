@@ -1,8 +1,10 @@
 # Outlook PST import
 
 Status: the converter is implemented and was run on the owner's two exports
-(2026-11-28). The Worker transport that reads its output is not implemented yet. The
-design is [ADR 0006](adr/0006-outlook-pst-import.md).
+(2026-11-28). The catalog admits the `mailbox_export` source kind
+([archive catalog](archive-catalog.md#identity-and-evidence)). The Worker transport
+that reads the converter's output is not implemented yet. The design is
+[ADR 0006](adr/0006-outlook-pst-import.md).
 
 The converter turns one Outlook `.pst` export into the objects and the manifest of an
 `outlook-pst-v1` run. It runs on the owner's computer, never in the Worker, because the
