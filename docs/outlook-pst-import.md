@@ -270,11 +270,16 @@ mailbox at a time. Checked with read-only queries on the production D1 catalog.
 - `mail_identity` is complete for all 2,755. 2,642 have a Message-ID that a
   non-export original also has. 2,636 of them share a group with such a copy, as
   [ADR 0006](adr/0006-outlook-pst-import.md#verification) expected: 1,470 by
-  `message_id_dkim` and 1,166 by the mailbox-export rule. The personal mailbox
+  `message_id_dkim` and 1,166 by the
+  [signed/unsigned rule](copy-grouping.md#mailbox-copies). The personal mailbox
   accounts for 87 and the university for 2,549.
 - 6 stay apart, all university: 4 Sent Items with synthesized headers whose `From`
   differs from the Gmail copy, 1 Inbox item signed in the PST whose Gmail copy is
-  unsigned, and 1 Inbox item where both copies are signed but share no `bh=`.
+  unsigned, and 1 Inbox item where both copies are signed but share no `bh=`. The rule
+  then covered only an unsigned PST copy;
+  [fumi#227](https://github.com/risu729/fumi/pull/227) extended it to the signed PST
+  item with the unsigned Gmail copy, and migration 0028
+  ([fumi#229](https://github.com/risu729/fumi/pull/229)) regroups it.
 - 113 have a Message-ID no other original has (university 111, personal 2), and none
   of them is grouped.
 - `mime-v1`: 2,740 extractions complete. 15 items over 4 MiB (4,468,971 to 17,142,654
