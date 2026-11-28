@@ -49,6 +49,7 @@ code or evidence shows a better option.
 - [0003: Signed notification webhooks with identifiers only](adr/0003-signed-notification-webhooks.md)
 - [0004: Gmail backfill from Google Takeout, and grouping copies of one message](adr/0004-gmail-takeout-import-and-copy-grouping.md)
 - [0005: Capture mail delivered directly to Gmail through Gmail forwarding](adr/0005-capture-mail-delivered-directly-to-gmail.md)
+- [0006: Import Outlook PST exports and group them with existing copies](adr/0006-outlook-pst-import.md)
 
 Decisions made before ADRs were introduced stay in their owning pages, for
 example the library selections in [libraries](libraries.md). They move to an ADR
