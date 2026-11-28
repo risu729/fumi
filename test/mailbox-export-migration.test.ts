@@ -60,6 +60,12 @@ describe("mailbox export source migration", () => {
       );
     const before = await snapshot();
     const indexesBefore = await indexes(db);
+    const definition = async (name: string) =>
+      (await db
+        .prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?")
+        .bind(name)
+        .first<string>("sql"))!.replace(/\s+/g, " ");
+    const tablesBefore = await Promise.all(tables.map(definition));
     expect(indexesBefore.map((index) => index.name)).toEqual([
       "archive_sources_external_id",
       "archive_sources_raw_sha256",
@@ -71,6 +77,18 @@ describe("mailbox export source migration", () => {
     await applyD1Migrations(db, [migration]);
 
     expect(await snapshot()).toEqual(before);
+    // Every earlier constraint stays; the kind list and one CHECK are the only additions.
+    const [sources, ...routing] = await Promise.all(tables.map(definition));
+    expect(routing).toEqual(tablesBefore.slice(1));
+    expect(
+      sources!
+        .replace("archive_sources_mailbox_export", "archive_sources")
+        .replace(
+          ", CHECK (source_kind != 'mailbox_export' OR (notify_events = 0 AND forward_status IS NULL)) )",
+          " )",
+        )
+        .replace("'gmail','mailbox_export'", "'gmail'"),
+    ).toBe(tablesBefore[0]!.replace("archive_sources_standalone", "archive_sources"));
     // Same names and the same expressions, so INDEXED BY in src/mail-read.ts still applies.
     const normalize = (sql: string) => sql.replace(/\s+/g, " ").replace(/\( /g, "(");
     expect((await indexes(db)).map((index) => ({ ...index, sql: normalize(index.sql) }))).toEqual(
