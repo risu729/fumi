@@ -279,7 +279,9 @@ mailbox at a time. Checked with read-only queries on the production D1 catalog.
   then covered only an unsigned PST copy;
   [fumi#227](https://github.com/risu729/fumi/pull/227) extended it to the signed PST
   item with the unsigned Gmail copy, and migration 0028
-  ([fumi#229](https://github.com/risu729/fumi/pull/229)) regroups it.
+  ([fumi#229](https://github.com/risu729/fumi/pull/229)) regroups it. Checked
+  2026-11-28 13:10 UTC: that item now shares a group with its Gmail copy, so 2,637
+  share a group and 5 stay apart.
 - 113 have a Message-ID no other original has (university 111, personal 2), and none
   of them is grouped.
 - `mime-v1`: 2,740 extractions complete. 15 items over 4 MiB (4,468,971 to 17,142,654
