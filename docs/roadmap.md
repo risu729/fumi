@@ -111,15 +111,12 @@ establish production delivery.
         concurrency (owner, 2026-11-24 05:44 UTC, decided on the first 730 entries at
         about 0.6 s; kept at about 12 h for the main account, owner 2026-11-25 02:07
         UTC).
-- [ ] Import the owner's two Outlook PST exports (a university Microsoft 365 mailbox and
+- [x] Import the owner's two Outlook PST exports (a university Microsoft 365 mailbox and
       a personal Microsoft account) as their own originals and group them with the
       copies fumi already has ([ADR 0006](adr/0006-outlook-pst-import.md), owner
-      2026-11-28 08:59 UTC). Trial conversion and duplicate estimate done (2,755 mail
-      items, 2,642 already in fumi, 113 new). The converter is done
-      ([Outlook PST import](outlook-pst-import.md)), and so are the `mailbox_export`
-      source kind, the transport, the grouping rule and the readers. Left: the
-      production run (owner go for after the work,
-      2026-11-28 09:39 UTC).
+      2026-11-28 08:59 UTC). Done 2026-11-28 (owner go 09:39 UTC): 2,755 items
+      imported, 2,636 of the 2,642 already in fumi grouped with their copy, 113 new
+      ([Outlook PST import](outlook-pst-import.md#production-runs-of-2026-11-28)).
 - [x] Stop idle scheduled repairs from reading the whole catalog every five minutes,
       which grows with the Takeout import (owner request, 2026-11-23). Full repair
       passes run hourly and runs in between read only new sources and due retries. See
