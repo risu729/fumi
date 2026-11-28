@@ -11,7 +11,7 @@ CREATE TABLE pst_import_runs (
   manifest_etag TEXT,
   next_offset INTEGER NOT NULL DEFAULT 0 CHECK (next_offset >= 0),
   next_line INTEGER NOT NULL DEFAULT 1 CHECK (next_line >= 1),
-  -- The .pst file every manifest line names, set by the first line.
+  -- The .pst file every manifest line names, set by the first line that is not skipped.
   export_sha256 TEXT,
   status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','complete','stopped')),
   stop_code TEXT,

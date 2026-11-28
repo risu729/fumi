@@ -274,7 +274,15 @@ export async function storePstSource(
       await receipt?.body.cancel();
       throw new PstImportError("pst_receipt_conflict");
     }
-    provenance = parsePstProvenance(await receipt.json().catch(() => null));
+    // A read error is retried by the step; only a receipt that does not parse conflicts.
+    const text = await receipt.text();
+    let value: unknown = null;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      value = null;
+    }
+    provenance = parsePstProvenance(value);
   }
   if (
     !provenance ||
@@ -461,7 +469,7 @@ export async function runPstChunk(
       item: { pstNodeId: number | null; exportSha256: string | null },
       end: number,
       outcome: Outcome,
-      details: { rawKey?: string; rawSha256?: string; size?: number } = {},
+      details: { rawKey?: string; rawSha256?: string; size?: number; committed?: boolean } = {},
     ) => {
       const fence = `EXISTS(SELECT 1 FROM pst_import_runs WHERE run_id=? AND lease_token=?
         AND lease_until>? AND next_line=? AND next_offset=? AND status='running')`;
@@ -485,8 +493,8 @@ export async function runPstChunk(
             ...fenceArgs,
           ),
       ];
-      if (outcome === "imported" && details.rawKey)
-        statements.push(processingJobStatement(db, details.rawKey, Date.now()));
+      const queue = outcome === "imported" || details.committed ? details.rawKey : undefined;
+      if (queue) statements.push(processingJobStatement(db, queue, Date.now()));
       statements.push(
         db
           .prepare(
@@ -515,8 +523,8 @@ export async function runPstChunk(
       line++;
       exportSha256 ??= item.exportSha256;
       processed++;
-      if (outcome === "imported" && details.rawKey) {
-        undispatched.push(details.rawKey);
+      if (queue) {
+        undispatched.push(queue);
         if (undispatched.length >= DISPATCH_ITEMS) await dispatch();
       }
     };
@@ -537,7 +545,7 @@ export async function runPstChunk(
         itemKind: string;
         headers: string;
         deliveredAt: string;
-        details: { rawKey: string; rawSha256: string; size: number };
+        details: { rawKey: string; rawSha256: string; size: number; committed?: boolean };
       },
     ): Promise<PstChunkResult | null> => {
       const same =
@@ -717,7 +725,8 @@ export async function runPstChunk(
           itemKind: stored.itemKind,
           headers: stored.headers,
           deliveredAt: stored.deliveredAt,
-          details,
+          // This step committed the catalog row, so its processing job is queued now.
+          details: { ...details, committed: true },
         });
       await record(item, end, "imported", details);
       return null;

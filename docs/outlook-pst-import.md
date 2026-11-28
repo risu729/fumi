@@ -154,7 +154,8 @@ Only the Workflow reads it; HTTP and mail cannot configure a run:
   starts nothing). The object must have exactly the configured size, or the run stops
   (`pst_manifest_size_mismatch`, `pst_manifest_missing`). The first step records the
   manifest's etag; a manifest replaced during the run, even by one of the same size,
-  stops it (`pst_manifest_changed`).
+  stops it (`pst_manifest_changed`). The run keeps the etag it recorded, so the way on
+  is to restore the original object or to start a new `runId`.
 - The five-minute cron starts the `PstImport` Workflow (`fumi-pst-import`, concurrency
   1) for a configured run that is still `running`. Each step processes at most 50 lines
   or 128 MiB of items. A step that fails after five retries stops the run with its
@@ -164,7 +165,8 @@ Only the Workflow reads it; HTTP and mail cannot configure a run:
   manifest line numbers an operator reviewed and chose not to import (`skipped`). A
   skipped line is passed by its position, before it is parsed, so a line that does not
   parse can be skipped too. If an earlier step of the run already stored that line, it
-  is recorded as `imported` instead.
+  is recorded as `imported` instead. Two lines cannot be skipped, because their end is
+  not known: a line over 256 KiB and a last line without LF.
 
 ### Per line
 
@@ -224,9 +226,11 @@ Only the Workflow reads it; HTTP and mail cannot configure a run:
    reconciled), the existing receipt is committed and decides the line as in step 3.
    Existing objects that do not match the item (other raw bytes from a reconversion,
    another identity or a receipt for another item) stop the run with
-   `pst_source_conflict`, `pst_identity_conflict` or `pst_receipt_conflict`; once the
-   reconciler has restored the catalog rows, a new `attempt` compares them as in
-   step 3.
+   `pst_source_conflict`, `pst_identity_conflict` or `pst_receipt_conflict`. When a
+   valid earlier receipt exists, the reconciler restores the catalog rows and a new
+   `attempt` compares them as in step 3; otherwise the line needs `skip`. A
+   `pst_source_conflict` from step 3 leaves a `conflict` row in `pst_import_items` for
+   the line, one from this step does not.
 
 ### Tables
 
