@@ -145,12 +145,14 @@ it is ranked by kind rather than by time. The earliest Gmail copy stands for the
 account's own copy, because forwarding to another account happens after the first
 account received it (the ADR says "the account's own Gmail"; earliest receipt time is
 how the code decides it). A thread read always keeps the message it was asked for as its
-group's representative. Each result carries `group_id` (null for an original without a
-complete identity row for its current SHA-256 and current `identity_version`, for one
-whose catalog `raw_state` is not `present`, as for current extractions, or whose row is
-newer than the page snapshot) and `copies`, the number of the group's originals that
-matched the same filters. `expand_copies: true` returns every original with the same two
-fields.
+group's representative. `search_mail_content` and `search_mail_semantic` do not pick a
+representative: within a page or call they keep the first match of a group, in index or
+score order, so their `mail_` ID can be another copy than `search_emails` shows. Each
+result carries `group_id` (null for an original without a complete identity row for its
+current SHA-256 and current `identity_version`, for one whose catalog `raw_state` is not
+`present`, as for current extractions, or whose row is newer than the page snapshot) and
+`copies`, the number of the group's originals that matched the same filters.
+`expand_copies: true` returns every original with the same two fields.
 
 Pages follow representatives. The page token holds snapshots of both `archive_sources`
 and `mail_identity` rowids, and identity rows written after the first page are ignored

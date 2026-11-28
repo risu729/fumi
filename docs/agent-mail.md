@@ -113,7 +113,8 @@ original ([Outlook PST import](outlook-pst-import.md)) has no labels, so `label_
 `in:inbox` and `in:sent` never select it; its `provenance` carries the mailbox `folder`
 (the PST's own, possibly localized names), `item_kind`, `headers` (`synthesized` when
 the converter built them from item properties) and `mime_rebuilt: true`. Its thread read
-follows header links within the same mailbox export. Up to ten `label_ids` combine with
+follows header links among the PST originals of the same mailbox (every export of
+one mailbox shares its namespace). Up to ten `label_ids` combine with
 AND: imported messages retain provider label IDs; live ingress has `INBOX` and a `sent_`
 record `SENT`. Gmail SENT messages imported through the Gmail API carry `SENT`;
 `in:sent` finds them together with fumi-sent mail. For compatibility, `SENT` in

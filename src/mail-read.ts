@@ -1029,7 +1029,7 @@ export async function searchMail(
 }
 
 /**
- * Header links of a live thread. SQLite uses an expression index only for the identical
+ * Header links of a live or mailbox export thread. SQLite uses an expression index only for the identical
  * expression, so these must match migrations/0020_thread_lookup.sql exactly.
  */
 const headerLink = (path: string) =>
@@ -1088,8 +1088,8 @@ export async function readMailThread(
       : (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              // Live capture, or one mailbox export (ADR 0006): header links stay
-              // within the anchor's own source kind and namespace.
+              // Live capture, or the PST originals of one mailbox (ADR 0006): header
+              // links stay within the anchor's own source kind and namespace.
               `+s.source_kind=? AND +s.source_namespace=? AND s.raw_key IN (
     SELECT raw_key FROM archive_sources WHERE external_id=?
     UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?

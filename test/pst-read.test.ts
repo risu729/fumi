@@ -192,6 +192,16 @@ describe("reading PST originals", () => {
     );
     expect(thread.messages.map((message) => message.id)).toEqual([sentOnly.id]);
     expect(thread.threading).toBe("direct_message_id_header_links_only");
+    // The Gmail copy has the same Message-ID header, but a header link never leaves the
+    // mailbox: the PST copy's thread holds only the PST copy.
+    const sharedPst = archived(exported.emails)[1]!;
+    const shared = await readMailThread(
+      env,
+      principal,
+      { message_id: sharedPst.id, expand_copies: true },
+      "https://fumi.invalid",
+    );
+    expect(shared.messages.map((message) => message.id)).toEqual([sharedPst.id]);
     expect((await readMail(env, principal, sentOnly.id, "metadata")).provenance).toMatchObject({
       folder: ["Sent Items"],
     });

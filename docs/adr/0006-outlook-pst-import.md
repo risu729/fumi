@@ -112,7 +112,9 @@ Agent specification:
   restored around the rebuild. The `archive_source` filter, catalog, reconciler and
   health learn the kind.
 - Representative order: today every source that is not live capture is ordered by
-  `received_at` (`src/mail-read.ts`, `src/content-search.ts`). A PST delivery time is
+  `received_at` (`src/mail-read.ts`; agent, at implementation: `src/content-search.ts`
+  only orders indexing and keeps the first chunk of a page, so it does not pick a
+  representative). A PST delivery time is
   earlier than the Gmail receipt time, so the order gets an explicit rank: live
   capture, then Gmail copies, then `mailbox_export`.
 - Receipt schema `outlook-pst-v1`: `{runId, objectKey, manifestLine, exportSha256,
