@@ -36,18 +36,20 @@ completed conversion changes invalidate lexical coverage for the existing repair
 
 ## Limits and coverage
 
-The ingress archive limit remains unchanged. Extraction deliberately supports a
-smaller bounded subset until larger messages are measured in the actual runtime.
+Extraction accepts originals up to Email Routing's 25 MiB ingress limit. Imports
+can archive larger originals (Takeout entries over 25 MiB stream into R2); those stay
+`blocked` with `input_too_large`.
 
 | Bound | Limit |
 | --- | --- |
-| Original MIME input | 4 MiB |
+| Original MIME input | 25 MiB |
 | Parser header budget, across parts | 64 KiB |
 | MIME nesting | 16 |
 | MIME parts | 64 |
 | Decoded attachments | 32 |
-| Each decoded body or attachment | 4 MiB |
-| Total decoded body/attachment bytes | 8 MiB |
+| Each decoded text or HTML body | 4 MiB |
+| Each decoded attachment | 25 MiB |
+| Total decoded body/attachment bytes | 32 MiB |
 | Body JSON, including escaped characters | 8 MiB |
 | Each metadata JSON value | 32 KiB |
 | Selected string fields | 4 KiB |
@@ -62,6 +64,42 @@ blank line ending the header section within the 64 KiB header budget is
 input ends first. Other malformed mail may be parsed tolerantly by the library.
 Successful decoding is not proof of RFC conformance, safe HTML, a safe attachment, or
 complete search coverage.
+
+### Input limit decision and memory measurements
+
+On 2026-11-28 13:02 UTC the owner approved raising the provisional 4 MiB input limit
+as far as measurements allow. At that time 212 `mime-v1` extractions were `blocked`
+with `input_too_large` (4,196,105 to 29,789,263 bytes): 2 live captures, 195 Gmail
+imports and 15 Outlook PST items. 207 of them are at most 25 MiB.
+
+A Worker isolate has 128 MB for its heap and `ArrayBuffer`s, shared by every request
+the isolate runs. Extraction holds the whole original, and postal-mime decodes each
+attachment into 100 KiB chunks and then joins them through a `Blob` into one
+`ArrayBuffer`, so while it finishes the largest attachment it holds the original plus
+three copies of that attachment. Passing postal-mime the whole `ArrayBuffer` instead
+of a `Uint8Array` view avoids its copy of the original (2026-11-28 change).
+
+The peak was measured on synthetic messages with the same code and postal-mime in V8
+(Node 26), as live heap plus `ArrayBuffer` bytes after a forced GC at each `Blob` join
+and R2 write, counting each join as two extra copies as in workerd. Before and after
+the change, at 25 MiB:
+
+| Message shape (25 MiB) | Before | After | CPU |
+| --- | --- | --- | --- |
+| One base64 attachment | 106.6 MiB | 81.5 MiB | 0.6 s |
+| Ten base64 attachments | 75.5 MiB | 50.4 MiB | 0.8 s |
+| Thirty base64 images | 71.9 MiB | 46.8 MiB | 1.4 s |
+| 2 MiB quoted-printable HTML and eight images | 72.6 MiB | 54.6 MiB | 0.9 s |
+| One 8bit text attachment | 76.1 MiB | 76.1 MiB | 0.9 s |
+
+With one large base64 attachment the peak is about 3.25 times the original (94.3 MiB
+at 29.2 MiB, 104 MiB at 32 MiB), which leaves too little of the 128 MB for the
+Worker's own heap and other requests in the same isolate above 25 MiB. The input limit
+is therefore 25 MiB. Bodies keep their 4 MiB bound because search indexing and body
+reads load them whole; only attachments may be larger. Two large extractions in one
+isolate can still exceed the memory limit; the failed job then keeps its original and
+can be retried with the operator primitive. Raising the limit further needs a parser
+that joins decoded chunks without the extra copies.
 
 Permanent coverage failures are recorded as `blocked` with fixed codes, including
 missing/changed originals, invalid metadata, input/structure/output limits or a

@@ -4,13 +4,16 @@ import { archiveCandidate, validArchiveTime } from "./archive-key.ts";
 
 export const MIME_EXTRACTOR_VERSION = "mime-v1";
 export const MIME_LIMITS = {
-  rawBytes: 4 * 1024 * 1024,
+  // Peak isolate memory is about 3.25 times the original for one large base64 attachment
+  // (docs/mime-extraction.md#limits-and-coverage), so this stays at the ingress limit.
+  rawBytes: 25 * 1024 * 1024,
   headersBytes: 64 * 1024,
   nestingDepth: 16,
   partCount: 64,
   attachmentCount: 32,
-  decodedPartBytes: 4 * 1024 * 1024,
-  decodedTotalBytes: 8 * 1024 * 1024,
+  decodedBodyBytes: 4 * 1024 * 1024,
+  decodedAttachmentBytes: 25 * 1024 * 1024,
+  decodedTotalBytes: 32 * 1024 * 1024,
   bodyJsonBytes: 8 * 1024 * 1024,
   metadataBytes: 32 * 1024,
   fieldBytes: 4 * 1024,
@@ -128,7 +131,7 @@ function headerMetadata(mail: Email): string {
   });
 }
 
-async function readBounded(object: R2ObjectBody): Promise<Uint8Array> {
+async function readBounded(object: R2ObjectBody): Promise<Uint8Array<ArrayBuffer>> {
   if (object.size > MIME_LIMITS.rawBytes) {
     await object.body.cancel();
     throw new ExtractionBlocked("input_too_large");
@@ -250,7 +253,7 @@ async function saveObject(
   return target;
 }
 
-async function parse(bytes: Uint8Array): Promise<Email> {
+async function parse(bytes: Uint8Array<ArrayBuffer>): Promise<Email> {
   // postal-mime deliberately tolerates broken mail. Reject headerless input first.
   const start = new TextDecoder("latin1").decode(bytes.subarray(0, MIME_LIMITS.headersBytes + 4));
   if (!/^[!-9;-~]+:[^\r\n]*(?:\r?\n|$)/.test(start)) throw new ExtractionBlocked("invalid_mime");
@@ -260,7 +263,10 @@ async function parse(bytes: Uint8Array): Promise<Email> {
       start.length > MIME_LIMITS.headersBytes ? "parser_limit" : "invalid_mime",
     );
   try {
-    return await PostalMime.parse(bytes, {
+    // postal-mime copies a typed array view before parsing but reads an ArrayBuffer in
+    // place, so passing the whole buffer saves one copy of the original.
+    const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+    return await PostalMime.parse(whole ? bytes.buffer : bytes, {
       attachmentEncoding: "arraybuffer",
       forceRfc822Attachments: true,
       rfc822Attachments: true,
@@ -320,13 +326,13 @@ async function extract(
     if (typeof attachment.content === "string") throw new ExtractionBlocked("invalid_mime");
     const content = new Uint8Array(attachment.content);
     decodedBytes += content.byteLength;
-    if (content.byteLength > MIME_LIMITS.decodedPartBytes)
+    if (content.byteLength > MIME_LIMITS.decodedAttachmentBytes)
       throw new ExtractionBlocked("decoded_limit");
     return content;
   });
   if (
-    (text?.byteLength ?? 0) > MIME_LIMITS.decodedPartBytes ||
-    (html?.byteLength ?? 0) > MIME_LIMITS.decodedPartBytes ||
+    (text?.byteLength ?? 0) > MIME_LIMITS.decodedBodyBytes ||
+    (html?.byteLength ?? 0) > MIME_LIMITS.decodedBodyBytes ||
     decodedBytes > MIME_LIMITS.decodedTotalBytes
   )
     throw new ExtractionBlocked("decoded_limit");
