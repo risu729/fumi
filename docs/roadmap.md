@@ -96,8 +96,11 @@ establish production delivery.
       and verified (40,602 entries: 35,792 imported, 4,693 verified against the
       connector's copies, 117 conflicts kept as stored, 2020-06-10..2026-11-22,
       2026-11-27), which supersedes the stopped connector run; takuanimalsub4 is done
-      and verified (120 of 120 imported, 2022-07-16..2026-11-28, 2026-11-28). Left: the
-      owner's other Google accounts, once they are exported (owner, 2026-11-28); then
+      and verified (120 of 120 imported, 2022-07-16..2026-11-28, 2026-11-28); the devsoc
+      Workspace account is done and verified (712 of 712 imported,
+      2025-03-26..2026-11-28, 2026-11-28; its Google Group archive is not imported, as
+      all 49 of its messages are in the mailbox, owner). Left: the owner's other Google
+      accounts, once they are exported (owner, 2026-11-28); then
       delete the Takeout exports from R2 and the upload token (owner approves the
       destroy).
   - [x] Speed up the import before larva06online and the main account

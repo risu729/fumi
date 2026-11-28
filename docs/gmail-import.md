@@ -3,7 +3,7 @@
 Status: implemented for synthetic local validation. OAuth provisioning, production
 migration, activation and real-mail import require explicit operator execution. This is
 a historical migration, not Gmail synchronization or archive-gap recovery. The backfill
-was done from Google Takeout instead for the five accounts exported so far, by
+was done from Google Takeout instead for the six accounts exported so far, by
 2026-11-28 ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
 [production runs](#production-takeout-runs)). That supersedes the connector run, which
 stopped on 2026-11-12 after 4,810 messages (internal dates 2026-08-24T09:21:29Z to
@@ -480,6 +480,7 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 | larva06online | `takeout-cdd6472a-2026-11-23` | 5,407 (175,910,760 bytes, one object) | 5,407 `imported` | 2023-01-09 12:33:29 .. 2026-11-22 20:54:41 | 2026-11-24 07:18 UTC |
 | main account | `takeout-309a1c7e-2026-11-23` | 40,602 (3,952,532,507 bytes, one object) | 35,792 `imported`, 4,693 `verified`, 117 `conflict` | 2020-06-10 13:15:53 .. 2026-11-22 21:05:40 | 2026-11-27 23:50 UTC |
 | takuanimalsub4 | `takeout-f24e329b-2026-11-28` | 120 (4,049,066 bytes, one object) | 120 `imported` | 2022-07-16 09:36:58 .. 2026-11-28 00:18:35 | 2026-11-28 07:53 UTC |
+| devsoc (Google Workspace) | `takeout-635d7a03-2026-11-28` | 712 (136,347,804 bytes, one object) | 712 `imported` | 2025-03-26 11:06:48 .. 2026-11-28 09:44:10 | 2026-11-28 11:52 UTC |
 
 - momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
   run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
@@ -543,6 +544,27 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
   imported 07:46:09..07:47:52 UTC) and `gmail_takeout_labels` 120 for the run. All 120
   have a complete `mime-v1` extraction and a complete processing job. The count agrees
   with the 120 messages counted in the export before it was uploaded.
+- devsoc, a Google Workspace account (`gmail-635d7a0332203563fa26bd70`; the owner's
+  go 2026-11-28 11:00 UTC): before importing, the export was scanned on the owner's
+  computer without reading content. All 712 entries have both Gmail headers and a
+  Message-ID, and every Gmail ID agrees with its `From_` date. Of the 712 Message-IDs,
+  1 was already in fumi (from the main account's run), compared as SHA-256 of the
+  normalized Message-ID. The export also held one Google Group's archive (49 messages,
+  `Takeout/Groups/.../topics.mbox`). That archive has no `X-Gmail-Labels` header, and
+  its `From_` numbers are not Gmail IDs, so the splitter stops at its first entry with
+  `takeout_invalid_gmail_headers`. All 49 of its Message-IDs are in this account's
+  mbox, so the owner chose to import the mailbox only (2026-11-28 11:00 UTC); the
+  group archive stays in Drive. The mbox was uploaded from the owner's computer, and
+  its SHA-256 read back from R2 equals the extracted file's. `GMAIL_TAKEOUT_CONFIG`
+  was replaced at 11:30 UTC. The run is `complete` with no stop code, and
+  `next_offset` equals `total_bytes`. The 712 entries have 712 distinct Gmail IDs
+  (136,241,603 raw bytes, largest 20,056,745); `gmail_messages` holds 712 rows for the
+  namespace (649 threads, imported 11:31:32..11:39:48 UTC, about 0.7 s per entry) and
+  `gmail_takeout_labels` 712 for the run. 707 have a complete `mime-v1` extraction and
+  a complete processing job. The other 5 are over the 4 MiB
+  [MIME extraction](mime-extraction.md) input limit: their extraction is `blocked`
+  with `input_too_large` and their job `failed` with `workflow_failed`, and the
+  originals are stored. The count agrees with the 712 messages counted in the export.
 - The owner's other Google accounts have not been exported yet; each is imported the
   same way once its export exists (owner, 2026-11-28 01:29 UTC). The upload token is
   kept until then.
