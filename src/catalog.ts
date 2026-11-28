@@ -1,5 +1,6 @@
 import { eventStatement } from "./event-store.ts";
 import type { GmailProvenance } from "./gmail-provenance.ts";
+import type { PstProvenance } from "./pst-provenance.ts";
 
 export type IssueCode =
   | "invalid_key"
@@ -23,7 +24,9 @@ export interface ScanCheckpoint {
 export interface SourceObservation {
   ingestId: string;
   gmail?: GmailProvenance;
-  sourceKind?: "gmail";
+  /** An original converted from an Outlook PST export (ADR 0006). */
+  pst?: PstProvenance;
+  sourceKind?: "gmail" | "mailbox_export";
   sourceNamespace?: string;
   rawKey: string;
   receiptKey: string;
@@ -124,9 +127,17 @@ async function commitObservations(
   const sourceStatements: number[] = [];
   const issueStatements: number[] = [];
   for (const observation of observations) {
-    const { ingestId, rawKey, receiptKey, snapshot, gmail } = observation;
-    const kind = gmail ? "gmail" : (observation.sourceKind ?? "email_routing");
-    const namespace = gmail?.accountNamespace ?? observation.sourceNamespace ?? "ingress-v1";
+    const { ingestId, rawKey, receiptKey, snapshot, gmail, pst } = observation;
+    const kind = gmail
+      ? "gmail"
+      : pst
+        ? "mailbox_export"
+        : (observation.sourceKind ?? "email_routing");
+    const namespace =
+      gmail?.accountNamespace ??
+      pst?.accountNamespace ??
+      observation.sourceNamespace ??
+      "ingress-v1";
     issueStatements.push(statements.length, statements.length + 1);
     sourceStatements.push(statements.length + 2);
     statements.push(
@@ -258,6 +269,34 @@ async function commitObservations(
             ),
         );
     }
+    if (pst)
+      // Another raw key for the same mailbox and node ID never replaces the first.
+      statements.push(
+        db
+          .prepare(`INSERT INTO pst_messages(raw_key,account_namespace,pst_node_id,folder_json,item_kind,
+        headers,delivered_at,export_sha256,run_id,manifest_line,imported_at)
+        SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ${fence}
+        AND EXISTS (SELECT 1 FROM archive_sources WHERE raw_key=? AND source_kind='mailbox_export'
+          AND source_namespace=? AND external_id=?)
+        ON CONFLICT DO NOTHING`)
+          .bind(
+            rawKey,
+            namespace,
+            pst.pstNodeId,
+            JSON.stringify(pst.folder),
+            pst.itemKind,
+            pst.headers,
+            pst.deliveredAt,
+            pst.exportSha256,
+            pst.runId,
+            pst.manifestLine,
+            pst.importedAt,
+            ...fenceArgs,
+            rawKey,
+            namespace,
+            ingestId,
+          ),
+      );
     if (observation.notifyEvents && observation.rawState === "present" && observation.receivedAt) {
       statements.push(
         eventStatement(

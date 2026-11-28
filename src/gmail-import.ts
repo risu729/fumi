@@ -216,7 +216,7 @@ export type GmailRawStream = { size: number; chunks: () => AsyncIterable<Uint8Ar
  * Streams a raw message into one conditional put. R2 checks the length and the SHA-256
  * in `options`, so bytes that changed since they were hashed are never stored.
  */
-async function putStream(
+export async function putStream(
   bucket: R2Bucket,
   key: string,
   source: GmailRawStream,

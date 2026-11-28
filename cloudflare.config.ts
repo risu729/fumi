@@ -38,6 +38,11 @@ export default defineConfig({
         concurrency: { limit: 1 },
         defaultRetention: { successRetention: "30 days", errorRetention: "30 days" },
       }),
+      PstImport: exports.workflow({
+        name: "fumi-pst-import",
+        concurrency: { limit: 1 },
+        defaultRetention: { successRetention: "30 days", errorRetention: "30 days" },
+      }),
     },
     env: {
       ...(routingRpc
@@ -55,8 +60,9 @@ export default defineConfig({
         ? { MANAGED_MAIL_SEARCH: bindings.aiSearch({ name: searchInstance }) }
         : {}),
       MAIL_ARCHIVE: bindings.r2({ name: "fumi-mail" }),
-      // Google Takeout mbox files for the Gmail backfill (ADR 0004). Only the
-      // TakeoutImport Workflow reads it; nothing writes it.
+      // Google Takeout mbox files for the Gmail backfill (ADR 0004) and converted Outlook
+      // PST exports (ADR 0006). Only the TakeoutImport and PstImport Workflows read it;
+      // nothing writes it.
       TAKEOUT_ARCHIVE: bindings.r2({ name: "fumi-takeout" }),
       MAIL_CATALOG: bindings.d1({
         name: "fumi-catalog",
@@ -84,6 +90,11 @@ export default defineConfig({
         name: "fumi-gmail-takeout",
         worker: "fumi",
         exportName: "TakeoutImport",
+      }),
+      PST_IMPORT: bindings.workflow({
+        name: "fumi-pst-import",
+        worker: "fumi",
+        exportName: "PstImport",
       }),
     },
     // Set explicitly: for an unset value cf sends no preview setting at deploy
