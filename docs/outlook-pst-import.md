@@ -4,7 +4,8 @@ Status: the converter is implemented and was run on the owner's two exports
 (2026-11-28). The catalog admits the `mailbox_export` source kind
 ([archive catalog](archive-catalog.md#identity-and-evidence)), and the
 [Worker transport](#worker-transport) that reads the converter's output is
-implemented and tested with synthetic items; it has not run in production. Readers
+implemented. Both exports were imported in production on 2026-11-28
+([production runs](#production-runs-of-2026-11-28)). Readers
 show the folder in provenance, accept `archive_source: "mailbox_export"` and rank PST
 originals after Gmail copies ([agent mail](agent-mail.md),
 [copy grouping](copy-grouping.md#reads)), and the
@@ -250,13 +251,40 @@ pst_import_runs`, `SELECT outcome,COUNT(*) FROM pst_import_items WHERE run_id=? 
 BY outcome`, and the items' `raw_key` joined to `mail_extractions` and
 `processing_jobs`.
 
-## Run of 2026-11-28 (not uploaded)
+## Production runs of 2026-11-28
 
-| Mailbox | Items | With synthesized headers |
-| --- | --- | --- |
-| University Microsoft 365 | 2,666 (Inbox 2,614, Sent Items 33, Junk Email 17, Archive 2) | 35 (Sent Items, Archive) |
-| Personal Microsoft account | 89 (受信トレイ 2, Archive 87) | 0 |
+Converted on the owner's computer, uploaded to `fumi-takeout` (every object's size and
+SHA-256 checked against the manifest before upload, the manifest last) and imported one
+mailbox at a time. Checked with read-only queries on the production D1 catalog.
 
-Every item paired. The objects total about 354 MB. Skipped as non-mail: 87
-`IPM.Appointment` (university); 69 `IPM.Contact`, 124 `IPM.AbchPerson` and 1
-`IPM.Network` (personal).
+| Mailbox | Run | Items | Outcomes | Imported (UTC) | Checked |
+| --- | --- | --- | --- | --- | --- |
+| Personal Microsoft account | `pst-personal-2026-11-28` | 89 (38,291-byte manifest) | 89 `imported` | 10:46:18 .. 10:48:47 | 2026-11-28 10:51 UTC |
+| University Microsoft 365 | `pst-university-2026-11-28` | 2,666 (1,145,574-byte manifest) | 2,666 `imported` | 10:56:18 .. 12:37:02 | 2026-11-28 12:43 UTC |
+
+- Both runs are `complete` with no stop code. The 2,755 originals total 359,607,640
+  bytes.
+- Conversion: 87 `IPM.Appointment` items (university) and 69 `IPM.Contact`, 124
+  `IPM.AbchPerson` and 1 `IPM.Network` items (personal) were skipped as non-mail. The
+  university mailbox has 35 items with synthesized headers (Sent Items and Archive).
+- `mail_identity` is complete for all 2,755. 2,642 have a Message-ID that a
+  non-export original also has. 2,636 of them share a group with such a copy, as
+  [ADR 0006](adr/0006-outlook-pst-import.md#verification) expected: 1,470 by
+  `message_id_dkim` and 1,166 by the
+  [signed/unsigned rule](copy-grouping.md#mailbox-copies). The personal mailbox
+  accounts for 87 and the university for 2,549.
+- 6 stay apart, all university: 4 Sent Items with synthesized headers whose `From`
+  differs from the Gmail copy, 1 Inbox item signed in the PST whose Gmail copy is
+  unsigned, and 1 Inbox item where both copies are signed but share no `bh=`. The rule
+  then covered only an unsigned PST copy;
+  [fumi#227](https://github.com/risu729/fumi/pull/227) extended it to the signed PST
+  item with the unsigned Gmail copy, and migration 0028
+  ([fumi#229](https://github.com/risu729/fumi/pull/229)) regroups it.
+- 113 have a Message-ID no other original has (university 111, personal 2), and none
+  of them is grouped.
+- `mime-v1`: 2,740 extractions complete. 15 items over 4 MiB (4,468,971 to 17,142,654
+  bytes) are `blocked` with `input_too_large` and their processing job `failed`
+  (`workflow_failed`), the same limit as for Takeout entries. Their originals are
+  stored.
+- `PST_IMPORT_CONFIG` was removed after the second run (2026-11-28 12:43 UTC). The
+  uploaded objects stay in `fumi-takeout` until the owner accepts the import.
