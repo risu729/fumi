@@ -190,7 +190,7 @@ specification above left open or that differ:
 
 ## Amendment 2026-11-28: grouping rule in both orders (agent)
 
-The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-exports)).
+The grouping rule is implemented ([copy grouping](../copy-grouping.md#mailbox-copies)).
 "Joins an earlier original" alone would depend on indexing order, which is newest
 catalog row first, so a full re-backfill would index the PST originals before the
 older Gmail copies and split them. A signed row therefore also joins an earlier
@@ -201,3 +201,24 @@ Message-ID, From and Date would join the group through the PST original and coul
 become its representative. Order independence holds for one PST original and one
 signed copy; with a third, unsigned copy that is not a PST original, an import and a
 full re-backfill can group them differently (see the copy grouping page).
+
+## Amendment 2026-11-28: unsigned Gmail copies (owner)
+
+The owner asked for the same grouping for Gmail copies (2026-11-28 12:25 UTC,
+"まとめるようにして", "group them"). Agent analysis: on 2026-11-28 production held 25
+pairs of an unsigned Gmail copy and a signed copy with the same Message-ID, From and
+Date that stayed apart. Every
+unsigned one carries the `Sent` Takeout label: Gmail stores the sender's copy before it
+adds its outgoing `DKIM-Signature`, while the recipient's copy (in another imported
+account, the same account for a mail sent to itself, or a live capture) is signed.
+
+Agent specification: the rule applies to every unsigned original read from a mailbox,
+source kinds `gmail` and `mailbox_export`, not only to PST originals, with the same
+guard (a signed row joins an unsigned mailbox copy only when no signed row with that
+Message-ID exists yet). An unsigned mailbox copy now prefers an unsigned match and joins
+a signed row only without one, so an unsigned live capture and its Gmail copy stay one
+group when a signed copy was indexed first. Unsigned live captures (`email_routing`) are
+not covered: fumi captures them in transit, and no pair in the data needs it. The bound
+on forgery is unchanged: as with the other rules, a copy with forged headers can at most
+hide one copy in default listings. Details:
+[copy grouping](../copy-grouping.md#mailbox-copies).

@@ -217,30 +217,35 @@ export async function groupId(key: unknown[]) {
 
 const OVERLAP =
   "EXISTS(SELECT 1 FROM json_each(m.dkim_bh_json) a JOIN json_each(?) b ON a.value=b.value)";
-/** An identity row `m` whose original is a mailbox export (ADR 0006), such as a PST item. */
-const EXPORTED_SQL =
-  "EXISTS(SELECT 1 FROM archive_sources x WHERE x.raw_key=m.raw_key AND x.source_kind='mailbox_export')";
 /**
- * ADR 0006: an unsigned mailbox export original and a signed original with the same
- * Message-ID, From and Date are copies of one message. The export (a PST item) was
- * rebuilt from the mailbox, which keeps no signature that a later hop added, such as
- * the forwarding route to Gmail. The rule holds in both indexing orders: an unsigned
- * export joins an earlier signed row, and a signed row joins an earlier unsigned export
- * when no signed row matches it.
+ * Source kinds whose originals are read from a mailbox rather than captured in transit:
+ * Gmail copies (Takeout or API import) and mailbox exports such as PST items (ADR 0006).
  */
-function exportMatchSql(rule: GroupRule, exported: boolean) {
+export const MAILBOX_SOURCE_KINDS = ["gmail", "mailbox_export"] as const;
+/** An identity row `m` whose original is a mailbox copy. */
+const MAILBOX_SQL = `EXISTS(SELECT 1 FROM archive_sources x WHERE x.raw_key=m.raw_key AND x.source_kind IN (${MAILBOX_SOURCE_KINDS.map((kind) => `'${kind}'`).join(",")}))`;
+/**
+ * ADR 0006: an unsigned mailbox copy and a signed original with the same Message-ID,
+ * From and Date are copies of one message. A mailbox may keep a copy without a signature
+ * that another copy carries: Gmail stores a sent mail before its outgoing DKIM signature
+ * (amendment 2026-11-28), and a PST item is rebuilt without the signature a later hop
+ * added, such as the forwarding route to Gmail. The rule holds in both indexing orders:
+ * an unsigned mailbox copy joins an earlier signed row when no unsigned row matches it,
+ * and a signed row joins an earlier unsigned mailbox copy when no signed row matches it.
+ */
+function mailboxMatchSql(rule: GroupRule, mailbox: boolean) {
   const base = `SELECT m.group_id FROM mail_identity m WHERE m.identity_version='${IDENTITY_VERSION}' AND m.status='complete'`;
-  if (rule === "message_id_from_date" && exported)
+  if (rule === "message_id_from_date" && mailbox)
     return {
-      sql: `${base} AND m.group_rule IN ('message_id_from_date','message_id_dkim') AND m.message_id=? AND m.from_address=? AND m.header_date=? ORDER BY m.rowid LIMIT 1`,
+      sql: `${base} AND m.group_rule='message_id_dkim' AND m.message_id=? AND m.from_address=? AND m.header_date=? ORDER BY m.rowid LIMIT 1`,
       values: (i: HeaderIdentity) => [i.messageId, i.from, i.date],
     };
   // Only the first signed copy joins this way: a later one with another body hash is a
-  // conflict with that copy, not a copy of the export, so a forged signature cannot use
-  // the export to enter the group.
+  // conflict with that copy, not a copy of the unsigned one, so a forged signature cannot
+  // use the unsigned copy to enter the group.
   if (rule === "message_id_dkim")
     return {
-      sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${EXPORTED_SQL}
+      sql: `${base} AND m.group_rule='message_id_from_date' AND m.message_id=? AND m.from_address=? AND m.header_date=? AND ${MAILBOX_SQL}
         AND NOT EXISTS(SELECT 1 FROM mail_identity d WHERE d.identity_version='${IDENTITY_VERSION}' AND d.status='complete' AND d.group_rule='message_id_dkim' AND d.message_id=?)
         ORDER BY m.rowid LIMIT 1`,
       values: (i: HeaderIdentity) => [i.messageId, i.from, i.date, i.messageId],
@@ -293,8 +298,8 @@ export async function identityStatement(
   rawSha256: string,
   result: HeaderIdentity | IdentityFailure,
   now: string,
-  /** The original is a mailbox export (source kind `mailbox_export`). */
-  exported = false,
+  /** The original is a mailbox copy (a source kind in MAILBOX_SOURCE_KINDS). */
+  mailbox = false,
 ): Promise<D1PreparedStatement> {
   if (typeof result === "string")
     return db
@@ -304,14 +309,11 @@ export async function identityStatement(
       )
       .bind(rawKey, IDENTITY_VERSION, rawSha256, result, now);
   const { rule, key } = groupKey(result, rawKey);
-  // Tried in order. The export match of an unsigned export covers its own rule's match;
-  // a signed row prefers a signed match. A row without a Date has no export match
-  // (header_date=NULL never matches).
-  const exportMatch = exportMatchSql(rule, exported);
-  const matches =
-    exportMatch && rule === "message_id_from_date"
-      ? [exportMatch]
-      : [matchSql(rule), ...(exportMatch ? [exportMatch] : [])];
+  // Tried in order: a row prefers a match of its own rule, so an unsigned copy stays with
+  // an unsigned group (such as a live capture and its Gmail copy) and a signed one with a
+  // signed group. A row without a Date has no mailbox match (header_date=NULL never matches).
+  const mailboxMatch = mailboxMatchSql(rule, mailbox);
+  const matches = [matchSql(rule), ...(mailboxMatch ? [mailboxMatch] : [])];
   const conflict = result.messageId && result.bodyHashes.length;
   return db
     .prepare(
@@ -431,7 +433,7 @@ export async function repairMailIdentity(
         row.raw_sha256,
         result,
         time,
-        row.source_kind === "mailbox_export",
+        (MAILBOX_SOURCE_KINDS as readonly string[]).includes(row.source_kind),
       ),
     ]),
   );
