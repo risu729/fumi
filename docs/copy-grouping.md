@@ -149,27 +149,31 @@ Group keys and the other rules are unchanged. Until 2026-11-28 the rule covered 
 `mailbox_export`, and an unsigned mailbox export joined the earliest row of either rule,
 also with two signed groups of its Message-ID.
 Rows written under that rule keep their groups. Rows are never rewritten, so migration
-`0028` deletes the unsigned Gmail rows it left apart: a `gmail` row of rule
-`message_id_from_date` that is alone in its group while a signed row with the same
-Message-ID, From and Date exists. No other row has their group IDs, and the backfill's
-next full pass (hourly) indexes those originals again under this rule. The migration is
-applied after the Worker with this rule is live, so the running Worker cannot index them
-again under the earlier rule.
+`0028` deletes the unsigned Gmail rows it left apart: the row of a present `gmail`
+original of rule `message_id_from_date` that is alone in its group while a signed row
+with the same Message-ID, From and Date exists and every signed row of that Message-ID
+is in one group. No other row has their group IDs. The migration also requests a full
+pass of the backfill, so the next scheduled run indexes those originals again under this
+rule. It is applied after the Worker with this rule is live; under the earlier rule the
+run would write the same row as before. A split group with more than one unsigned
+member (for example an unsigned Gmail copy and a PST item that joined it, apart from a
+signed copy) is not selected; production had none on 2026-11-28 at 12:50 UTC.
 
 With the 2026-11-28 data, ADR 0006 expects 2,636 of the 2,642 PST items fumi already
 holds to group: 1,470 by the earlier rules and 1,166 by this one (counted before the
 one-signed-group condition, which can leave an item apart when the signed copies of its
 Message-ID are in two groups). On 2026-11-28 at 12:30
 UTC production held 1,043 pairs of an unsigned and a signed original with the same
-Message-ID, From and Date. 25 were in different groups, and in all 25 the unsigned
-copy was a Gmail copy with the `Sent` Takeout label: 21 against a signed Gmail copy
-(including the sender's own account when the mail was sent to itself) and 4 against a
-signed live capture. For each of the 25, every signed row of the Message-ID was in one
-group, so the one-signed-group condition does not keep any of them apart. After the PST
-import, at 12:45 UTC the same query found 25 unsigned Gmail rows alone in their group
-with a matching signed row: 20 against a signed Gmail copy, 4 against a signed live
-capture and 1 against a signed PST item (the reverse case: the PST copy is signed and
-the Gmail copy is not). Migration `0028` selects exactly these.
+Message-ID, From and Date. 25 pairs, of 24 unsigned rows, were in different groups, and
+in all of them the unsigned copy was a Gmail copy with the `Sent` Takeout label: 21
+pairs against a signed Gmail copy (20 unsigned rows, one of them matching two signed
+copies in one group; including the sender's own account when the mail was sent to
+itself) and 4 against a signed live capture. At 12:45 UTC, after the PST import, 25
+unsigned Gmail rows were alone in their group with a matching signed row: those 24 and 1
+against a signed PST item (the reverse case: the PST copy is signed and the Gmail copy
+is not). For each of the 25, every signed row of the Message-ID was in one group, so the
+one-signed-group condition keeps none of them apart, and migration `0028` selects
+exactly these.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.
