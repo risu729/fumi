@@ -287,4 +287,6 @@ mailbox at a time. Checked with read-only queries on the production D1 catalog.
   (`workflow_failed`), the same limit as for Takeout entries. Their originals are
   stored.
 - `PST_IMPORT_CONFIG` was removed after the second run (2026-11-28 12:43 UTC). The
-  uploaded objects stay in `fumi-takeout` until the owner accepts the import.
+  uploaded objects (manifests and items of both runs, 2,757 objects) were deleted from
+  `fumi-takeout` on 2026-11-28 at 12:56 UTC with the owner's go; the originals are in
+  the archive bucket and the PST files stay in the owner's Drive.
