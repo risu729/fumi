@@ -177,8 +177,8 @@ exactly these.
 
 Production check, 2026-11-28 13:10 UTC: migration `0028` was applied at 12:59 UTC, and
 the next scheduled run indexed the 25 originals again. All 25 joined their signed copy's
-group (24 in groups of two, 1 in a group of three), no unsigned Gmail row is alone with a
-matching signed row any more, and all 1,202 pairs of an unsigned and a signed original
+group (24 in groups of two, 1 in a group of three), no unsigned Gmail row is alone with
+a matching signed row any more, and all 1,202 pairs of an unsigned and a signed original
 with the same Message-ID, From and Date now share a group. No original is pending.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
