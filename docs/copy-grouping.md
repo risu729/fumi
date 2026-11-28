@@ -132,9 +132,10 @@ newest catalog row first, so a forged signed live capture that arrived after an 
 is indexed before the imported copies. When the unsigned copy is indexed after the
 forged one and before the genuine signed copy, it joins the forged one, which as a live
 capture becomes the representative; the genuine copy then stands alone with
-`message_id_conflict`. When the genuine copy is indexed first of the two, the unsigned
-copy sees two signed groups and joins neither. Either way the bound below holds: one
-copy is hidden at most, as a forged copy that copies `bh=` could already do.
+`message_id_conflict`. When the genuine copy is indexed before the unsigned one (both
+after the forged one), the unsigned copy sees two signed groups and joins neither.
+Either way the bound below holds: one copy is hidden at most, as a forged copy that
+copies `bh=` could already do.
 
 An unsigned live capture (`email_routing`) is not a mailbox copy: fumi captures it in
 transit, and the signatures its forwarding route adds are already ignored (above). A
@@ -152,12 +153,15 @@ not regrouped by this change alone, because rows are never rewritten; they need 
 indexed again.
 
 With the 2026-11-28 data, ADR 0006 expects 2,636 of the 2,642 PST items fumi already
-holds to group: 1,470 by the earlier rules and 1,166 by this one. On 2026-11-28 at 12:30
+holds to group: 1,470 by the earlier rules and 1,166 by this one (counted before the
+one-signed-group condition, which can leave an item apart when the signed copies of its
+Message-ID are in two groups). On 2026-11-28 at 12:30
 UTC production held 1,043 pairs of an unsigned and a signed original with the same
 Message-ID, From and Date. 25 were in different groups, and in all 25 the unsigned
 copy was a Gmail copy with the `Sent` Takeout label: 21 against a signed Gmail copy
 (including the sender's own account when the mail was sent to itself) and 4 against a
-signed live capture.
+signed live capture. For each of the 25, every signed row of the Message-ID was in one
+group, so the one-signed-group condition does not keep any of them apart.
 
 Equal From is an agent addition to the ADR's rule 1: Message-ID and `bh=` are copied
 easily from a mail someone has seen, and DKIM is not verified here.

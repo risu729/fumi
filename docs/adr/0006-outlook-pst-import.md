@@ -221,11 +221,11 @@ guard (a signed row joins an unsigned mailbox copy only when no signed row with 
 Message-ID exists yet). An unsigned mailbox copy now prefers an unsigned match and joins
 a signed row only without one, so an unsigned live capture and its Gmail copy stay one
 group when a signed copy was indexed first. It also joins a signed row only while every
-signed row of its Message-ID is in one group, so with a conflict (possibly forged) it
-joins neither. Both guards follow indexing order, which a full re-backfill reverses
-(newest first); the copy grouping page gives the case where a forged copy then wins.
-Unsigned live captures (`email_routing`) are not covered: fumi captures them in transit,
-and no pair in the data needs it. The bound on forgery is unchanged: as with the other
-rules, a copy with forged headers can at most hide one copy in default listings.
-Details:
+signed row of its Message-ID is in one group, so with a conflict (possibly forged)
+already indexed it joins neither. Both guards follow indexing order, which a full
+re-backfill reverses (newest first); the copy grouping page gives the case where a
+forged copy then wins. Unsigned live captures (`email_routing`) are not covered: fumi
+captures them in transit, and no pair in the data needs it. The bound on forgery is
+unchanged: as with the other rules, a copy with forged headers can at most hide one copy
+in default listings. Details:
 [copy grouping](../copy-grouping.md#mailbox-copies).
