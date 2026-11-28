@@ -7,8 +7,8 @@ the format. Runs on the owner's computer, never in the Worker:
     python3 -s pst-manifest.py --pst export.pst --readpst-dir out/ \
         --namespace outlook-<24 hex> --export-date 2026-11-28 --dest upload/
 
-`out/` must be the output of `readpst -j 0 -r -e -D -o out/ export.pst` for the same
-file. In each folder, the mail items of the PST and readpst's `.eml` files (in numeric
+`out/` must be the output of `readpst -j 0 -e -D -o out/ export.pst` for the same
+file (`-e` writes the folder tree; `-r` would add nothing). In each folder, the mail items of the PST and readpst's `.eml` files (in numeric
 order) are paired by rank: readpst numbers every item of a folder, mail or not, so the
 mail files can have gaps. Each pair is checked, and any mismatch stops the script with
 a fixed code before anything is written. Mail content is never printed.
@@ -25,7 +25,7 @@ import sys
 
 import pypff  # libpff Python bindings (python3-pypff)
 
-CONVERTER = "readpst 0.6.76 -j 0 -r -e -D; pypff 20180714"
+CONVERTER = "readpst 0.6.76 -j 0 -e -D; pypff 20180714"
 MAIL_CLASSES = (("REPORT.IPM.NOTE", "report"), ("IPM.SCHEDULE.MEETING", "schedule"), ("IPM.NOTE", "note"))
 NAMESPACE = re.compile(r"^outlook-[0-9a-f]{24}$")
 PR_MESSAGE_CLASS = 0x001A
@@ -33,10 +33,11 @@ PR_INTERNET_MESSAGE_ID = 0x1035
 PR_IPM_SUBTREE_ENTRYID = 0x35E0
 # readpst uses PR_TRANSPORT_MESSAGE_HEADERS only when the block starts with one of
 # these (readpst.c valid_headers); otherwise it builds headers from item properties.
-VALID_HEADER_STARTS = (
-    "Content-Type:", "Date:", "From:", "MIME-Version:", "Microsoft Mail Internet Headers",
-    "Received:", "Return-Path:", "Subject:", "To:", "X-ASG-Debug-ID:", "X-Barracuda-URL:", "X-x:",
+VALID_HEADER_FIELDS = (
+    "Content-Type: ", "Date: ", "From: ", "MIME-Version: ", "Received: ", "Return-Path: ",
+    "Subject: ", "To: ", "X-ASG-Debug-ID: ", "X-Barracuda-URL: ", "X-x: ",
 )
+VALID_HEADER_PREFIXES = ("Microsoft Mail Internet Headers",)
 
 
 class Stop(Exception):
@@ -103,12 +104,14 @@ def first_received(block):
 
 
 def uses_transport_headers(text):
+    """readpst header_match: `Field: `, or `Field:` folded as CRLF TAB, case-insensitive."""
     if not text:
         return False
-    for start in VALID_HEADER_STARTS:
-        if text[: len(start)].lower() == start.lower():
-            return True
-    return False
+    lower = text.lower()
+    starts = [p.lower() for p in VALID_HEADER_PREFIXES]
+    for field in VALID_HEADER_FIELDS:
+        starts += [field.lower(), field[:-1].lower() + "\r\n\t"]
+    return any(lower.startswith(start) for start in starts)
 
 
 def utc(value):
@@ -129,21 +132,25 @@ def readpst_name(name):
 
 
 def folders(folder, path, dirs):
-    """Yield (folder, PST path, readpst directory path) in readpst's order."""
-    taken = set()
+    """Yield (folder, PST path, readpst directory path), the folder itself first.
+
+    readpst gives a repeated sibling name a numeric suffix, but only among siblings it
+    creates a directory for, which depends on descriptor children pypff does not show.
+    A repeated name (after readpst's renaming, ignoring case as NTFS does) therefore
+    stops the script instead of being guessed.
+    """
+    yield folder, path, dirs
+    seen = set()
     for i in range(folder.number_of_sub_folders):
         sub = folder.get_sub_folder(i)
         name = sub.name or ""
-        base = readpst_name(name)
-        candidate, n = base, 0
-        while candidate in taken:  # readpst mk_separate_dir appends 1, 2, ... to a taken name
-            n += 1
-            candidate = readpst_name(f"{name}{n}")
-        if candidate in ("", ".", ".."):
+        directory = readpst_name(name)
+        if directory in ("", ".", ".."):
             raise Stop("unsafe_folder_name")
-        taken.add(candidate)
-        yield sub, path + [name], dirs + [candidate]
-        yield from folders(sub, path + [name], dirs + [candidate])
+        if directory.lower() in seen:
+            raise Stop("ambiguous_folder_name", "/".join(path + [name]))
+        seen.add(directory.lower())
+        yield from folders(sub, path + [name], dirs + [directory])
 
 
 def ipm_subtree(pst):
@@ -201,11 +208,14 @@ def plan(args):
             expected_id = normalize_message_id(string_entry(message, PR_INTERNET_MESSAGE_ID))
             if expected_id != normalize_message_id(header_value(block, "Message-ID")):
                 raise Stop("pair_mismatch", f"{label} message-id")
+            checked = expected_id is not None
             transport = message.transport_headers or ""
             if uses_transport_headers(transport):
                 received = first_received(transport)
-                if received is not None and received not in block:
-                    raise Stop("pair_mismatch", f"{label} received")
+                if received is not None:
+                    if received not in block:
+                        raise Stop("pair_mismatch", f"{label} received")
+                    checked = True
                 headers = "transport"
                 when = message.delivery_time or message.client_submit_time
             else:
@@ -219,6 +229,9 @@ def plan(args):
                         raise Stop("pair_mismatch", f"{label} date")
                     if abs((utc(parsed) - utc(message.client_submit_time)).total_seconds()) > 1:
                         raise Stop("pair_mismatch", f"{label} date")
+                    checked = True
+            if not checked:
+                raise Stop("pair_unverified", label)
             if when is None:
                 raise Stop("item_without_time", label)
             items.append({
