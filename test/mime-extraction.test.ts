@@ -475,6 +475,32 @@ describe("bounded MIME extraction in workerd", () => {
     expect(await process(expansion)).toMatchObject({ status: "blocked", code: "decoded_limit" });
   });
 
+  it("extracts an attachment larger than the body bound in a message above 4 MiB", async () => {
+    // Bodies keep their own bound; only attachments may exceed it.
+    const attachment = new Uint8Array(6 * 1024 * 1024);
+    for (let index = 0; index < attachment.length; index++) attachment[index] = index % 251;
+    let encoded = "";
+    for (let index = 0; index < attachment.length; index += 57)
+      encoded += `${btoa(String.fromCharCode(...attachment.subarray(index, index + 57)))}\r\n`;
+    const input = await source(
+      mixed([
+        "Content-Type: text/plain; charset=utf-8\r\n\r\nSynthetic body",
+        `Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="synthetic.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\n${encoded}`,
+      ]),
+    );
+    expect(input.bytes.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+    expect(await process(input)).toEqual({ status: "complete", attachmentCount: 1 });
+    const stored = await row(input.key);
+    const [record] = JSON.parse(stored!.attachments_json!) as AttachmentRecord[];
+    expect(record).toMatchObject({ size: attachment.byteLength });
+    const object = await env.MAIL_ARCHIVE.get(record!.key);
+    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(attachment);
+    const body = await source(
+      `Subject: Synthetic large body\r\n\r\n${"a".repeat(MIME_LIMITS.decodedBodyBytes + 1)}`,
+    );
+    expect(await process(body)).toMatchObject({ status: "blocked", code: "decoded_limit" });
+  });
+
   it("bounds JSON escape expansion before allocating or saving derivatives", async () => {
     const input = await source(
       `Subject: Synthetic JSON expansion\r\n\r\n${"\u0001".repeat(1_500_000)}`,

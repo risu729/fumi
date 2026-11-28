@@ -96,10 +96,12 @@ search-completion measurement.
 The API transports hold a whole message in memory, so they accept originals up to 25
 MiB; the Takeout transport has no size limit (below). Imported mail has no common limit:
 Email Routing's 25 MiB applies only to live capture (owner, 2026-11-23 17:55 UTC). The
-unchanged MIME input limit is 4 MiB. Larger originals remain archived with explicit
-blocked extraction and omitted search coverage; immediate dispatch does not make them
-searchable. Gmail internal date is a provider fact; it is not a claimed SMTP receipt
-date. There is no fabricated SMTP envelope or forwarding success for historical sources.
+MIME input limit is 25 MiB (4 MiB until 2026-11-28; see
+[MIME extraction](mime-extraction.md#limits-and-coverage)). Larger originals remain
+archived with explicit blocked extraction and omitted search coverage; immediate
+dispatch does not make them searchable. Gmail internal date is a provider fact; it is
+not a claimed SMTP receipt date. There is no fabricated SMTP envelope or forwarding
+success for historical sources.
 
 SHA-256 of the trusted namespace and provider message ID produces a deterministic
 UUID-shaped public Fumi identity. Gmail originals use the existing validated
@@ -159,7 +161,7 @@ to thirty seconds can extend that. Up to one hundred label
 IDs of at most 128 characters are accepted without truncation. Unsupported or
 oversized messages retain their pending page and an explicit fixed error code;
 there is no silent exclusion. The independent MIME stage currently blocks originals
-larger than 4 MiB while retaining the archived original and coverage reason.
+larger than 25 MiB while retaining the archived original and coverage reason.
 
 `0008_gmail_import.sql` preserves existing source fields and sparse rowids used by
 metadata-search cursor snapshots, admits Gmail source identities, and adds run, unique
