@@ -3,7 +3,8 @@
 Status: accepted by the owner on 2026-11-28 at 08:59 UTC
 ("はい、まとめる理由を足すべきと思う", "yes, I think the reason to group them should be
 added"), answering the proposal to store every PST item as its own original and add a
-grouping rule so that the copies collapse (option 1 below). Not implemented. Everything
+grouping rule so that the copies collapse (option 1 below). The converter is implemented
+(amendment 2026-11-28); the transport and the grouping rule are not. Everything
 else, including the reasoning under "Why group instead of dropping", was written by an
 agent and is not confirmed by the owner. Amends
 [ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md): one more grouping rule, and
@@ -154,3 +155,17 @@ Agent specification:
   2,614), every item `imported` or listed with a fixed reason.
 - Grouping: with the 2026-11-28 data, 2,636 of the 2,642 duplicates group with their
   existing copy (1,470 by the current rules, 1,166 by the new one).
+
+## Amendment 2026-11-28: converter details (agent)
+
+The converter is implemented ([Outlook PST import](../outlook-pst-import.md)). Two
+points differ from the agent specification above:
+
+- The manifest records no addresses. pypff 20180714 has no recipient API, so the
+  recipients' SMTP addresses of synthesized sent items are not extracted, and the
+  account's own address is not written either; the namespace already identifies the
+  account. readpst's `To` display names stay in the stored bytes.
+- The namespace hashes the account's sign-in address (lower case), the address the
+  owner types when exporting, which is not always the mailbox's primary SMTP address.
+  Every later export of the same mailbox must hash the same address, or it gets a
+  second namespace and its items become separate originals.
