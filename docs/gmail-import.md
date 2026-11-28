@@ -3,8 +3,8 @@
 Status: implemented for synthetic local validation. OAuth provisioning, production
 migration, activation and real-mail import require explicit operator execution. This is
 a historical migration, not Gmail synchronization or archive-gap recovery. The backfill
-was finished from Google Takeout instead for all four accounts on 2026-11-27
-([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
+was done from Google Takeout instead for the four accounts exported so far, by
+2026-11-27 ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
 [production runs](#production-takeout-runs)). That supersedes the connector run, which
 stopped on 2026-11-12 after 4,810 messages (internal dates 2026-08-24T09:21:29Z to
 2026-11-11T16:59:42Z, measured 2026-11-17 14:10 UTC). Ongoing capture of Gmail SENT mail
@@ -532,6 +532,9 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 - The connector run that stopped on 2026-11-12 is superseded by this run: every message
   it stored is in the export and was `verified` or recorded as a `conflict`, so it is
   not resumed.
+- The owner's other Google accounts have not been exported yet; each is imported the
+  same way once its export exists (owner, 2026-11-28 01:29 UTC). The upload token is
+  kept until then.
 
 ## Primary references
 
