@@ -4,8 +4,8 @@ Status: accepted by the owner on 2026-11-28 at 08:59 UTC
 ("はい、まとめる理由を足すべきと思う", "yes, I think the reason to group them should be
 added"), answering the proposal to store every PST item as its own original and add a
 grouping rule so that the copies collapse (option 1 below). The converter, the
-transport and the grouping rule are implemented (amendments 2026-11-28); the readers
-are not. Everything else, including the reasoning under "Why group instead of
+transport, the grouping rule and the readers are implemented (amendments
+2026-11-28). Everything else, including the reasoning under "Why group instead of
 dropping", was written by an agent and is not confirmed by the owner. Amends
 [ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md): one more grouping rule, and
 (agent) a new transport that uses the Takeout bucket.
@@ -112,7 +112,9 @@ Agent specification:
   restored around the rebuild. The `archive_source` filter, catalog, reconciler and
   health learn the kind.
 - Representative order: today every source that is not live capture is ordered by
-  `received_at` (`src/mail-read.ts`, `src/content-search.ts`). A PST delivery time is
+  `received_at` (`src/mail-read.ts`; agent, at implementation: `src/content-search.ts`
+  only orders indexing and keeps the first chunk of a page, so it does not pick a
+  representative). A PST delivery time is
   earlier than the Gmail receipt time, so the order gets an explicit rank: live
   capture, then Gmail copies, then `mailbox_export`.
 - Receipt schema `outlook-pst-v1`: `{runId, objectKey, manifestLine, exportSha256,

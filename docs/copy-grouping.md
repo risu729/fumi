@@ -136,17 +136,21 @@ never affects routing, notifications, forwarding or sending.
 
 ## Reads
 
-`search_emails`, `search_email_ids` and `read_email_thread` collapse in SQL after
-their filters. Of the originals in one group that matched, one representative is
-returned: live capture first, then Gmail copies by earliest provider receipt time,
-then external ID. The earliest Gmail copy stands for the account's own copy, because
-forwarding to another account happens after the first account received it (the ADR
-says "the account's own Gmail"; earliest receipt time is how the code decides it). A
-thread read always keeps the message it was asked for as its group's representative.
-Each result carries `group_id` (null for an original without a complete identity row
-for its current SHA-256 and current `identity_version`, for one whose catalog
-`raw_state` is not `present`, as for current extractions, or whose row is newer than
-the page snapshot) and
+`search_emails`, `search_email_ids` and `read_email_thread` collapse in SQL after their
+filters. Of the originals in one group that matched, one representative is returned:
+live capture first, then Gmail copies by earliest provider receipt time, then
+[mailbox exports](#mailbox-exports) such as PST originals, then external ID. A PST
+original's delivery time is earlier than any Gmail receipt, and its MIME is rebuilt, so
+it is ranked by kind rather than by time. The earliest Gmail copy stands for the
+account's own copy, because forwarding to another account happens after the first
+account received it (the ADR says "the account's own Gmail"; earliest receipt time is
+how the code decides it). A thread read always keeps the message it was asked for as its
+group's representative. `search_mail_content` and `search_mail_semantic` do not pick a
+representative: within a page or call they keep the first match of a group, in index or
+score order, so their `mail_` ID can be another copy than `search_emails` shows. Each
+result carries `group_id` (null for an original without a complete identity row for its
+current SHA-256 and current `identity_version`, for one whose catalog `raw_state` is not
+`present`, as for current extractions, or whose row is newer than the page snapshot) and
 `copies`, the number of the group's originals that matched the same filters.
 `expand_copies: true` returns every original with the same two fields.
 
@@ -177,7 +181,8 @@ to the page size:
 1. A walk reads the next `4 × (max_results + 1)` matching originals after the token's
    position, newest first, through the `archive_sources_search_order` index on
    `(COALESCE(received_at,''), external_id)`, the page order. With `archive_source`
-   `gmail` or `email_routing`, it walks `archive_sources_search_kind_order` on
+   `gmail`, `email_routing` or `mailbox_export`, it walks
+   `archive_sources_search_kind_order` on
    `(source_kind, COALESCE(received_at,''), external_id)` within that kind instead.
    `after:`, `before:` and the token bound where the walk starts and stops in the index.
 2. A collapse runs the same SQL as before over only the walked originals and every

@@ -16,7 +16,7 @@ const page = {
 const archiveSearch = {
   ...page,
   query: v.optional(shortText),
-  archive_source: v.optional(v.picklist(["all", "gmail", "email_routing"])),
+  archive_source: v.optional(v.picklist(["all", "gmail", "email_routing", "mailbox_export"])),
   label_ids: v.optional(
     v.nullable(
       v.pipe(v.array(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/))), v.maxLength(10)),

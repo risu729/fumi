@@ -25,7 +25,7 @@ async function source(
     VALUES(?,?,?,?,?,'2026-11-12T00:00:00.000Z',?,?,?,?,100,?,0,0)`)
     .bind(
       kind,
-      kind === "gmail" ? "synthetic-account" : "ingress-v1",
+      kind === "email_routing" ? "ingress-v1" : "synthetic-account",
       id,
       rawKey,
       `${rawKey}.receipt`,
@@ -449,6 +449,7 @@ describe("bounded read-only archival health evidence", () => {
   it("distinguishes completed import scopes, checkpoints and overlapping durable memberships", async () => {
     const first = await source("gmail-one", "present", null, "valid", "gmail"),
       second = await source("gmail-two", "missing", null, "valid", "gmail");
+    await source("pst-one", "present", null, "valid", "mailbox_export");
     await env.MAIL_CATALOG.prepare(`INSERT INTO gmail_imports(import_id,account_namespace,scope_json,complete,imported_count,pending_json,lease_until)
       VALUES('completed','synthetic-account','{}',1,2,NULL,0),('pending','synthetic-account','{}',0,0,'["synthetic-id"]',?)`)
       .bind(now + 1000)
@@ -472,6 +473,7 @@ describe("bounded read-only archival health evidence", () => {
       original_missing_or_unknown: 1,
     });
     expect(counts(result.sections.catalog)["gmail_sources"]).toBe(2);
+    expect(counts(result.sections.catalog)["mailbox_export_sources"]).toBe(1);
     expect(result.coverage.mailbox_total).toBeNull();
   });
   it("caps rows and makes older out-of-window failures explicit rather than reporting complete", async () => {

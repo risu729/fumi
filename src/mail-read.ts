@@ -17,7 +17,7 @@ export class MailReadError extends Error {
 }
 
 interface MailRow {
-  source_kind: "email_routing" | "gmail";
+  source_kind: "email_routing" | "gmail" | "mailbox_export";
   source_namespace: string;
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
@@ -25,6 +25,10 @@ interface MailRow {
   gmail_label_ids_json: string | null;
   gmail_imported_at: string | null;
   gmail_thread_anchor: string | null;
+  pst_folder_json: string | null;
+  pst_item_kind: string | null;
+  pst_headers: string | null;
+  pst_imported_at: string | null;
   /** The receipt's `forward.reason` of a live capture, such as `gmail_relay`. */
   forward_reason: string | null;
   external_id: string;
@@ -61,22 +65,28 @@ const MAIL_COLUMNS = `s.external_id,s.raw_key,s.received_at,s.raw_size,s.source_
  g.label_ids_json AS gmail_label_ids_json,g.imported_at AS gmail_imported_at,
  (SELECT MIN(t.external_id) FROM gmail_messages gm JOIN archive_sources t ON t.raw_key=gm.raw_key
    WHERE t.source_kind='gmail' AND gm.account_namespace=g.account_namespace AND gm.thread_id=g.thread_id) AS gmail_thread_anchor,
+ p.folder_json AS pst_folder_json,p.item_kind AS pst_item_kind,p.headers AS pst_headers,
+ p.imported_at AS pst_imported_at,
  CASE WHEN s.source_kind='email_routing' AND json_valid(s.receipt_snapshot)
    THEN json_extract(s.receipt_snapshot,'$.forward.reason') END AS forward_reason,
  e.status,e.failure_code,e.metadata_json,e.attachments_json,e.body_json_key,e.body_text_key,
  CASE WHEN ${CURRENT_EXTRACTION_SQL} THEN 1 ELSE 0 END AS extraction_current`;
 const MAIL_JOINS = `LEFT JOIN mail_extractions e ON e.raw_key=s.raw_key AND e.extractor_version='mime-v1'
- LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'`;
+ LEFT JOIN gmail_messages g ON g.raw_key=s.raw_key AND s.source_kind='gmail'
+ LEFT JOIN pst_messages p ON p.raw_key=s.raw_key AND s.source_kind='mailbox_export'`;
 const SELECT_MAIL = `SELECT ${MAIL_COLUMNS} FROM archive_sources s ${MAIL_JOINS}`;
 /**
  * Copies of one message (ADR 0004) collapse after filters to one representative per
  * copy group: live capture first, then Gmail copies by earliest provider receipt time
- * (the account that received it first, before any forwarding hop), then external ID.
+ * (the account that received it first, before any forwarding hop), then mailbox exports
+ * (ADR 0006: rebuilt MIME, whose delivery time is earlier than any Gmail receipt), then
+ * external ID.
  * A thread read prefers the message it was asked for. Rows without a complete identity
  * row for their current, present original (as in CURRENT_EXTRACTION_SQL), or whose row
  * is newer than the snapshot, stand alone.
  * `copies` counts the originals of the group that matched the same filters.
  */
+const SOURCE_RANK = "CASE source_kind WHEN 'email_routing' THEN 0 WHEN 'gmail' THEN 1 ELSE 2 END";
 function collapsedSql(
   where: string,
   order: string,
@@ -89,7 +99,7 @@ function collapsedSql(
    FROM archive_sources s ${MAIL_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
-     ORDER BY ${preferRawKey ? "CASE WHEN raw_key=? THEN 0 ELSE 1 END," : ""}CASE source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
+     ORDER BY ${preferRawKey ? "CASE WHEN raw_key=? THEN 0 ELSE 1 END," : ""}${SOURCE_RANK},COALESCE(received_at,'~'),external_id) AS copy_rank,
    COUNT(*) OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)) AS copies FROM matched)
  SELECT ${MAIL_COLUMNS},r.copy_group_id,r.copies FROM ranked r JOIN archive_sources s ON s.rowid=r.source_row ${MAIL_JOINS}
  WHERE ${expand ? "1" : "r.copy_rank=1"}${after ? ` AND ${after}` : ""} ORDER BY ${order} LIMIT ?`;
@@ -151,10 +161,13 @@ function summary(row: MailRow) {
     id: inboundMessageId(row.external_id),
     thread_id: inboundMessageId(row.gmail_thread_anchor ?? row.external_id),
     received_at: row.received_at,
+    // A PST original keeps its folder in provenance, not as a label (ADR 0006).
     label_ids:
       row.source_kind === "gmail"
         ? (JSON.parse(row.gmail_label_ids_json ?? "[]") as string[])
-        : ["INBOX"],
+        : row.source_kind === "mailbox_export"
+          ? []
+          : ["INBOX"],
     provenance: {
       source_kind: row.source_kind,
       source_namespace: row.source_namespace,
@@ -166,9 +179,20 @@ function summary(row: MailRow) {
             imported_at: row.gmail_imported_at,
             smtp_envelope_available: false,
           }
-        : row.forward_reason === "gmail_relay"
-          ? { via: "gmail_forwarding" }
-          : {}),
+        : row.source_kind === "mailbox_export"
+          ? {
+              // Folder names are the mailbox's own, untrusted and possibly localized.
+              folder: row.pst_folder_json ? (JSON.parse(row.pst_folder_json) as string[]) : null,
+              item_kind: row.pst_item_kind,
+              // "synthesized": the converter built the headers from item properties.
+              headers: row.pst_headers,
+              imported_at: row.pst_imported_at,
+              mime_rebuilt: true,
+              smtp_envelope_available: false,
+            }
+          : row.forward_reason === "gmail_relay"
+            ? { via: "gmail_forwarding" }
+            : {}),
     },
     size_estimate: row.raw_size,
     extraction: { status: row.status ?? "pending", failure_code: row.failure_code },
@@ -446,7 +470,7 @@ export async function readMailResource(
 }
 
 export interface SearchArgs {
-  archive_source?: "all" | "gmail" | "email_routing" | undefined;
+  archive_source?: "all" | "gmail" | "email_routing" | "mailbox_export" | undefined;
   query?: string | undefined;
   max_results?: number | undefined;
   next_page_token?: string | undefined;
@@ -860,7 +884,7 @@ export async function searchMail(
 ) {
   requireRead(principal);
   const source = args.archive_source ?? "all";
-  if (!["all", "gmail", "email_routing"].includes(source))
+  if (!["all", "gmail", "email_routing", "mailbox_export"].includes(source))
     throw new MailReadError("unsupported_archive_source");
   const labels = [...new Set(args.label_ids ?? [])].sort();
   if (labels.length > 10 || labels.some((label) => !/^[A-Za-z0-9_-]{1,128}$/.test(label)))
@@ -1005,7 +1029,7 @@ export async function searchMail(
 }
 
 /**
- * Header links of a live thread. SQLite uses an expression index only for the identical
+ * Header links of a live or mailbox export thread. SQLite uses an expression index only for the identical
  * expression, so these must match migrations/0020_thread_lookup.sql exactly.
  */
 const headerLink = (path: string) =>
@@ -1064,7 +1088,9 @@ export async function readMailThread(
       : (
           await env.MAIL_CATALOG.prepare(
             collapsedSql(
-              `+s.source_kind='email_routing' AND s.raw_key IN (
+              // Live capture, or the PST originals of one mailbox (ADR 0006): header
+              // links stay within the anchor's own source kind and namespace.
+              `+s.source_kind=? AND +s.source_namespace=? AND s.raw_key IN (
     SELECT raw_key FROM archive_sources WHERE external_id=?
     UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_MESSAGE_ID}=?
     UNION ALL SELECT raw_key FROM mail_extractions WHERE extractor_version='mime-v1' AND ${HEADER_IN_REPLY_TO}=?
@@ -1076,6 +1102,8 @@ export async function readMailThread(
           )
             .bind(
               groups,
+              row.source_kind,
+              row.source_namespace,
               row.external_id,
               messageId ?? null,
               messageId ?? null,

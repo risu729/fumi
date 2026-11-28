@@ -14,7 +14,7 @@ const OTHER_SHA = "b".repeat(64);
 
 /** One synthetic original: its catalog, extraction, Gmail and identity rows. */
 interface Original {
-  kind: "email_routing" | "gmail";
+  kind: "email_routing" | "gmail" | "mailbox_export";
   namespace: string;
   id: string;
   receivedAt: string | null;
@@ -113,17 +113,19 @@ function archiveMessages(
     const subject = random.pick(["Invoice", "Meeting", "Report"]);
     for (let copy = 0; copy < copies; copy++) {
       const live = copy === 0 && random.next() < 0.4;
+      // A PST original (ADR 0006): no labels, and ranked after Gmail copies.
+      const exported = !live && random.next() < 0.15;
       const noTime = random.next() < 0.02;
       // Some copies share the representative's time, so ties fall back to the external ID.
       const offset = random.next() < 0.2 ? 0 : Math.round((random.next() - 0.5) * options.spread);
       originals.push({
-        kind: live ? "email_routing" : "gmail",
-        namespace: live ? "ingress-v1" : `account-${copy}`,
+        kind: live ? "email_routing" : exported ? "mailbox_export" : "gmail",
+        namespace: live ? "ingress-v1" : exported ? "outlook-synthetic" : `account-${copy}`,
         id: `00000000-0000-4000-8000-${(serial * 32 + copy).toString(16).padStart(12, "0")}`,
         receivedAt: noTime ? null : iso(time + offset),
         from,
         subject,
-        labels: live ? [] : random.pick(LABEL_SETS),
+        labels: live || exported ? [] : random.pick(LABEL_SETS),
         attachments: random.int(2),
         ...(copies > 1 || random.next() < 0.5
           ? {
@@ -153,7 +155,7 @@ function oldCollapsedSql(where: string, expand: boolean, after: string) {
    FROM archive_sources s ${OLD_JOINS} LEFT JOIN mail_identity i ON i.raw_key=s.raw_key WHERE ${where}),
  ranked AS (SELECT source_row,copy_group_id,
    ROW_NUMBER() OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)
-     ORDER BY CASE source_kind WHEN 'email_routing' THEN 0 ELSE 1 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
+     ORDER BY CASE source_kind WHEN 'email_routing' THEN 0 WHEN 'gmail' THEN 1 ELSE 2 END,COALESCE(received_at,'~'),external_id) AS copy_rank,
    COUNT(*) OVER (PARTITION BY COALESCE(copy_group_id,'raw:'||raw_key)) AS copies FROM matched)
  SELECT s.external_id,s.received_at,r.copy_group_id,r.copies FROM ranked r JOIN archive_sources s ON s.rowid=r.source_row ${OLD_JOINS}
  WHERE ${expand ? "1" : "r.copy_rank=1"}${after ? ` AND ${after}` : ""} ORDER BY COALESCE(s.received_at,'') DESC,s.external_id DESC LIMIT ?`;
@@ -488,7 +490,14 @@ describe("search page cost", () => {
         max_results: 1 + random.int(6),
         expand_copies: random.next() < 0.3,
         ...(random.next() < 0.5
-          ? { archive_source: random.pick(["all", "gmail", "email_routing"] as const) }
+          ? {
+              archive_source: random.pick([
+                "all",
+                "gmail",
+                "email_routing",
+                "mailbox_export",
+              ] as const),
+            }
           : {}),
         ...(random.next() < 0.4
           ? { label_ids: random.pick([["INBOX"], ["Label_1"], ["INBOX", "Label_1"], ["SENT"]]) }
@@ -561,25 +570,28 @@ describe("search page cost", () => {
         return iso(BASE + (coarse ? Math.floor(at / 600_000) * 600_000 : at));
       };
       let serialId = 0;
-      const original = (group: string | undefined, live: boolean, account: string): Original => ({
-        kind: live ? "email_routing" : "gmail",
-        namespace: live ? "ingress-v1" : account,
-        id: `00000000-0000-4000-8000-${(serialId++).toString(16).padStart(12, "0")}`,
-        receivedAt: time(),
-        from: random.pick(SENDERS),
-        subject: random.pick(["Invoice", "Meeting", "Report"]),
-        labels: live ? [] : random.pick(LABEL_SETS),
-        attachments: random.int(2),
-        ...(group
-          ? {
-              group,
-              identity:
-                random.next() < 0.15
-                  ? random.pick(["stale", "blocked", "previous"] as const)
-                  : "complete",
-            }
-          : {}),
-      });
+      const original = (group: string | undefined, live: boolean, account: string): Original => {
+        const exported = !live && random.next() < 0.15;
+        return {
+          kind: live ? "email_routing" : exported ? "mailbox_export" : "gmail",
+          namespace: live ? "ingress-v1" : exported ? "outlook-synthetic" : account,
+          id: `00000000-0000-4000-8000-${(serialId++).toString(16).padStart(12, "0")}`,
+          receivedAt: time(),
+          from: random.pick(SENDERS),
+          subject: random.pick(["Invoice", "Meeting", "Report"]),
+          labels: live || exported ? [] : random.pick(LABEL_SETS),
+          attachments: random.int(2),
+          ...(group
+            ? {
+                group,
+                identity:
+                  random.next() < 0.15
+                    ? random.pick(["stale", "blocked", "previous"] as const)
+                    : "complete",
+              }
+            : {}),
+        };
+      };
       // Up to four groups of up to 300 copies at random times across the archive, so
       // representatives lie anywhere relative to the walked copies, among singletons.
       const originals: Original[] = [];
@@ -613,7 +625,14 @@ describe("search page cost", () => {
           max_results: 1 + random.int(4),
           expand_copies: random.next() < 0.2,
           ...(random.next() < 0.5
-            ? { archive_source: random.pick(["all", "gmail", "email_routing"] as const) }
+            ? {
+                archive_source: random.pick([
+                  "all",
+                  "gmail",
+                  "email_routing",
+                  "mailbox_export",
+                ] as const),
+              }
             : {}),
           ...(random.next() < 0.3
             ? { label_ids: random.pick([["INBOX"], ["Label_1"], ["INBOX", "Label_1"], ["SENT"]]) }
