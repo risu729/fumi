@@ -21,7 +21,7 @@ interface SearchInput {
   mode?: "semantic" | "hybrid" | undefined;
   max_results?: number | undefined;
   filters?: string | undefined;
-  archive_source?: "all" | "gmail" | "email_routing" | undefined;
+  archive_source?: "all" | "gmail" | "email_routing" | "mailbox_export" | undefined;
   label_ids?: string[] | null | undefined;
   expand_copies?: boolean | undefined;
 }
@@ -57,7 +57,7 @@ export async function searchManagedMail(
   const source = args.archive_source ?? "all",
     labels = [...new Set(args.label_ids ?? [])].sort();
   if (
-    !["all", "gmail", "email_routing"].includes(source) ||
+    !["all", "gmail", "email_routing", "mailbox_export"].includes(source) ||
     labels.length > 10 ||
     labels.some((label) => !/^[A-Za-z0-9_-]{1,128}$/.test(label))
   )

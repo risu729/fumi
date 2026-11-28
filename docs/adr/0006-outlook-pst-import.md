@@ -4,8 +4,8 @@ Status: accepted by the owner on 2026-11-28 at 08:59 UTC
 ("はい、まとめる理由を足すべきと思う", "yes, I think the reason to group them should be
 added"), answering the proposal to store every PST item as its own original and add a
 grouping rule so that the copies collapse (option 1 below). The converter, the
-transport and the grouping rule are implemented (amendments 2026-11-28); the readers
-are not. Everything else, including the reasoning under "Why group instead of
+transport, the grouping rule and the readers are implemented (amendments
+2026-11-28). Everything else, including the reasoning under "Why group instead of
 dropping", was written by an agent and is not confirmed by the owner. Amends
 [ADR 0004](0004-gmail-takeout-import-and-copy-grouping.md): one more grouping rule, and
 (agent) a new transport that uses the Takeout bucket.

@@ -292,7 +292,8 @@ export async function getMailHealth(
         COALESCE(SUM(source_kind='email_routing' AND known_receipt=0),0) AS ingress_snapshot_unknown,
         COALESCE(SUM(receipt_state='missing'),0) AS current_receipt_missing,
         COALESCE(SUM(receipt_state='invalid'),0) AS current_receipt_invalid,
-        COALESCE(SUM(source_kind='gmail'),0) AS gmail_sources FROM evidence`,
+        COALESCE(SUM(source_kind='gmail'),0) AS gmail_sources,
+        COALESCE(SUM(source_kind='mailbox_export'),0) AS mailbox_export_sources FROM evidence`,
           [
             "stored",
             "missing",
@@ -306,6 +307,7 @@ export async function getMailHealth(
             "current_receipt_missing",
             "current_receipt_invalid",
             "gmail_sources",
+            "mailbox_export_sources",
           ],
         ),
         section(

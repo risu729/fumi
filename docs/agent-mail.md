@@ -107,9 +107,14 @@ policy, ten approved sources, archive source and two per label). Operators join 
 balanced `AND` tree, so 33 of them nest six levels deep instead of 33 and stay within
 D1's expression depth limit of 100. It searches extracted metadata, not full bodies or
 attachments. Without a source filter it includes live and imported archive sources and
-the caller's own sent mail. `archive_source` can be `all`, `gmail` or `email_routing`;
-giving it searches only those archive sources. Up to ten `label_ids` combine with AND:
-imported messages retain provider label IDs; live ingress has `INBOX` and a `sent_`
+the caller's own sent mail. `archive_source` can be `all`, `gmail`, `email_routing` or
+`mailbox_export`; giving it searches only those archive sources. A `mailbox_export`
+original ([Outlook PST import](outlook-pst-import.md)) has no labels, so `label_ids`,
+`in:inbox` and `in:sent` never select it; its `provenance` carries the mailbox `folder`
+(the PST's own, possibly localized names), `item_kind`, `headers` (`synthesized` when
+the converter built them from item properties) and `mime_rebuilt: true`. Its thread read
+follows header links within the same mailbox export. Up to ten `label_ids` combine with
+AND: imported messages retain provider label IDs; live ingress has `INBOX` and a `sent_`
 record `SENT`. Gmail SENT messages imported through the Gmail API carry `SENT`;
 `in:sent` finds them together with fumi-sent mail. For compatibility, `SENT` in
 `label_ids` without `archive_source` still lists every outgoing operation of the caller
