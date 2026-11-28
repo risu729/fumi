@@ -3,8 +3,8 @@
 Status: implemented for synthetic local validation. OAuth provisioning, production
 migration, activation and real-mail import require explicit operator execution. This is
 a historical migration, not Gmail synchronization or archive-gap recovery. The backfill
-was done from Google Takeout instead for the four accounts exported so far, by
-2026-11-27 ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
+was done from Google Takeout instead for the five accounts exported so far, by
+2026-11-28 ([ADR 0004](adr/0004-gmail-takeout-import-and-copy-grouping.md),
 [production runs](#production-takeout-runs)). That supersedes the connector run, which
 stopped on 2026-11-12 after 4,810 messages (internal dates 2026-08-24T09:21:29Z to
 2026-11-11T16:59:42Z, measured 2026-11-17 14:10 UTC). Ongoing capture of Gmail SENT mail
@@ -479,6 +479,7 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 | risu.minecraft | `takeout-32483026-2026-11-23` | 1,137 (15,440,548 bytes, one object) | 1,137 `imported` | 2022-06-14 18:29:43 .. 2026-11-22 20:41:01 | 2026-11-23 20:21 UTC |
 | larva06online | `takeout-cdd6472a-2026-11-23` | 5,407 (175,910,760 bytes, one object) | 5,407 `imported` | 2023-01-09 12:33:29 .. 2026-11-22 20:54:41 | 2026-11-24 07:18 UTC |
 | main account | `takeout-309a1c7e-2026-11-23` | 40,602 (3,952,532,507 bytes, one object) | 35,792 `imported`, 4,693 `verified`, 117 `conflict` | 2020-06-10 13:15:53 .. 2026-11-22 21:05:40 | 2026-11-27 23:50 UTC |
+| takuanimalsub4 | `takeout-f24e329b-2026-11-28` | 120 (4,049,066 bytes, one object) | 120 `imported` | 2022-07-16 09:36:58 .. 2026-11-28 00:18:35 | 2026-11-28 07:53 UTC |
 
 - momonga (`gmail-d592e62e47726b6d49238fa2`, run started 2026-11-23 14:16 UTC): the
   run is `complete` with no stop code, and `next_offset` equals `total_bytes`. The 379
@@ -532,6 +533,16 @@ namespace is `gmail-` plus the first 24 hex digits of the SHA-256 of the address
 - The connector run that stopped on 2026-11-12 is superseded by this run: every message
   it stored is in the export and was `verified` or recorded as a `conflict`, so it is
   not resumed.
+- takuanimalsub4 (`gmail-f24e329bd2a69ecd490ab0ea`, owner's go 2026-11-28 07:41 UTC):
+  Google disabled the account on 2026-11-28, and the export was made from its
+  disabled-account page. The mbox came from the export in Drive, and the uploaded
+  object's SHA-256 read back from R2 equals it. `GMAIL_TAKEOUT_CONFIG` was replaced at
+  07:43 UTC. The run is `complete` with no stop code, and `next_offset` equals
+  `total_bytes`. The 120 entries have 120 distinct Gmail IDs (4,033,575 raw bytes,
+  largest 121,512); `gmail_messages` holds 120 rows for the namespace (104 threads,
+  imported 07:46:09..07:47:52 UTC) and `gmail_takeout_labels` 120 for the run. All 120
+  have a complete `mime-v1` extraction and a complete processing job. The count agrees
+  with the 120 messages counted in the export before it was uploaded.
 - The owner's other Google accounts have not been exported yet; each is imported the
   same way once its export exists (owner, 2026-11-28 01:29 UTC). The upload token is
   kept until then.

@@ -95,9 +95,11 @@ establish production delivery.
       of 5,407 imported, 2023-01-09..2026-11-22, 2026-11-24); the main account is done
       and verified (40,602 entries: 35,792 imported, 4,693 verified against the
       connector's copies, 117 conflicts kept as stored, 2020-06-10..2026-11-22,
-      2026-11-27), which supersedes the stopped connector run. Left: the owner's other
-      Google accounts, once they are exported (owner, 2026-11-28); then delete the
-      Takeout exports from R2 and the upload token (owner approves the destroy).
+      2026-11-27), which supersedes the stopped connector run; takuanimalsub4 is done
+      and verified (120 of 120 imported, 2022-07-16..2026-11-28, 2026-11-28). Left: the
+      owner's other Google accounts, once they are exported (owner, 2026-11-28); then
+      delete the Takeout exports from R2 and the upload token (owner approves the
+      destroy).
   - [x] Speed up the import before larva06online and the main account
         ([import speed](gmail-import.md#import-speed), owner 2026-11-24 04:59 UTC): run
         the Workflow in APAC, cut the sequential calls per entry, measure on
