@@ -9,7 +9,7 @@ implemented. Both exports were imported in production on 2026-11-28
 show the folder in provenance, accept `archive_source: "mailbox_export"` and rank PST
 originals after Gmail copies ([agent mail](agent-mail.md),
 [copy grouping](copy-grouping.md#reads)), and the
-[grouping rule](copy-grouping.md#mailbox-exports) of the ADR is implemented. The
+[grouping rule](copy-grouping.md#mailbox-copies) of the ADR is implemented. The
 design is [ADR 0006](adr/0006-outlook-pst-import.md).
 
 The converter turns one Outlook `.pst` export into the objects and the manifest of an

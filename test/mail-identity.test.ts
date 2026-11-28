@@ -365,7 +365,7 @@ describe("header-only mail identity", () => {
       "2026-11-07T06:01:20.000Z",
       mime(headers({ messageId: id("a"), hop: "university" })),
     );
-    // Other values, or an unsigned copy that is not an export, stay apart.
+    // Other values, or an unsigned live capture, stay apart.
     const otherDate = await archive(
       "mailbox_export",
       "2026-11-07T06:01:21.000Z",
@@ -376,13 +376,13 @@ describe("header-only mail identity", () => {
       "2026-11-07T06:01:22.000Z",
       mime(headers({ messageId: id("a"), from: "intruder@example.invalid" })),
     );
-    const unsignedGmail = await archive(
-      "gmail",
+    const unsignedLive = await archive(
+      "email_routing",
       "2026-11-07T06:01:23.000Z",
       mime(headers({ messageId: id("b") })),
     );
     const signedB = await archive(
-      "email_routing",
+      "gmail",
       "2026-11-07T06:01:24.000Z",
       mime(headers({ messageId: id("b"), bh: [BH_B] })),
     );
@@ -390,7 +390,7 @@ describe("header-only mail identity", () => {
     expect(await groupOf(signedFirst.key)).toBe(await groupOf(exportLater.key));
     expect(await groupOf(otherDate.key)).not.toBe(await groupOf(exportLater.key));
     expect(await groupOf(otherFrom.key)).not.toBe(await groupOf(exportLater.key));
-    expect(await groupOf(unsignedGmail.key)).not.toBe(await groupOf(signedB.key));
+    expect(await groupOf(unsignedLive.key)).not.toBe(await groupOf(signedB.key));
 
     // The other order: the signed copy is indexed in an earlier run, the export joins it.
     const signedEarly = await archive(
@@ -453,6 +453,144 @@ describe("header-only mail identity", () => {
     expect((await identities()).find((row) => row.raw_key === forged.key)).toMatchObject({
       message_id_conflict: 1,
     });
+  });
+
+  it("groups an unsigned Gmail sent copy with the signed copies its recipients received", async () => {
+    const id = (name: string) => `<${name}@example.invalid>`;
+    // Gmail keeps the sender's copy without the DKIM signature it adds on sending, so the
+    // sender's account holds it unsigned while every recipient's copy is signed.
+    // Indexed in one run, newest first: the sent copy, then the older recipient copy.
+    const received = await archive(
+      "gmail",
+      "2026-11-07T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-a"), bh: [BH_A], hop: "gmail" })),
+      { namespace: "recipient" },
+    );
+    const sent = await archive(
+      "gmail",
+      "2026-11-07T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-a") })),
+      { namespace: "sender" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 2, blocked: 0 });
+    expect(await groupOf(received.key)).toBe(await groupOf(sent.key));
+
+    // The other order: a signed live capture indexed first, the sent copy joins it.
+    const date = "Sun, 08 Nov 2026 06:01:24 +0000";
+    const live = await archive(
+      "email_routing",
+      "2026-11-08T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-b"), bh: [BH_B], date })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const sentLate = await archive(
+      "gmail",
+      "2026-11-08T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-b"), date })),
+      { namespace: "sender" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(sentLate.key)).toBe(await groupOf(live.key));
+    expect(
+      (await searchMail(env, principal, { query: "after:2026-11-08" })).emails.map((mail) => [
+        mail.id,
+        mail.copies,
+      ]),
+    ).toEqual([[live.id, 2]]);
+
+    // An unsigned Gmail copy prefers an unsigned match: an unsigned live capture and its
+    // Gmail copy stay one group even when a signed copy was indexed before both.
+    const third = "Mon, 09 Nov 2026 06:01:24 +0000";
+    const signedFirst = await archive(
+      "gmail",
+      "2026-11-09T06:01:40.000Z",
+      mime(headers({ messageId: id("sent-c"), bh: [BH_C], date: third })),
+      { namespace: "recipient" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const unsignedLive = await archive(
+      "email_routing",
+      "2026-11-09T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-c"), date: third })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const forwarded = await archive(
+      "gmail",
+      "2026-11-09T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-c"), date: third, hop: "gmail" })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(forwarded.key)).toBe(await groupOf(unsignedLive.key));
+    expect(await groupOf(signedFirst.key)).not.toBe(await groupOf(unsignedLive.key));
+
+    // Only the first signed copy joins through the sent copy, as for mailbox exports.
+    const fourth = "Tue, 10 Nov 2026 06:01:24 +0000";
+    const sentFirst = await archive(
+      "gmail",
+      "2026-11-10T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-d"), date: fourth })),
+      { namespace: "sender" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const genuine = await archive(
+      "gmail",
+      "2026-11-10T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-d"), bh: [BH_A], date: fourth })),
+      { namespace: "recipient" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const forged = await archive(
+      "email_routing",
+      "2026-11-10T06:01:40.000Z",
+      mime(headers({ messageId: id("sent-d"), bh: [BH_B], date: fourth })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(genuine.key)).toBe(await groupOf(sentFirst.key));
+    expect(await groupOf(forged.key)).not.toBe(await groupOf(sentFirst.key));
+
+    // A signed copy indexed after an unsigned live capture stays apart: a live capture is
+    // not a mailbox copy.
+    const fifth = "Wed, 11 Nov 2026 06:01:24 +0000";
+    const liveFirst = await archive(
+      "email_routing",
+      "2026-11-11T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-e"), date: fifth })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    const signedAfterLive = await archive(
+      "gmail",
+      "2026-11-11T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-e"), bh: [BH_A], date: fifth })),
+      { namespace: "recipient" },
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 1 });
+    expect(await groupOf(signedAfterLive.key)).not.toBe(await groupOf(liveFirst.key));
+
+    // A full re-backfill indexes newest first, so a forged signed live capture can come
+    // before the genuine copy. With two signed groups of the Message-ID, the sent copy
+    // joins neither.
+    const sixth = "Thu, 12 Nov 2026 06:01:24 +0000";
+    const sentOld = await archive(
+      "gmail",
+      "2026-11-12T06:01:20.000Z",
+      mime(headers({ messageId: id("sent-f"), date: sixth })),
+      { namespace: "sender" },
+    );
+    const genuineOld = await archive(
+      "gmail",
+      "2026-11-12T06:01:30.000Z",
+      mime(headers({ messageId: id("sent-f"), bh: [BH_A], date: sixth })),
+      { namespace: "recipient" },
+    );
+    const forgedNew = await archive(
+      "email_routing",
+      "2026-11-12T06:01:40.000Z",
+      mime(headers({ messageId: id("sent-f"), bh: [BH_B], date: sixth })),
+    );
+    expect(await repairMailIdentity(env)).toMatchObject({ indexed: 3 });
+    expect(await groupOf(sentOld.key)).not.toBe(await groupOf(forgedNew.key));
+    expect(await groupOf(sentOld.key)).not.toBe(await groupOf(genuineOld.key));
+    expect(await groupOf(genuineOld.key)).not.toBe(await groupOf(forgedNew.key));
   });
 
   it("records originals it cannot read as blocked and never rewrites a row", async () => {
